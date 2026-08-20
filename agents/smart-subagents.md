@@ -53,7 +53,9 @@ USAGE="$SSA_ROOT/scripts/ai-cli-usage.py"
 ```bash
 # Preferred: one call mints the task dir, runs usage, creates the worktree,
 # and picks the worker. Prints JSON with task_id, dir, worker, reason.
-bash "$SSA" init --repo <abs-path> --size <tiny|small|medium|large>
+bash "$SSA" init --repo <abs-path> \
+  --size <tiny|small|medium|large> \
+  --difficulty <trivial|routine|hard|frontier>
 
 # Manual equivalent:
 TASK_ID=$(date +%s)-$$
@@ -74,7 +76,23 @@ Artifacts under `$DIR/`: `brief.md`, `usage.json`, `pick.json`, `stdout.log`,
 | `medium` | multi-file feature, new tests, moderate refactor |
 | `large` | port, wide refactor, many files, full review surface |
 
-If the parent named a size, use it. Else infer from the brief.
+**Task difficulty** (drives worker reasoning effort and the quota floor). Size
+and difficulty are independent axes and conflating them is the classic mistake:
+size is *how much surface* the task touches, difficulty is *how much thinking*
+it needs. A 15-line lock-free ring buffer is `small` + `hard`. A 40-file
+mechanical rename is `large` + `trivial`.
+
+| Difficulty | Signals | Effect |
+|------------|---------|--------|
+| `trivial` | mechanical, no judgment: renames, format conversions, generated-file refresh, moving code without changing it | lowest effort, 0.6x quota floor |
+| `routine` | standard coding against an existing pattern in the repo; the design is already decided | medium effort, 1.0x floor |
+| `hard` | novel design, concurrency, tricky invariants, subtle debugging, perf work, anything you cannot state the fix for up front | high effort, 1.4x floor |
+| `frontier` | genuinely unsolved or high blast radius: security-sensitive paths, data migrations, algorithms with no reference implementation | max effort, 1.8x floor, cross-review REQUIRED |
+
+If the parent named a size or difficulty, use it. Else infer both from the
+brief, and say in the report which you inferred. When torn between two rungs,
+pick the lower one: an under-powered run fails loudly and cheaply, an
+over-powered one silently burns quota you will want later.
 
 **Fast path:** `tiny` pure-analysis with no writes → skip worktree; dispatch
 read-only into the repo (or a throwaway clone only if the worker must write
@@ -93,6 +111,8 @@ Read:
 
 - `recommendation.primary_worker`, `fallback_workers`, `ranked[]`
 - `recommendation.local_labor_ok` (if false: supervision only)
+- `recommendation.worker_args` — the exact effort/model flags for each CLI
+- `recommendation.cross_review_required`
 - per-CLI `eligible`, `skip_reason`, `score`
 
 **Pick algorithm:**
@@ -102,6 +122,11 @@ Read:
 3. If parent named a preferred CLI and it is eligible + fit → honor it.
 4. If none eligible → stop, report usage path. Do not implement.
 5. Write choice to `$DIR/worker.txt` and a one-line reason to `$DIR/pick.json`.
+
+`init` also writes `$DIR/worker-args.txt` (the difficulty-derived effort flags
+for the chosen CLI) and `dispatch` applies them. **Never hand-pick `-m` or a
+reasoning-effort flag yourself** — that mapping lives in one place so it stays
+consistent. Change the difficulty and re-run `pick` instead.
 
 Capability fit (filter, not a fixed default):
 
@@ -245,11 +270,17 @@ Resume **only** by id:
 process group, keep partials, report. Do not re-read entire multi-MB logs into
 context: `tail` + `rg` only.
 
-**Model picks inside a CLI** (only when size/fit warrants):
+**Effort and model inside a CLI** are derived from difficulty, not chosen by
+hand. `dispatch` reads `$DIR/worker-args.txt`, which the recommender produced:
 
-- kimi `tiny|small` → prefer `-m kimi-for-coding-highspeed` (`dispatch` does
-  this automatically from `size.txt`)
-- otherwise default models (latest). Never pass `-m` because of fashion.
+- codex → `-c model_reasoning_effort=<low|medium|high>`
+- grok → `--reasoning-effort <low|medium|high|xhigh>`
+- kimi → no effort flag exists, so `-m kimi-for-coding-highspeed` for cheap
+  work and the default model otherwise
+
+Never pass `-m` or an effort flag because of fashion. If the run needs more
+thinking, that is a difficulty reclassification, and it must be justified in
+the report.
 
 ---
 
@@ -302,9 +333,60 @@ scope; keep passing checks passing."
 **Your edits:** at most **20 lines / 2 files**, mechanical only (no control-flow,
 public API, or test-assertion changes). Re-verify after. Larger → back to CLI.
 
-**Cross-review** (risky / high blast radius only): other eligible CLI, **read-only**,
+**Cross-review** (mandatory when `cross_review_required` is true, i.e. `frontier`
+difficulty; otherwise risky / high blast radius only): other eligible CLI, **read-only**,
 given acceptance criteria + final diff only (not the narrative). Fold real
 findings into one more iteration. Skip when only one worker has quota.
+
+---
+
+## Phase P — planning panel (default for any non-trivial plan)
+
+When the parent wants a **plan** rather than an implementation, do not write one
+yourself and do not ask a single worker for one. Fan out, then reconcile.
+
+```bash
+bash "$SSA" plan --repo <abs-path> --n 3 --difficulty hard \
+  --goal-file "$DIR/goal.md"
+```
+
+This mints a planning dir, runs quota preflight, creates **one shared detached
+worktree** that every planner reads and none of them writes, and dispatches N
+planners in parallel. Each gets a different lens:
+
+| Lens | Asks |
+|------|------|
+| `pragmatic` | smallest correct change that ships; what in the goal is scope creep |
+| `risk` | what breaks, what has no coverage, what is hard to roll back |
+| `architecture` | what is load-bearing, which refactor pays for itself, what NOT to touch now |
+| `constraints` | what the repo already decided; conventions and invariants to plan within |
+
+Planners round-robin across whichever CLIs have quota, so a day when only one
+CLI is eligible still yields N independent plans instead of zero. The command
+returns JSON listing every plan file.
+
+**Your job is the consolidation, and it is the whole point.** Read every plan in
+full. Then:
+
+1. **Find the real disagreements.** Where two planners propose different
+   sequencing, different blast radius, or contradict each other on what exists,
+   that is signal. Resolve it by reading the code yourself, not by averaging.
+2. **Verify the claims.** Planners cite `file:line`. Spot-check the load-bearing
+   ones. A confident citation of a file that does not exist invalidates the plan
+   that rests on it.
+3. **Take the best of each, not the longest.** The pragmatic plan usually has
+   the right first step; the risk plan usually has the right ordering; the
+   architecture plan usually names the thing to leave alone.
+4. **Emit ONE plan** with numbered steps, files touched, verification per step,
+   and an explicit risk list. Name any question you could not resolve, and say
+   which planner raised it.
+
+Never hand the parent three plans and ask it to choose. Never concatenate them.
+A consolidated plan that silently drops a risk one planner raised is a failure,
+so carry every unresolved risk forward even when you disagree with it.
+
+If a planner returned empty (`"empty": true` in the JSON), say so in the report
+rather than pretending the panel was N-wide.
 
 ---
 
@@ -316,6 +398,7 @@ Final message to parent:
 ## Status: verified-pass | partial | blocked
 
 - Worker: <cli>  session: <id>  reason: <quota score + fit>
+- Class: size=<size> difficulty=<difficulty> effort=<flags>  (inferred? yes/no)
 - Usage: $DIR/usage.json  (skipped: …)  handoff: yes/no
 - Tree: $WT  branch: ssa/<id>  BASE→HEAD: <sha>…→…
 - Diff: N files, +X/−Y (from BASE)
@@ -324,6 +407,7 @@ Final message to parent:
 - Deviations: none | …
 - Integration: merge/cherry-pick recipe OR exact decision needed
 - Artifacts: $DIR/
+- Panel (planning runs only): N planners, lenses used, any that came back empty
 - Resume (if partial): <exact command with session id>
 ```
 
@@ -350,3 +434,6 @@ single missing artifact. One blocker question worth of content, not a quiz.
 - Flat "try 5 times" loops
 - Re-reading 50k-line logs into the supervisor context
 - Switching CLI mid-task without a rate-limit/auth reason
+- Hand-passing `-m` / effort flags instead of setting difficulty
+- Calling a 40-file mechanical rename `hard` because it is large, or a subtle
+  concurrency bug `trivial` because it is one file

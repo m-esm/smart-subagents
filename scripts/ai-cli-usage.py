@@ -751,16 +751,84 @@ FIT = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Difficulty: how *hard* the task is, which is not how *big* it is.
+#
+# Size answers "how many files does this touch" and gates how much quota
+# headroom a worker needs. Difficulty answers "how much thinking does this
+# need" and gates how expensively each worker runs. A 15-line lock-free ring
+# buffer is small and hard; a 40-file mechanical rename is large and trivial.
+# ---------------------------------------------------------------------------
+
+# difficulty -> (target reasoning effort, quota-floor multiplier, cross-review)
+DIFFICULTY: dict[str, tuple[str, float, bool]] = {
+    "trivial": ("low", 0.6, False),
+    "routine": ("medium", 1.0, False),
+    "hard": ("high", 1.4, False),
+    "frontier": ("xhigh", 1.8, True),
+}
+
+# Effort rungs each CLI actually accepts, weakest first. Kept per-CLI rather
+# than assumed uniform: grok enumerates xhigh, codex does not document it on
+# every version, and kimi has no effort flag at all. A target above a CLI's
+# ceiling clamps to its top rung.
+EFFORT_LADDER: dict[str, list[str]] = {
+    "codex": ["low", "medium", "high"],
+    "grok": ["low", "medium", "high", "xhigh"],
+    "kimi": [],
+}
+
+
+def _clamp_effort(cli: str, target: str) -> str:
+    ladder = EFFORT_LADDER.get(cli) or []
+    if not ladder:
+        return ""
+    order = ["low", "medium", "high", "xhigh"]
+    want = order.index(target) if target in order else 1
+    best = ladder[0]
+    for rung in ladder:
+        if rung in order and order.index(rung) <= want:
+            best = rung
+    return best
+
+
+def worker_args(cli: str, difficulty: str, task_size: str) -> list[str]:
+    """CLI flags that realize `difficulty` for this worker.
+
+    Single source of truth for effort/model selection: the shell dispatcher
+    consumes this verbatim instead of reimplementing the mapping.
+    """
+    effort, _, _ = DIFFICULTY.get(difficulty) or DIFFICULTY["routine"]
+    rung = _clamp_effort(cli, effort)
+    if cli == "codex":
+        return ["-c", f"model_reasoning_effort={rung}"] if rung else []
+    if cli == "grok":
+        return ["--reasoning-effort", rung] if rung else []
+    if cli == "kimi":
+        # No effort flag; the only lever is a faster model alias.
+        cheap = difficulty == "trivial" or (
+            task_size in ("tiny", "small") and difficulty in ("trivial", "routine")
+        )
+        return ["-m", "kimi-for-coding-highspeed"] if cheap else []
+    return []
+
+
 def recommend(
     statuses: list[CliStatus],
     task_size: str = "medium",
     task_kind: str = "default",
     prefer: str = "",
+    difficulty: str = "routine",
 ) -> dict[str, Any]:
     """Rank external worker CLIs for labor. Claude is supervisor, not a worker pick."""
     by = {s.cli: s for s in statuses}
     fit = FIT.get(task_kind) or FIT["default"]
-    min_score = {"tiny": 5, "small": 15, "medium": 25, "large": 40}.get(task_size, 25)
+    if difficulty not in DIFFICULTY:
+        difficulty = "routine"
+    effort, floor_mult, cross_review = DIFFICULTY[difficulty]
+    # Harder work needs more headroom: retries are likelier and cost more per turn.
+    base_floor = {"tiny": 5, "small": 15, "medium": 25, "large": 40}.get(task_size, 25)
+    min_score = min(90.0, base_floor * floor_mult)
 
     candidates: list[tuple[float, CliStatus]] = []
     for name in WORKER_CLIS:
@@ -812,7 +880,9 @@ def recommend(
     if primary:
         top = next(s for s in ranked_statuses if s.cli == primary)
         reasons.append(
-            f"primary={primary} (headroom={top.score:.0f}, kind={task_kind}, size={task_size})"
+            f"primary={primary} (headroom={top.score:.0f}, kind={task_kind}, "
+            f"size={task_size}, difficulty={difficulty}, "
+            f"effort={_clamp_effort(primary, effort) or 'n/a'}, floor={min_score:.0f})"
         )
     else:
         reasons.append("no eligible external worker — all exhausted or unavailable")
@@ -831,6 +901,13 @@ def recommend(
         "local_labor_ok": local_labor,
         "task_size": task_size,
         "task_kind": task_kind,
+        "difficulty": difficulty,
+        "target_effort": effort,
+        "min_score": round(min_score, 1),
+        "cross_review_required": cross_review,
+        "worker_args": {
+            c: worker_args(c, difficulty, task_size) for c in WORKER_CLIS
+        },
         "prefer": prefer or None,
         "reasons": reasons,
         "ranked": [
@@ -951,6 +1028,16 @@ def print_human(
     print(f"  primary_worker : {rec.get('primary_worker') or '(none)'}")
     print(f"  fallbacks      : {', '.join(rec.get('fallback_workers') or []) or '(none)'}")
     print(f"  local_labor_ok : {rec.get('local_labor_ok')}")
+    prim = rec.get("primary_worker")
+    if prim:
+        wargs = (rec.get("worker_args") or {}).get(prim) or []
+        print(
+            f"  difficulty     : {rec.get('difficulty')} "
+            f"(effort={rec.get('target_effort')}, floor={rec.get('min_score')})"
+        )
+        print(f"  worker_args    : {' '.join(wargs) or '(CLI defaults)'}")
+    if rec.get("cross_review_required"):
+        print("  cross_review   : REQUIRED (frontier difficulty)")
     for r in rec.get("reasons") or []:
         print(f"  - {r}")
 
@@ -976,6 +1063,15 @@ def main() -> int:
         choices=list(FIT.keys()),
         default="default",
         help="capability prior: impl|review|debug|best_of_n|analysis|default",
+    )
+    ap.add_argument(
+        "--difficulty",
+        choices=list(DIFFICULTY.keys()),
+        default="routine",
+        help=(
+            "how hard the task is, independent of size: trivial|routine|hard|"
+            "frontier. Sets worker reasoning effort and the quota floor."
+        ),
     )
     ap.add_argument(
         "--prefer",
@@ -1048,6 +1144,7 @@ def main() -> int:
         task_size=args.task_size,
         task_kind=args.task_kind,
         prefer=(args.prefer or "").lower(),
+        difficulty=args.difficulty,
     )
     rec["from_cache"] = from_cache
 
