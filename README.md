@@ -48,7 +48,7 @@ AI CLI usage  (2026-08-20 22:43 EEST)
 
 RECOMMENDATION
   primary_worker : grok
-  local_labor_ok : true
+  local_labor_ok : True
   difficulty     : hard (effort=high, floor=56.0)
   worker_args    : --reasoning-effort high
 ```
