@@ -1,0 +1,15 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "smart-subagents",
+  "description": "Quota-aware subagent routing for Claude Code",
+  "owner": { "name": "m-esm" },
+  "plugins": [
+    {
+      "name": "smart-subagents",
+      "description": "Routes coding labor to whichever AI CLI (codex, grok, kimi) has live quota headroom and the right capability fit, runs it in an isolated git worktree, and verifies the diff before reporting.",
+      "author": { "name": "m-esm" },
+      "category": "development",
+      "source": "./"
+    }
+  ]
+}

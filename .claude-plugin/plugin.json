@@ -1,0 +1,11 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "smart-subagents",
+  "version": "0.1.0",
+  "description": "Routes coding labor to whichever AI CLI (codex, grok, kimi) has live quota headroom and the right capability fit, runs it in an isolated git worktree, and verifies the diff before reporting.",
+  "author": { "name": "m-esm" },
+  "homepage": "https://github.com/m-esm/smart-subagents",
+  "repository": "https://github.com/m-esm/smart-subagents",
+  "license": "MIT",
+  "keywords": ["subagents", "delegation", "quota", "codex", "grok", "kimi", "worktree"]
+}
