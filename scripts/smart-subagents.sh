@@ -117,8 +117,10 @@ _read1() {
 _mtime() {
   # BSD stat and GNU stat disagree; try both, print 0 when neither works.
   local f="$1" v=""
-  v="$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || true)"
-  [[ -n "$v" ]] || v=0
+  # GNU first: BSD stat has no -c and fails cleanly, while GNU stat -f exits 0
+  # with filesystem text that would poison the arithmetic below.
+  v="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || true)"
+  [[ "$v" =~ ^[0-9]+$ ]] || v=0
   printf '%s' "$v"
 }
 
@@ -1372,7 +1374,7 @@ cmd_doctor() {
   cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/smart-subagents"
   cache_file="$cache_dir/ai-cli-usage.json"
   if [[ -d "$cache_dir" ]]; then
-    perms="$(stat -f '%OLp' "$cache_dir" 2>/dev/null \
+    perms="$(stat -c '%a' "$cache_dir" 2>/dev/null \
       || stat -c '%a' "$cache_dir" 2>/dev/null || echo '?')"
     if [[ "$perms" == "700" ]]; then
       _doc_row ok cache:perms "$cache_dir is 0700"
