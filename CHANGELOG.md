@@ -6,6 +6,10 @@ The redesign, in five phases. 0.1.0 advertised guarantees it did not implement,
 routed on percent-left, forgot everything between dispatches, and kept one copy
 of each worker's knowledge per code path.
 
+Docs restructured to match: the README is now an overview with one diagram, and
+the routing math and the architecture map moved to `docs/ROUTING.md` and
+`docs/ARCHITECTURE.md`.
+
 ### Phase 0: implement the advertised guarantees
 
 - `scan-secrets`: credential regexes plus Shannon entropy over added lines,

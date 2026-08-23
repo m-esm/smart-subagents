@@ -16,7 +16,6 @@ its argv instead of doing anything.
 """
 
 import json
-import os
 import subprocess
 import sys
 import unittest

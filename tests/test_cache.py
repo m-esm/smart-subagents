@@ -12,7 +12,6 @@ exercise the live credential probes this suite must not touch).
 """
 
 import json
-import os
 import stat
 import sys
 import tempfile

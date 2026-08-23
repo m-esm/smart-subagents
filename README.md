@@ -8,8 +8,8 @@ Quota-aware subagent routing for [Claude Code](https://claude.com/claude-code). 
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-black.svg)](LICENSE)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-6544e9.svg)](https://docs.claude.com/en/docs/claude-code/plugins)
-[![Workers](https://img.shields.io/badge/workers-codex%20%7C%20grok%20%7C%20kimi-1f6feb.svg)](#requirements)
-[![Shell + Python](https://img.shields.io/badge/deps-bash%20%2B%20python3-success.svg)](#requirements)
+[![Workers](https://img.shields.io/badge/workers-codex%20%7C%20grok%20%7C%20kimi-1f6feb.svg)](#prerequisites)
+[![Shell + Python](https://img.shields.io/badge/deps-bash%20%2B%20python3-success.svg)](#prerequisites)
 
 </div>
 
@@ -17,17 +17,20 @@ Quota-aware subagent routing for [Claude Code](https://claude.com/claude-code). 
 
 ## The problem
 
-You pay for several AI coding CLIs. Each has its own rate limit, and none of them
-can see the others. Claude Code can't see any of them.
+You pay for several AI coding CLIs. Each has its own rate limit, and none of them can see the
+others. Claude Code can't see any of them.
 
-So you spend your most expensive tokens on a forty-file rename, hit a wall at
-4pm, and only then remember you have a Grok subscription sitting at 100%
-untouched. Meanwhile the actually-hard concurrency bug gets whatever quota
-happens to be left.
+So you spend your most expensive tokens on a forty-file rename, hit a wall at 4pm, and only then
+remember you have a Grok subscription sitting at 100% untouched. Meanwhile the actually-hard
+concurrency bug gets whatever quota happens to be left.
 
 That's backwards on both axes: the wrong worker, and the wrong amount of thinking.
 
 ## What this does
+
+It scores every CLI you're logged into against its live rate-limit windows, turning raw usage into
+what you can actually spend now. Then it ranks the eligible ones and says who takes the task and how
+hard they should think.
 
 ```console
 $ ai-cli-usage.py --task-size large --difficulty hard
@@ -61,37 +64,15 @@ RECOMMENDATION
   - codex: Codex rate limit exhausted
 ```
 
-Then it runs the job on grok at high reasoning effort, in a throwaway worktree,
-and checks the result itself.
-
-```mermaid
-flowchart LR
-    A[Task brief] --> B{Quota preflight}
-    B -->|live usage API<br/>per CLI| C[Filter: eligible,<br/>no cooldown,<br/>over the floor]
-    C --> R{Rank}
-    R -->|hard: by fit| D[Isolated worktree<br/>ssa/&lt;id&gt;]
-    R -->|routine: by<br/>effective headroom| D
-    D --> E[Dispatch<br/>effort set by difficulty]
-    E --> F{Verify}
-    F -->|diff in scope?<br/>tests pass?<br/>no secrets?| G[Report]
-    F -->|new failures| E
-    B -->|all exhausted| H[blocked, with evidence]
-```
+It then runs the job on grok at high effort in a throwaway worktree and checks the result itself.
+What that check is, and what it refuses, is in [Guarantees](#guarantees).
 
 ## Two axes, not one
 
-Most routing conflates "big" with "hard". They're independent, and treating them
-as one is why easy work gets expensive models and subtle work gets rushed.
-
-|  | **Size** = how much surface it touches | **Difficulty** = how much thinking it needs |
-|---|---|---|
-| **Controls** | how much quota headroom a worker must have | which reasoning effort the worker runs at |
-| **Levels** | `tiny` `small` `medium` `large` | `trivial` `routine` `hard` `frontier` |
-| **Example A** | a 15-line lock-free ring buffer is `small` | ...and `hard` |
-| **Example B** | a 40-file mechanical rename is `large` | ...and `trivial` |
-
-Difficulty asks for a reasoning effort, and each worker's registry entry decides
-what that means for it:
+Most routing conflates "big" with "hard". **Size** is how much surface a task touches (`tiny`
+`small` `medium` `large`) and gates the quota headroom a worker must have. **Difficulty** is how
+much thinking it needs (`trivial` `routine` `hard` `frontier`) and gates its reasoning effort. A
+15-line lock-free ring buffer is `small` and `hard`; a 40-file rename is `large` and `trivial`.
 
 | Difficulty | Asks for | Quota floor | Cross-review |
 |---|---|---|---|
@@ -100,170 +81,80 @@ what that means for it:
 | `hard` | `high` | 1.4x | no |
 | `frontier` | `xhigh` | 1.8x | **required** |
 
-The rung is clamped to the worker's own ladder, and a worker with no effort flag
-falls back to whatever lever it does have. Today that means codex clamps
-`xhigh` down to `high` because its ladder stops there, grok takes `xhigh`
-verbatim, and kimi (which has no effort flag at all) switches to a faster model
-alias for cheap work instead. All three of those facts live in
-[`scripts/workers.json`](scripts/workers.json), not in the router:
+The rung clamps to each worker's own ladder: codex clamps `xhigh` to `high`, grok takes it verbatim,
+kimi has no effort flag and switches to a faster model alias. Those facts live in
+[`scripts/workers.json`](scripts/workers.json), not the router.
 
-```console
-$ python3 scripts/ssa/cli.py build-command --worker kimi --mode implement \
-    --worktree "$WT" --brief "$DIR/brief.md" --model kimi-for-coding-highspeed
-{"argv": ["-p", "Read the file ...", "--output-format", "stream-json",
-          "-m", "kimi-for-coding-highspeed"], "cwd": "...", "env_scrub": true, ...}
+## Routing
+
+**Effective headroom, not percent left.** A short window's spent quota is discounted by how near its
+reset is: 90% used with 24 minutes to go ranks 91, with four hours to go ranks 10. Long windows
+price against pace. Pace ranks, raw remaining admits: the floor reads an `admission_score` that
+never credits a window for being spent slowly, so a weekly at 93% used ranks 51 and admits 7.
+
+**Filter, then rank.** Eligibility and the floor cut the field first, at every size. Difficulty then
+picks the ranking objective: `hard` and `frontier` rank by capability fit (a cheap worker that fails
+costs more than the quota it saved), `trivial` and `routine` by headroom (that quota is about to
+evaporate), each the other's tie-break. Below the floor, cheap work relaxes it; hard work gets no
+primary at all.
+
+**Cooldowns are cross-task.** A failed dispatch has its log tail classified conservatively as a rate
+limit, an auth failure, or nothing. On a match that worker is benched for every task: 15 minutes for
+a rate limit, 24 hours for auth.
+
+**Fit is measured, then promoted.** The registry's `fit` numbers are cold-start priors; each outcome
+you record feeds an age-decayed empirical-Bayes posterior per (worker, kind) cell, advisory until
+that cell has 10 effective observations and clamped to `[0.85, 1.15]`. Usage snapshots also forecast
+early exhaustion, which is advisory too.
+
+```mermaid
+flowchart TD
+    U[Live usage per CLI] --> EFF[effective_score<br/>ranking headroom]
+    U --> ADM[admission_score<br/>floor capacity]
+    CD[Cooldown bench<br/>rate limit or auth] --> ELIG{Eligible}
+    ELIG -->|no| OUT[Excluded]
+    ELIG -->|yes| FLOOR{admission over floor}
+    ADM --> FLOOR
+    FLOOR -->|yes| SURV[Survivor]
+    FLOOR -->|below floor, easy work| RELAX[Relax floor,<br/>keep best available]
+    FLOOR -->|below floor, hard work| BLOCK[No primary,<br/>refuse to dispatch]
+    SURV --> RANK{Rank basis by difficulty}
+    RELAX --> RANK
+    EFF --> RANK
+    PRIOR[workers.json fit prior] --> POST[Ledger posterior<br/>once samples suffice]
+    POST --> RANK
+    RANK -->|hard, frontier| BYFIT[Sort by fit,<br/>tie break effective]
+    RANK -->|trivial, routine| BYEFF[Sort by effective,<br/>tie break fit]
+    BYFIT --> PICK[primary and fallbacks]
+    BYEFF --> PICK
 ```
 
-Harder work gets a higher quota floor on purpose: retries are likelier and each
-turn costs more. For `hard` and `frontier`, if no worker meets the floor, the
-router returns no primary worker and does not dispatch on fumes. `trivial` and
-`routine` keep the best eligible worker as a fallback when all are below it.
+Formulas, thresholds and the ledger loop: [docs/ROUTING.md](docs/ROUTING.md).
 
-## What the router actually optimizes
+### Planning is a panel, not a guess
 
-Subscription quota costs nothing at the margin and is worth nothing at reset.
-Hoarding it is not a strategy. The two things that are genuinely scarce are
-quality on hard work, and the best worker's headroom when the next hard task
-arrives. Routing is built around those, not around "percent left".
-
-### Effective headroom, not percent left
-
-Raw `used_pct` still drives every severity label and every exhaustion gate.
-Ranking uses a corrected number instead:
-
-| Window | Correction | Why |
-|---|---|---|
-| Short (period ≤ 6h) | `100 - used * min(1, resets_in_hours / 4)` | Quota that comes back in minutes is nearly free |
-| Long (weekly, monthly) | `100 - max(0, used - pace)`, where `pace = 100 * elapsed / period` | Only being **ahead** of pace is a cost; being behind is not a bonus |
-| Period unknown | raw `remaining_pct`, marked `forecast_basis: "raw"` | Never invent a period the provider did not report |
-
-A 5h window at 90% that resets in 24 minutes scores **91**, not 10. That is the
-correct answer: you are about to get all of it back, so spending the rest of it
-now is close to free. The same 90% with four hours still to run scores 10.
-
-Each CLI's `effective_score` is the worst of its binding windows, and every
-window carries its own `effective` in `--json` and an `eff=` on the human line.
-The reset horizon is tunable with `SSA_SHORT_HORIZON_HOURS`.
-
-Pace ranks; it does not admit. Being behind pace on a weekly window means you
-spent it slowly, not that there is more of it, so the quota floor reads
-`admission_score` instead: raw remaining on long windows, and the discounted
-value only on a short window whose reset is close enough to refill it before the
-run can spend what is left. A weekly window at 93% used ranks like a 51 and
-admits like a 7, which is what it is.
-
-### Filter, then rank
-
-The quota floor is a filter at **every** size, checked against `admission_score`.
-Ranking is a separate step on `effective_score`, and what it ranks by depends on
-difficulty:
-
-| Difficulty | Ranks by | Tie-break | Reason |
-|---|---|---|---|
-| `hard`, `frontier` | capability fit | effective headroom | A cheap worker that fails costs more than the quota it saved |
-| `trivial`, `routine` | effective headroom | fit | Spend the quota that is about to evaporate |
-
-There is no headroom-times-fit product any more. A product lets a large headroom
-number drown a real capability gap on exactly the tasks where the gap matters. A
-CLI named with `--prefer` wins outright when it survives the filter, with no
-thumb on the scale.
-
-### Cooldowns are cross-task
-
-A 429 is not one task's problem. When a dispatch fails, the tail of the worker
-log is classified conservatively: rate limit, auth failure, or nothing. On a
-match the worker is benched for every task until the cooldown expires, 15
-minutes for a rate limit and 24 hours for auth, never open-ended.
+Ask for a plan and you get one opinion with unknown blind spots. `plan` fans the goal out to N
+planners with different lenses (`pragmatic` for the smallest correct change, `risk` for what breaks,
+`architecture` for what is load-bearing, `constraints` for what the repo already decided), then has
+a supervisor reconcile them. The disagreements are the value.
 
 ```bash
-smart-subagents.sh cooldown --cli codex --reason rate-limit   # manual bench
-smart-subagents.sh cooldown --cli codex --clear               # lift it early
+smart-subagents.sh plan --repo ~/code/api --n 3 --difficulty hard --goal-file goal.md
 ```
 
-The state lives in `$XDG_STATE_HOME/smart-subagents/cooldowns.json`, so a
-cooldown one task discovered is honored by the next one. Benched workers show
-up in the human table and in `recommendation.reasons`.
-
-### Fit is measured, then promoted
-
-`FIT` is a cold-start prior now, not the final word. Every recorded outcome
-updates a posterior per (worker, kind) cell: empirical Bayes with 8
-pseudo-observations behind the prior, a 30-day half-life on old evidence, and
-shrinkage toward the worker's own cross-kind average while a cell is thin.
-Rewards come from the ledger, 1.0 for a verified pass in at most one retry, 0.5
-for a messier pass or a partial, 0.0 for a rejection. Blocked, env-blocked and
-rate-limited runs say nothing about capability, so they are excluded.
-
-The posterior only takes over once a cell has 10 effective observations
-(`SSA_FIT_MIN_SAMPLES`), and it is clamped to `[0.85, 1.15]` either way. Until
-then it is advisory and visible: `recommendation.fit` always carries `prior`,
-`posterior`, `n_eff` and `used` per CLI. A bad streak cannot retire a worker,
-and a corrupt ledger line is skipped and counted, never fatal.
-
-### Burn rate is advisory
-
-Every fresh fetch appends one line per window to
-`$XDG_STATE_HOME/smart-subagents/usage-history.jsonl`, compacted to 7 days. From
-the last 6 hours of snapshots the router takes a robust slope (median of pairwise
-slopes, ignoring any pair that straddles a reset) and projects when the window
-would exhaust. When that is sooner than the reset, you get a line like:
-
-```
-- advisory: codex primary_window exhausts in ~2h at current burn
-```
-
-It changes no gate and never flips `local_labor_ok`. Three snapshots and a
-positive slope is a hint about what to start now, not a measurement to route on.
-
-## Planning is a panel, not a guess
-
-Ask for a plan and you get one opinion with unknown blind spots. This fans the
-goal out to several planners with deliberately different lenses, then makes a
-supervisor reconcile them.
-
-```bash
-smart-subagents.sh plan --repo ~/code/api --n 3 --difficulty hard \
-  --goal "Move auth middleware from Express to NestJS guards"
-```
-
-| Lens | Asks |
-|---|---|
-| `pragmatic` | smallest correct change that ships; what in the goal is scope creep |
-| `risk` | what breaks, what has no coverage, what's hard to roll back |
-| `architecture` | what's load-bearing, which refactor pays for itself, what to leave alone |
-| `constraints` | what the repo already decided; the conventions to plan within |
-
-Planners run in parallel in one shared read-only worktree and round-robin across
-whichever CLIs have quota, so a day when only one CLI is eligible still gets you
-N independent plans instead of zero. The supervisor then reads all of them,
-resolves the disagreements by reading the code, and emits a single plan.
-
-The disagreements are the value. In a live run on this repo, the pragmatic
-planner argued against extracting a shared command builder as needless surface,
-while the risk planner argued the opposite and caught that a naive implementation
-would still charge quota on a dry run. Neither plan alone was right.
+Planners run in parallel in one shared read-only worktree, round-robined across whichever CLIs have
+quota, so a day with one eligible CLI still yields N plans instead of zero.
 
 ## Guarantees
 
-**Isolation.** Every write goes to its own worktree on an `ssa/<id>` branch. Your
-checkout is never touched, dirty or not. Kimi has no sandbox. Write dispatches
-to kimi are blocked by default because a worktree does not contain its access
-to your system. Set `SSA_ALLOW_KIMI_WRITE=1` to accept that risk for one
-dispatch. The task directory records the override timestamp.
+**Isolation.** Every write goes to its own worktree on an `ssa/<id>` branch, so your checkout is
+never touched, dirty or not. Kimi has no sandbox, so writes to it need `SSA_ALLOW_KIMI_WRITE=1`,
+which the task dir timestamps. Minting is transactional, and retiring is conservative (`cleanup` in
+[Operate](#operate)).
 
-Minting a task is transactional. If anything fails after the worktree exists,
-the worktree and its `ssa/<id>` branch are rolled back rather than left behind.
-Retiring one is conservative: `cleanup` refuses while a worker is alive, the
-worktree is dirty, or the branch holds commits the base does not have.
-
-**Verification, not trust.** `verify` runs the task's own verify commands,
-compares every exit code against the pre-dispatch baseline so old failures are
-never charged to the worker, checks that each changed path matches a declared
-scope glob, runs the secret scan, and writes a machine-readable `outcome.json`
-with a `pass` / `fail` / `inconclusive` verdict. `scan-secrets` checks added
-lines with built-in credential regexes and Shannon entropy detection, rejects
-newly added `.env` files, and adds a gitleaks pass when gitleaks is installed.
-The supervisor still reads the diff against the recorded base SHA itself.
+**Verification, not trust.** Nothing the worker claims is taken on faith: `verify` scores its own
+commands against a pre-dispatch baseline, so old failures are never charged to it, and writes a
+`pass`/`fail`/`inconclusive` verdict. The supervisor still reads the diff itself.
 
 **Budgets by failure class**, not a flat retry count:
 
@@ -275,208 +166,32 @@ The supervisor still reads the diff against the recorded base SHA itself.
 | Rate limit or auth | switch worker with a fresh brief, never a resume |
 | Missing toolchain or sandboxed network | **0**, classified `env-blocked` |
 
-## Architecture
+## Operate
 
-Four pieces, one direction of dependency. The shell launches and owns the task
-lifecycle; it knows nothing about any particular CLI.
-
-```
-scripts/smart-subagents.sh   launcher: init, dispatch, plan, verify, record,
-                             ls/status/tail/stop, cleanup, gc, doctor
-        |
-        v
-scripts/ssa/                 runtime (Python 3.9, stdlib only)
-  registry.py                load + validate workers.json, fail closed
-  adapters.py                build_command / parse_session / classify_failure
-  state.py                   task.json + events.jsonl + transition table
-  cli.py                     the seam: the shell calls this, not a CLI
-        |
-        v
-scripts/workers.json         one entry per worker. The only place a CLI's
-                             name, flags, sandbox or session format appears.
-
-scripts/ai-cli-usage.py      routing: live quota per provider, ranked. Reads
-                             the registry for who the workers are, their effort
-                             ladders, their fit priors and their probes.
-```
-
-**The registry** is the single source of per-CLI knowledge: binary discovery
-(env var, candidate paths, PATH name), which quota probe reports on it, sandbox
-capability and whether writes are allowed by default, how a prompt reaches it
-(`stdin`, `arg`, `file-ref`), the argv template for each mode
-(`implement` / `plan` / `resume`), how a session id is scraped back out, the
-effort ladder and flag shape, model rules per difficulty, and capability priors
-per task kind.
-
-Argv templates are arrays of tokens, never strings. The allowed placeholders are
-`{worktree} {brief} {output} {session_id} {prompt} {effort} {model}`; `{effort}`
-and `{model}` splice zero or more tokens, the rest are single values. A template
-naming anything else, or carrying a shell metacharacter, is rejected at load
-time. The argv goes to `execve`, never through a shell.
-
-**The task record** is data, not inference. Every task dir carries a `task.json`
-(schema version, task id, repo, base sha, worker, class, state, attempts) and an
-append-only `events.jsonl` with a monotonic `seq`. Writes are atomic and
-serialized by a per-task lock, so an interrupted write leaves the previous
-record intact. The lifecycle is explicit:
-
-```
-minted -> preflighted -> picked -> running -> exited -> verified
-                                                     -> failed        -> reported
-                                                     -> inconclusive
-                            running -> aborted | stalled
-```
-
-Illegal transitions raise. `status` shows both the recorded `state` and the
-`phase` inferred from which artifacts exist: they disagree exactly when
-something went wrong, which is the point.
-
-## Adding a worker
-
-A fourth worker is a registry entry plus a probe. Two files, no new code paths.
-
-1. **Add an entry to `scripts/workers.json`.** The minimum:
-
-```json
-"acme": {
-  "display_name": "Acme Code",
-  "binary": {"env": "ACME_BIN", "candidates": ["~/.acme/bin/acme"], "path_name": "acme"},
-  "auth_file": "~/.acme/auth.json",
-  "probe": "check_acme",
-  "sandbox": "workspace",
-  "write_allowed_default": true,
-  "run": {"cwd": "inherit", "env_scrub": false},
-  "prompt": {"implement": {"transport": "arg"}, "plan": {"transport": "arg"}},
-  "argv": {
-    "implement": ["run", "--cwd", "{worktree}", "-p", "{prompt}", "{effort}"],
-    "plan": ["run", "--read-only", "--cwd", "{worktree}", "-p", "{prompt}", "{effort}"]
-  },
-  "output": {"implement": "none", "plan": "stdout"},
-  "session": {"kind": "json-keys", "keys": ["session_id"]},
-  "effort_ladder": ["low", "medium", "high"],
-  "effort_flags": ["--effort", "{effort}"],
-  "models": {"flag": ["-m", "{model}"], "rules": []},
-  "fit": {"default": 1.0}
-}
-```
-
-2. **Add a probe** to `scripts/ai-cli-usage.py`: a `check_acme()` returning a
-   `CliStatus`, registered in the `PROBES` table under the name the entry gives.
-   Until that exists the worker is listed but reported unavailable with
-   `skip_reason: "no quota probe"`. It is never handed invented headroom.
-
-Then check your work:
-
-```bash
-python3 scripts/ssa/cli.py registry-validate
-python3 scripts/ssa/cli.py workers
-python3 scripts/ssa/cli.py build-command --worker acme --mode implement \
-  --worktree /tmp/wt --brief /tmp/brief.md --effort high
-```
-
-`tests/test_registry.py` is the conformance test for this claim: it registers a
-fourth worker through `SSA_WORKERS_JSON` alone and asserts that validate, list,
-route, dispatch, plan and record all carry it, without editing a line of Python.
-If adding a worker ever requires a code change, that suite is what fails.
-
-## Requirements
-
-Python 3.9+, git, bash, and at least one worker CLI you're already logged into.
-The workers, their sandboxes and their binary lookup are declared in
-[`scripts/workers.json`](scripts/workers.json), which is the source of truth
-rather than a table here:
-
-```console
-$ python3 scripts/ssa/cli.py workers
-codex  OpenAI Codex CLI  os         write     check_codex  /Users/you/.local/bin/codex
-grok   Grok CLI          workspace  write     check_grok   /Users/you/.grok/bin/grok
-kimi   Kimi Code         none       no-write  check_kimi   /Users/you/.kimi-code/bin/kimi
-```
-
-`no-write` means exactly what it says: kimi has no sandbox, so a write dispatch
-is refused unless `SSA_ALLOW_KIMI_WRITE=1` accepts that risk. `doctor` reports
-the same rows with whether each binary and credential file is actually there.
-
-Nothing here handles authentication. It reads whatever credentials those CLIs
-already stored, to call each provider's own usage endpoint.
-
-## Install
-
-As a Claude Code plugin:
-
-```
-/plugin marketplace add m-esm/smart-subagents
-/plugin install smart-subagents@smart-subagents
-```
-
-Or clone it:
-
-```bash
-git clone https://github.com/m-esm/smart-subagents.git
-ln -s "$PWD/smart-subagents/agents/smart-subagents.md" ~/.claude/agents/
-ln -s "$PWD/smart-subagents/scripts/smart-subagents.sh" /usr/local/bin/
-```
-
-## Use
-
-From Claude Code, hand the agent a task. It refuses to guess at any of the four
-things it needs, so include them:
-
-> Use the smart-subagents agent to port the auth middleware in `~/code/api` from
-> Express to NestJS guards. In scope: `src/auth/**`. Out of scope: the lockfile
-> and any public route signatures. Acceptance: `npm test` passes and
-> `npm run build` succeeds.
-
-Standalone:
-
-```bash
-# Who should take this, and how hard should they think?
-ai-cli-usage.py --recommend --task-size medium --difficulty routine
-
-# Everything, machine-readable
-ai-cli-usage.py --json --task-size large --difficulty frontier
-
-# Mint a task: private dir + isolated worktree + worker pick, one call
-smart-subagents.sh init --repo ~/code/api --size medium --difficulty hard
-
-# Write $DIR/brief.md, then
-smart-subagents.sh dispatch --dir "$DIR"
-smart-subagents.sh verify --dir "$DIR"
-
-# Or plan first
-smart-subagents.sh plan --repo ~/code/api --n 3 --goal-file goal.md
-```
-
-### Operate
-
-A dispatch you cannot see, stop, or account for is not delegation, it is hope.
-
-```bash
-smart-subagents.sh dispatch --dir "$DIR" --background   # detach, watchdog armed
-```
+A dispatch you cannot see, stop, or account for is not delegation, it is hope. Run `doctor` first:
+it checks offline whether a dispatch could run at all here.
 
 | Command | Does |
 |---|---|
+| `doctor [--json]` | offline health check: git, python3, worker binaries, credential files (existence only), cache perms, work dir, orphans, stale worktrees. Nonzero only when a dispatch could not run |
+| `pick --size SIZE [--difficulty L] [--kind K]` | print the primary worker name on stdout, the full recommendation JSON on stderr |
 | `ls` | one line per task and planning panel: age, repo, worker, size/difficulty/kind, inferred phase, recorded state, diff size |
-| `status --dir DIR` | one task in full: base sha, branch, exit code, session or `resume=unavailable`, worker pid state, recorded lifecycle state and event count, verify verdict, last log lines |
+| `status --dir DIR` | one task in full: base sha, branch, exit code, session or `resume=unavailable`, worker pid state, recorded state and event count, verify verdict, last log lines |
 | `tail --dir DIR` | follow the worker's `stdout.log` |
 | `stop --dir DIR` | TERM then KILL the worker's process group, refusing when the pid now belongs to someone else |
-| `verify --dir DIR` | run the verify commands, diff them against the baseline, check scope globs and secrets, write `outcome.json`; exit 0 pass, 1 fail, 2 inconclusive |
-| `cooldown --cli CLI [--clear]` | bench a worker across every task, or lift the bench early; `dispatch` sets one itself on a rate limit or auth failure |
-| `record --dir DIR --outcome ...` | append one line to the outcome ledger, no prompts, diffs, paths or session ids in it |
+| `verify --dir DIR` | run the verify commands against the baseline, check scope and secrets, write `outcome.json`; exit 0 pass, 1 fail, 2 inconclusive |
+| `verify-summary --dir DIR` | compact git state for the supervisor: stat and name-status only |
+| `scan-secrets --dir DIR` | credential regexes plus Shannon entropy over added lines, newly added env files, and a gitleaks pass when gitleaks is installed |
+| `cooldown --cli CLI [--clear]` | bench a worker across every task, or lift the bench early |
+| `record --dir DIR --outcome ...` | append one line to the outcome ledger (see [Privacy](#privacy) for what is in it) |
 | `ledger [--days N]` | per-CLI dispatch count, verified-pass rate, mean retries, quota consumed |
-| `cleanup --dir DIR` | remove worktree, `ssa/<id>` branch and task dir, refusing while dirty, unmerged, or running |
+| `cleanup --dir DIR` | remove worktree, `ssa/<id>` branch and task dir, refusing while a worker is alive, the tree is dirty, or the branch holds commits the base does not have |
 | `gc [--older-than DAYS]` | classify every task dir safe or kept; dry run until `--no-dry-run` |
-| `doctor [--json]` | offline health check: git, python3, worker binaries, credential files (existence only), cache perms, work dir, orphans, stale worktrees |
 
-A backgrounded worker gets its own process group and a watchdog that samples the
-log size and a worktree fingerprint every 30s. When both stop moving for 600s
-(`SSA_STALL_SECS`) it kills the group and writes `stalled.txt`, so a worker that
-quietly wedged does not sit there until you notice.
-
-The ledger is the part that compounds. Every run appends worker, kind, size,
-difficulty, effort flags, exit code, wall time, diff size, verification verdict
-and the quota it burned, keyed by a hash of the repo path rather than the path:
+A backgrounded worker (`dispatch --dir "$DIR" --background`) gets its own process group and a
+watchdog sampling log size and a worktree fingerprint every 30s; when both go quiet for
+`SSA_STALL_SECS` it kills the group and writes `stalled.txt`. The ledger is the part that compounds,
+one line per run:
 
 ```console
 $ smart-subagents.sh ledger --days 7
@@ -486,129 +201,119 @@ codex             9            78%         0.44          31.2%
 grok              5            60%         1.20          12.7%
 ```
 
+## Install
+
+### Prerequisites
+
+Python 3.9+, git, bash, and at least one worker CLI you're already logged into. Nothing here handles
+authentication: it reads the credentials those CLIs stored, to call each provider's usage endpoint.
+The worker list, sandboxes and binary lookup live in [`scripts/workers.json`](scripts/workers.json),
+not in a table here, and `doctor` prints it with what is installed.
+
+As a Claude Code plugin:
+
+```
+/plugin marketplace add m-esm/smart-subagents
+/plugin install smart-subagents@smart-subagents
+```
+
+Or clone it, symlinking both entry points so the examples here run as written (drop the last line
+and call `python3 scripts/ai-cli-usage.py` instead):
+
+```bash
+git clone https://github.com/m-esm/smart-subagents.git
+ln -s "$PWD/smart-subagents/agents/smart-subagents.md" ~/.claude/agents/
+ln -s "$PWD/smart-subagents/scripts/smart-subagents.sh" /usr/local/bin/
+ln -s "$PWD/smart-subagents/scripts/ai-cli-usage.py" /usr/local/bin/
+```
+
+**Upgrade.** Plugin users re-run the marketplace install or update from the `/plugin` menu; clone
+users `git pull`. The version is in [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json),
+changes in [CHANGELOG.md](CHANGELOG.md).
+
+### Quickstart
+
+A **brief** is a markdown file the worker reads instead of a chat: goal, absolute workdir, in scope,
+out of scope, constraints, acceptance criteria, and the exact self-verify commands with their
+success signal, templated in [`agents/smart-subagents.md`](agents/smart-subagents.md). The
+**supervisor** is whoever minted the task, your session or an agent acting for it, not a daemon.
+
+```bash
+# Mint a task: private dir, isolated worktree, worker pick, one call.
+DIR=$(smart-subagents.sh init --repo ~/code/api --size medium --difficulty hard \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["dir"])')
+# Write the brief. The worktree is $DIR/wt; that is the workdir it names.
+$EDITOR "$DIR/brief.md"
+# Run it, check it, then log the line that improves the next pick.
+smart-subagents.sh dispatch --dir "$DIR"
+smart-subagents.sh verify   --dir "$DIR"
+smart-subagents.sh record   --dir "$DIR" --outcome verified-pass --retries 0
+```
+
+If `init` picked kimi and the task writes files, `dispatch` refuses until you set
+`SSA_ALLOW_KIMI_WRITE=1` on purpose. From Claude Code, handing that brief to the `smart-subagents`
+agent runs this loop for you.
+
 ## Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `SSA_WORK_DIR` | `$TMPDIR/smart-subagents` | Task scratch root |
 | `SSA_WORKERS_JSON` | `scripts/workers.json` | Alternative worker registry |
-| `SSA_USAGE_PY` | alongside the script | Path to `ai-cli-usage.py` |
-| `SSA_CLI_PY` | alongside the script | Path to `ssa/cli.py` |
-| `SSA_PREMIUM_MODELS` | `Fable,Opus` | Model-scoped weekly windows that gate whether your local session should do labor itself |
+| `SSA_USAGE_PY` / `SSA_CLI_PY` | alongside the script | Paths to `ai-cli-usage.py` and `ssa/cli.py` |
+| `SSA_ALLOW_KIMI_WRITE` | unset | Accept the risk of a write dispatch to a worker with no sandbox |
+| `SSA_PREMIUM_MODELS` | `Fable,Opus` | Claude's usage API reports weekly caps scoped to individual models by display name. These are the ones that flip `local_labor_ok` false near their cap, so the supervisor stops doing labor in-session while cheaper models are still fine. Set it to whatever your plan's premium tier is actually called |
 | `SSA_SHORT_HORIZON_HOURS` | `4` | Reset horizon over which a short window's spent quota stops counting against it |
 | `SSA_FIT_HALFLIFE_DAYS` | `30` | Half-life on ledger evidence feeding the learned fit posterior |
-| `SSA_FIT_MIN_SAMPLES` | `10` | Effective observations before a posterior is used for ranking instead of the prior |
+| `SSA_FIT_MIN_SAMPLES` | `10` | Effective observations before a posterior ranks instead of the prior |
 | `SSA_STALL_SECS` | `600` | Watchdog patience before it kills a silent background worker |
+| `SSA_KILL_GRACE_SECS` | `10` | Seconds between TERM and KILL when stopping a worker |
 | `SSA_DEADLINE_SECS` | off | Absolute ceiling on a background run |
 | `SSA_LEDGER` | `$XDG_STATE_HOME/smart-subagents/outcomes.jsonl` | Outcome ledger path |
 | `SSA_NO_QUOTA_SNAPSHOT` | unset | Skip the post-dispatch quota snapshot (offline machines, tests) |
 | `CODEX_BIN` / `GROK_BIN` / `KIMI_BIN` | auto-detected | Override worker binary paths. The variable name per worker comes from its registry entry, so a new worker declares its own |
 
-`SSA_PREMIUM_MODELS` is the one worth setting. Claude's usage API reports weekly
-caps scoped to individual models by display name. When your top tier is near its
-cap, `local_labor_ok` flips false and the supervisor stops doing work in-session
-even though cheaper models are still fine. Set it to whatever your plan's premium
-tier is actually called.
+## Architecture
 
-## Privacy
-
-Credentials are read locally to call each provider's usage endpoint. No token is
-ever printed, logged, or transmitted anywhere else.
-
-Account emails are **redacted by default in every output path**, including
-`--json` and the on-disk cache (`mo***@gmail.com`). Pass `--include-account` if
-you actually want them. The cache lives in `$XDG_CACHE_HOME/smart-subagents/`,
-mode 0600 inside a 0700 directory, never in world-readable `/tmp`.
-
-Task directories hold your brief, your worker logs, and a full worktree of your
-source, so they're created mode 0700 under `$TMPDIR`. Override with
-`SSA_WORK_DIR`.
-
-The outcome ledger is deliberately thin: worker, task class, effort flags, exit
-code, wall time, diff counts, verification verdict, quota deltas, and a hash of
-the repo path. No prompt text, no diff, no filename, no session id, no account
-identifier. It lives at `$XDG_STATE_HOME/smart-subagents/outcomes.jsonl`, mode
-0600 in a 0700 directory.
-
-## Known gaps
-
-The `FIT` table is now the cold-start prior of a measured posterior, so a fresh
-install still routes on hand-tuned constants and stays there until a
-(worker, kind) cell reaches 10 effective observations. Kinds you rarely dispatch
-may never get there. The reward function is a guess too: it reads verified-pass,
-retry count and partial as a proxy for quality, which cannot see a diff that
-passed the tests and was still the wrong design.
-
-The clamp to `[0.85, 1.15]` is deliberate and unmeasured. It bounds how much
-evidence is allowed to move a pick, which also bounds how fast the router can
-learn something true.
-
-The burn-rate forecast is a robust slope over at least three snapshots in six
-hours. That is enough to notice a fast burn and not enough to trust a number.
-It stays advisory for that reason.
-
-Difficulty sets reasoning effort, not model choice, for codex and grok. Their
-registry entries carry an empty model rule list on purpose: model names are
-account-scoped and this repo will not invent one. Only kimi switches models,
-because it's the only one of the three without an effort flag.
-
-Cross-CLI handoff always starts from a fresh brief plus the current diff. There's
-no conversation transfer, because none of these CLIs can import another's session.
-
-The registry describes how to *invoke* a worker, not how to *meter* it. A probe
-is still Python: a new worker gets full routing only once someone writes a
-`check_*` that speaks its provider's usage API. Until then it is listed and
-skipped with `no quota probe`, which is honest but not useful.
-
-Argv templates are validated, not simulated. A registry entry can pass load-time
-validation and still be wrong about a real CLI's flags, and the first sign of
-that is a failed dispatch. The conformance suite proves the plumbing carries a
-fourth worker; it cannot prove your flags exist.
-
-Session ids are scraped from logs, so a provider that changes its output shape
-silently costs you resumability. `resume-unavailable.txt` and `doctor` surface
-that, but only after the fact.
+`scripts/smart-subagents.sh` is the launcher: it owns the task lifecycle and knows nothing about any
+particular CLI. `scripts/ssa/` is the runtime it calls (Python 3.9, stdlib only): `registry.py`
+validates, `adapters.py` builds commands and scrapes session ids, `state.py` holds the transition
+table, `cli.py` is the seam. `scripts/workers.json` is the only place a CLI's name, flags, sandbox,
+effort ladder or session format appears. Every task dir carries a `task.json` and an append-only
+`events.jsonl`, and every dispatch adds a line to `outcomes.jsonl`, which routing learns from. Full
+map, lifecycle machine, adding a worker: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Develop
 
-Run the full suite from the repo root:
+`bash tests/run.sh` runs `tests/smoke.sh` then the Python suite via `unittest discover`, hermetic
+and stdlib-only: no network, no credentials, no worker CLI runs. `tests/fixtures/` holds synthetic
+provider payloads for each probe's pure `parse_*_usage` half, plus fake worker binaries whose argv
+`test_shell.py` asserts exactly. That assertion is the adapter contract: update it on purpose.
 
-```console
-$ bash tests/run.sh
-```
+## Privacy
 
-That runs `tests/smoke.sh` (shell-level checks against `smart-subagents.sh`)
-and then the Python characterization suite via `unittest discover`. The suite
-is stdlib-only and runs on Python 3.9+:
+Credentials are read locally to call each provider's usage endpoint. No token is ever printed,
+logged, or transmitted anywhere else. Account emails are **redacted by default in every output
+path**, including `--json` and the cache; pass `--include-account` if you want them. The cache is
+mode 0600 inside a 0700 `$XDG_CACHE_HOME/smart-subagents/`, and task dirs (brief, worker logs, a
+full worktree of your source) are mode 0700 under `$TMPDIR`.
 
-```console
-$ python3 -m unittest discover -s tests -v
-```
+The outcome ledger at `$XDG_STATE_HOME/smart-subagents/outcomes.jsonl` (0600) is deliberately thin:
+worker, task class, effort flags, exit code, wall time, diff counts, verification verdict, quota
+deltas, and a hash of the repo path. No prompt text, no diff, no filename, no session id, no
+account identifier.
 
-pytest works too if you have it installed, but nothing requires it:
+## Known gaps
 
-```console
-$ python3 -m pytest -q tests
-```
-
-Everything is hermetic: no network, no real credentials, no worker CLI ever
-actually runs. `tests/fixtures/providers/<cli>/*.json` are synthetic API
-payloads that exercise `parse_claude_usage` / `parse_codex_usage` /
-`parse_grok_usage` / `parse_kimi_usage`, the pure parsing halves of
-`scripts/ai-cli-usage.py`'s `check_*` functions. `tests/fixtures/bin/` holds
-fake `codex`/`grok`/`kimi` binaries that record their own argv and cwd
-instead of doing anything real; `tests/test_shell.py` uses them to assert the
-*exact* argv `smart-subagents.sh dispatch` builds for each worker. That
-argv-for-argv assertion is the contract a new worker adapter (or a runtime
-migration) has to satisfy. If you're changing how a worker gets invoked,
-that's the test to update on purpose, not the one to make pass by accident.
-
-`tests/test_registry.py` is the other end of the same contract. It registers a
-fourth worker (`fake-fakecli`) through `SSA_WORKERS_JSON` and asserts the whole
-path carries it with no Python edited, then pins the guarantees underneath:
-templates with unknown placeholders or shell metacharacters are refused,
-illegal lifecycle transitions raise, event sequence numbers are monotonic, and
-an interrupted `task.json` write leaves the previous record intact.
+- **Cold-start fit is guesswork.** Hand-tuned priors stay in charge until a (worker, kind) cell
+  reaches 10 effective observations, which rarely-dispatched kinds may never hit. The reward is a
+  proxy: pass plus retry count cannot see a diff that passed the tests and was the wrong design.
+- **Kimi has no sandbox** and is write-blocked by default. A worktree does not contain a worker's
+  access to the rest of your system.
+- **Difficulty picks effort, not models.** It selects a model only where the registry carries a rule,
+  today kimi alone: model names are account-scoped and this repo will not invent one.
+- **No conversation transfer.** Cross-CLI handoff starts from a fresh brief plus the current diff,
+  because no CLI here can import another's session.
 
 ## License
 
