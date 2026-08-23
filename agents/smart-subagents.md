@@ -64,8 +64,13 @@ mkdir -m 700 -p "$DIR"   # briefs and worker logs stay private
 ```
 
 Artifacts under `$DIR/`: `brief.md`, `usage.json`, `pick.json`, `stdout.log`,
-`last-msg.txt`, `session-id.txt`, `worker.txt`, `baseline.log`, `verify-rN.log`,
-`diff-stat.txt`, `report.md`.
+`last-msg.txt`, `session-id.txt`, `worker.txt`, `exit-code.txt`,
+`verify-cmds.txt`, `baseline.log`, `baseline-results.txt`, `scope.txt`,
+`verify-final.log`, `outcome.json`, `outcome-record.json`, `diff-stat.txt`,
+`report.md`. Background runs add `worker.pid`, `worker.pgid`,
+`worker-start.txt`, and `stalled.txt` or `stopped.txt` when a run was cut short.
+`init` is transactional: a failure after the worktree exists rolls the worktree
+and the `ssa/<id>` branch back, so a half-minted task never lingers.
 
 **Task size** (drives quota thresholds and model picks):
 
@@ -163,14 +168,25 @@ WT="$DIR/wt"
 - Grok's `--worktree` may replace the manual worktree for grok-only runs; still
   keep `$DIR` for logs/usage.
 
-**Baseline verify** (once, before dispatch):
+**Baseline verify** (once, before dispatch). Write the parent's verify commands
+to `$DIR/verify-cmds.txt`, one per line, then record how each one behaves on the
+untouched tree in `$DIR/baseline-results.txt` (`exit<TAB>command`). `verify`
+reads both files, so a pre-existing failure can never be charged to the worker:
 
 ```bash
-# run parent's verify commands; save full output
-( cd "$WT" && <verify cmds> ) >"$DIR/baseline.log" 2>&1 || true
+: >"$DIR/baseline-results.txt"
+while IFS= read -r cmd; do
+  ( cd "$WT" && eval "$cmd" ) >>"$DIR/baseline.log" 2>&1 && rc=0 || rc=$?
+  printf '%s\t%s\n' "$rc" "$cmd" >>"$DIR/baseline-results.txt"
+done <"$DIR/verify-cmds.txt"
 ```
 
+Also write `$DIR/scope.txt` (one glob per line) from the parent's in-scope paths.
+`verify` fails the run when a changed file matches none of them.
+
 Pre-existing failures are **not** the worker's debt. Only new regressions count.
+Skipping the baseline is allowed, but then a failing command can only ever be
+`inconclusive`, never a clean pass.
 
 Run usage + worktree + baseline in **parallel** when the shell allows (three
 background jobs, then wait). `init` already parallelizes usage + worktree.
@@ -267,10 +283,25 @@ Resume **only** by id:
 - `grok --resume <id> -p "..."`
 - `cd "$WT" && kimi -S <id> -p "..."`
 
-**Long runs:** background the process; poll every ~60s for log growth and
-`git -C "$WT" status`. No log growth and no fs change for **10 minutes** → kill
-process group, keep partials, report. Do not re-read entire multi-MB logs into
-context: `tail` + `rg` only.
+**Long runs:** do not hold the session open on a worker. Detach it:
+
+```bash
+bash "$SSA" dispatch --dir "$DIR" --worker "$(cat "$DIR/worker.txt")" --background
+bash "$SSA" ls                      # every task on this machine, one line each
+bash "$SSA" status --dir "$DIR"     # phase, pid state, exit code, last log lines
+bash "$SSA" tail --dir "$DIR"       # follow stdout.log
+bash "$SSA" stop --dir "$DIR"       # TERM then KILL the worker's process group
+```
+
+`--background` puts the worker in its own process group, records the pid with
+its start time (so a recycled pid is never killed by mistake), and runs a
+watchdog. The watchdog samples the log size and a worktree fingerprint every
+30s and ends a run whose log and tree have both been unchanged for 600s
+(`SSA_STALL_SECS`), writing `$DIR/stalled.txt`. `SSA_DEADLINE_SECS` adds a hard
+ceiling; it is off by default.
+
+Poll with `status`, never by re-reading the log. Do not pull multi-MB logs into
+context: `status` already shows the tail, and `tail`/`rg` cover the rest.
 
 **Effort and model inside a CLI** are derived from difficulty, not chosen by
 hand. `dispatch` reads `$DIR/worker-args.txt`, which the recommender produced:
@@ -288,29 +319,47 @@ the report.
 
 ## Phase 5 — verify (every round)
 
-Against `BASE_SHA` / `$DIR/base-sha.txt`:
+Run the gate, then read its verdict. Do not hand-roll this in shell:
 
-1. **State**
-   ```bash
-   git -C "$WT" status --porcelain -uall
-   git -C "$WT" diff --stat "$BASE_SHA"
-   git -C "$WT" diff "$BASE_SHA"   # skim; don't dump huge blobs into context
-   git -C "$WT" branch --show-current
-   git -C "$WT" log --oneline "$BASE_SHA"..HEAD
-   ```
-   Changed paths ⊆ in-scope. Empty diff after "success" → hard fail.
-   Also `git -C "$REPO" status --porcelain` to catch kimi leakage outside WT.
+```bash
+bash "$SSA" verify --dir "$DIR"   # exit 0 pass, 1 fail, 2 inconclusive
+cat "$DIR/outcome.json"
+```
 
-2. **Diff hygiene** — reject on: secrets (`.env`, keys, high-entropy tokens),
-   surprise lockfile/dependency bumps, binaries, debug litter, rewrites of
-   out-of-scope files.
+`verify` runs every line of `$DIR/verify-cmds.txt` in the worktree, compares each
+exit code against `$DIR/baseline-results.txt`, checks the changed paths against
+`$DIR/scope.txt`, runs the secret scan, and writes `$DIR/outcome.json`:
 
-3. **Acceptance commands** — run yourself; save `$DIR/verify-rN.log`. Compare to
-   baseline: only **new** failures are worker debt. Flaky: one rerun; report as
-   flaky, never as clean.
+```json
+{"schema_version": 1,
+ "verify": {"commands": [{"cmd": "npm test", "exit": 1, "baseline_exit": 0}],
+            "new_failures": 1, "scope_ok": true, "secrets_ok": true,
+            "verdict": "fail"}}
+```
 
-4. **Env failures** (sandbox network, missing toolchain) → classify
-   `env-blocked`; do not thrash the worker.
+| Verdict | Means | Exit |
+|---------|-------|------|
+| `pass` | no new failure, scope clean, no secrets | 0 |
+| `fail` | a command regressed, or scope/secret gate tripped | 1 |
+| `inconclusive` | a command failed and there is no baseline to compare to | 2 |
+
+`inconclusive` is never reportable as success. Either record the baseline and
+re-run, or report `partial` with the reason.
+
+Then read the diff yourself. The gate is mechanical, judgment is not:
+
+```bash
+bash "$SSA" verify-summary --dir "$DIR"   # branch, status, stat, name-status
+git -C "$WT" diff "$BASE_SHA"             # skim; never dump huge blobs
+git -C "$REPO" status --porcelain         # catch leakage outside the worktree
+```
+
+Empty diff after a claimed success is a hard fail. Reject surprise lockfile or
+dependency bumps, binaries, debug litter, and rewrites of out-of-scope files even
+when `verdict` is `pass`; the scope globs cannot see intent.
+
+Flaky command: one rerun, then report it as flaky, never as clean. Env failures
+(sandbox network, missing toolchain) are `env-blocked`; do not thrash the worker.
 
 Supervisor context discipline: prefer `diff --stat` + targeted file reads over
 pasting full patches. Full diff only when reviewing a small change or a
@@ -394,6 +443,35 @@ rather than pretending the panel was N-wide.
 
 ## Phase 7 — report (fixed skeleton)
 
+**Before you report, write the outcome record. Every run, including the ones
+that failed:**
+
+```bash
+bash "$SSA" record --dir "$DIR" \
+  --outcome verified-pass|partial|rejected|blocked|env-blocked|rate-limited \
+  [--retries N] [--handoff-to CLI] [--notes "one line"]
+```
+
+That appends one line to the ledger (worker, kind, size, difficulty, effort
+flags, exit code, wall time, diff size, verification verdict, quota consumed)
+and drops a copy in `$DIR/outcome-record.json`. It carries no prompts, no diffs,
+no paths, no session ids, so it is safe to keep forever. It is what makes the
+next routing decision better than a guess; `bash "$SSA" ledger --days 7` reads
+it back. A report without a record is an unfinished run.
+
+Retire the worktree only after the parent has taken the change. When it has:
+
+```bash
+bash "$SSA" cleanup --dir "$DIR"   # refuses while dirty, unmerged, or running
+bash "$SSA" gc --older-than 7      # dry run by default, --no-dry-run to delete
+```
+
+Never clean up an implementation worktree in the same breath as reporting: the
+parent still needs it to merge, and `cleanup` deleting a branch with unique
+commits is exactly the failure it refuses by default. Planning panels are
+different: their worktrees are read-only scratch and `gc` collects them once
+their plan files exist.
+
 Final message to parent:
 
 ```
@@ -409,6 +487,7 @@ Final message to parent:
 - Deviations: none | …
 - Integration: merge/cherry-pick recipe OR exact decision needed
 - Artifacts: $DIR/
+- Record: outcome=<status> retries=<n> (ledger line written)
 - Panel (planning runs only): N planners, lenses used, any that came back empty
 - Resume (if partial): <exact command with session id>
 ```
@@ -433,6 +512,9 @@ single missing artifact. One blocker question worth of content, not a quiz.
 - Inlining multi-line briefs in shell strings
 - Dispatching kimi into a dirty user checkout
 - Trusting worker self-verify
+- Reporting without writing an outcome record
+- Reporting `inconclusive` verification as a pass
+- Deleting an implementation worktree before the parent has integrated it
 - Flat "try 5 times" loops
 - Re-reading 50k-line logs into the supervisor context
 - Switching CLI mid-task without a rate-limit/auth reason

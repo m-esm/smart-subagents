@@ -12,6 +12,8 @@ while [[ -L "$_self" ]]; do
 done
 SCRIPT_DIR="$(cd "$(dirname "$_self")" && pwd)"
 SSA_ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$SCRIPT_DIR")}"
+# Absolute path to this script, for the detached background wrapper re-exec.
+SSA_SELF="${SCRIPT_DIR}/$(basename "$_self")"
 
 USAGE_PY="${SSA_USAGE_PY:-${SSA_ROOT}/scripts/ai-cli-usage.py}"
 [[ -f "$USAGE_PY" ]] || USAGE_PY="${SCRIPT_DIR}/ai-cli-usage.py"
@@ -23,8 +25,137 @@ CODEX_BIN="${CODEX_BIN:-$(command -v codex || true)}"
 GROK_BIN="${GROK_BIN:-${HOME}/.grok/bin/grok}"
 KIMI_BIN="${KIMI_BIN:-${HOME}/.kimi-code/bin/kimi}"
 
+# Ledger of dispatch outcomes: state, not cache, so it survives a cache wipe.
+SSA_STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/smart-subagents"
+SSA_LEDGER="${SSA_LEDGER:-${SSA_STATE_DIR}/outcomes.jsonl}"
+
 die() { echo "smart-subagents: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing $1"; }
+
+# --- small artifact helpers ---------------------------------------------------
+# Task dirs are flat files, and every one of them is optional: a task killed
+# between mint and dispatch still has to render.
+
+_read1() {
+  # _read1 FILE [DEFAULT] -> first line, or DEFAULT when missing/empty
+  local f="$1" d="${2:-}" v=""
+  if [[ -f "$f" ]]; then
+    v="$(head -n1 "$f" 2>/dev/null || true)"
+  fi
+  [[ -n "$v" ]] || v="$d"
+  printf '%s' "$v"
+}
+
+_mtime() {
+  # BSD stat and GNU stat disagree; try both, print 0 when neither works.
+  local f="$1" v=""
+  v="$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || true)"
+  [[ -n "$v" ]] || v=0
+  printf '%s' "$v"
+}
+
+_age_human() {
+  # seconds -> compact age (45s, 12m, 3h, 2d)
+  local s="${1:-0}"
+  [[ "$s" =~ ^[0-9]+$ ]] || s=0
+  if (( s < 60 )); then printf '%ss' "$s"
+  elif (( s < 3600 )); then printf '%sm' $(( s / 60 ))
+  elif (( s < 86400 )); then printf '%sh' $(( s / 3600 ))
+  else printf '%sd' $(( s / 86400 )); fi
+}
+
+_now() { date +%s; }
+
+_utc() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+
+_pid_alive() {
+  local pid="${1:-}"
+  [[ -n "$pid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+_pid_start() {
+  # Process start time, the cheap defense against PID reuse.
+  local pid="${1:-}" v=""
+  [[ -n "$pid" ]] || return 0
+  v="$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+  printf '%s' "$v"
+}
+
+_worker_state() {
+  # _worker_state DIR -> none|running|exited|reused|stalled|stopped
+  local dir="$1" pid start now
+  pid="$(_read1 "$dir/worker.pid")"
+  [[ -n "$pid" ]] || { printf 'none'; return 0; }
+  if _pid_alive "$pid"; then
+    start="$(_read1 "$dir/worker-start.txt")"
+    now="$(_pid_start "$pid")"
+    if [[ -n "$start" && -n "$now" && "$start" != "$now" ]]; then
+      printf 'reused'; return 0
+    fi
+    printf 'running'; return 0
+  fi
+  if [[ -f "$dir/stopped.txt" ]]; then printf 'stopped'; return 0; fi
+  if [[ -f "$dir/stalled.txt" ]]; then printf 'stalled'; return 0; fi
+  printf 'exited'
+}
+
+_task_phase() {
+  # Phase is inferred from which artifacts exist, never from a status file that
+  # a killed worker would leave lying.
+  local dir="$1" state
+  state="$(_worker_state "$dir")"
+  if [[ -f "$dir/outcome.json" ]]; then printf 'verified'; return 0; fi
+  if [[ -f "$dir/exit-code.txt" ]]; then printf 'done'; return 0; fi
+  if [[ "$state" == "running" ]]; then printf 'running'; return 0; fi
+  if [[ ! -f "$dir/brief.md" ]]; then printf 'minted'; return 0; fi
+  if [[ ! -f "$dir/stdout.log" ]]; then printf 'briefed'; return 0; fi
+  # A pid we know about, no longer alive, and no exit code: the run was cut off.
+  case "$state" in
+    stopped|stalled|exited|reused) printf 'aborted'; return 0 ;;
+  esac
+  printf 'running'
+}
+
+_diff_summary() {
+  # Last line of git diff --stat, squeezed onto one line.
+  local dir="$1" line=""
+  [[ -f "$dir/diff-stat.txt" ]] || { printf '%s' "-"; return 0; }
+  line="$(tail -n1 "$dir/diff-stat.txt" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)"
+  [[ -n "$line" ]] || line="-"
+  printf '%s' "$line"
+}
+
+_task_class() {
+  local dir="$1"
+  printf '%s/%s/%s' "$(_read1 "$dir/size.txt" '?')" \
+    "$(_read1 "$dir/difficulty.txt" '?')" "$(_read1 "$dir/kind.txt" '?')"
+}
+
+# Init is transactional: a failure after `worktree add` must not leave a
+# half-minted task dir and an orphan ssa/<id> branch behind. The trap is armed
+# the moment the worktree exists and disarmed on the success path.
+_INIT_REPO=""
+_INIT_WT=""
+_INIT_DIR=""
+_INIT_ID=""
+
+_init_rollback() {
+  local rc=$?
+  [[ -n "$_INIT_WT" ]] || exit "$rc"
+  # Only ever remove a worktree this call created and nobody has written to.
+  if [[ -d "$_INIT_WT" ]] \
+      && [[ -z "$(git -C "$_INIT_WT" status --porcelain -uall 2>/dev/null || echo dirty)" ]]; then
+    git -C "$_INIT_REPO" worktree remove "$_INIT_WT" >/dev/null 2>&1 || true
+    git -C "$_INIT_REPO" branch -D "ssa/${_INIT_ID}" >/dev/null 2>&1 || true
+    git -C "$_INIT_REPO" worktree prune >/dev/null 2>&1 || true
+    rm -rf "$_INIT_DIR"
+    echo "smart-subagents: init failed, rolled back worktree and ssa/${_INIT_ID}" >&2
+  else
+    echo "smart-subagents: init failed, left $_INIT_DIR in place (worktree not clean)" >&2
+  fi
+  exit "$rc"
+}
 
 cmd_init() {
   local repo="" size="medium" preferred="" difficulty="routine" kind="default"
@@ -67,16 +198,19 @@ cmd_init() {
 
   local wt="$dir/wt"
   if git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    # git worktree prints progress on stdout — keep JSON clean
+    # git worktree prints progress on stdout, keep JSON clean
     git -C "$repo" worktree add "$wt" -b "ssa/${task_id}" >/dev/null 2>&1 \
       || die "init: worktree add failed for $repo"
     echo "$wt" >"$dir/wt.txt"
+    _INIT_REPO="$repo"; _INIT_WT="$wt"; _INIT_DIR="$dir"; _INIT_ID="$task_id"
+    trap '_init_rollback' EXIT
   else
     echo "NOT_GIT" >"$dir/wt.txt"
     wt=""
   fi
 
   wait "$usage_pid" || true
+  [[ -s "$dir/usage.json" ]] || die "init: usage preflight produced nothing"
 
   # Pick worker (stdout = single JSON object only)
   python3 - "$dir" "$preferred" <<'PY'
@@ -122,6 +256,10 @@ pick_doc = {
 (d / "worker.txt").write_text(pick + ("\n" if pick else ""))
 print(json.dumps({"task_id": d.name, "dir": str(d), **pick_doc}, indent=2))
 PY
+
+  # Success: disarm the rollback.
+  trap - EXIT
+  _INIT_WT=""; _INIT_DIR=""; _INIT_REPO=""; _INIT_ID=""
 }
 
 cmd_pick() {
@@ -169,11 +307,12 @@ PY
 }
 
 cmd_dispatch() {
-  local dir="" worker=""
+  local dir="" worker="" background=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dir) dir="${2:-}"; shift 2 ;;
       --worker) worker="${2:-}"; shift 2 ;;
+      --background|--bg) background=1; shift ;;
       *) die "dispatch: unknown arg $1" ;;
     esac
   done
@@ -187,6 +326,16 @@ cmd_dispatch() {
   [[ -n "$wt" && -d "$wt" ]] || die "dispatch: missing worktree ($dir/wt.txt)"
   local size
   size="$(cat "$dir/size.txt" 2>/dev/null || echo medium)"
+
+  if [[ -n "$background" ]]; then
+    _dispatch_background "$dir" "$worker"
+    return $?
+  fi
+
+  # Quota snapshot before the run: the ledger needs both ends to attribute cost.
+  if [[ -f "$dir/usage.json" ]]; then
+    cp "$dir/usage.json" "$dir/quota-before.json" 2>/dev/null || true
+  fi
 
   # Difficulty-derived flags come from the recommender, never re-derived here.
   local wargs=()
@@ -309,12 +458,299 @@ PY
     git -C "$wt" diff --stat "$base" >"$dir/diff-stat.txt" 2>/dev/null || true
     git -C "$wt" status --porcelain -uall >"$dir/wt-status.txt" 2>/dev/null || true
   fi
+  # Quota snapshot after the run. This is the one place `|| true` on a network
+  # call is right: a dead network must not turn a finished run into a failure.
+  if [[ "${SSA_NO_QUOTA_SNAPSHOT:-}" != "1" && -f "$USAGE_PY" ]]; then
+    python3 "$USAGE_PY" --json --fresh >"$dir/quota-after.json" 2>/dev/null || true
+    [[ -s "$dir/quota-after.json" ]] || rm -f "$dir/quota-after.json"
+  fi
+
   local resume="unavailable"
   [[ -n "$sid" ]] && resume="available"
   echo "smart-subagents: worker=$worker session=${sid:-unavailable}" \
     "resume=$resume exit=$rc" \
     "args=${wargs[*]:-defaults} log=$log"
   return "$rc"
+}
+
+# --- background dispatch, watchdog, tail, stop --------------------------------
+# A long run must not pin the supervisor session. The wrapper below detaches the
+# worker into its own process group, records the pid plus its start time (so a
+# recycled pid is never killed by mistake), and runs a watchdog that ends a run
+# which has stopped writing logs and stopped touching the tree.
+
+_pgid_of() {
+  local pid="$1" v=""
+  v="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  [[ -n "$v" ]] || v="$pid"
+  printf '%s' "$v"
+}
+
+_kill_group() {
+  # TERM the group, give it a grace period, then KILL. Falls back to the bare
+  # pid when the process is not a group leader.
+  local pgid="$1" grace="${SSA_KILL_GRACE_SECS:-10}" waited=0
+  kill -TERM "-${pgid}" 2>/dev/null || kill -TERM "$pgid" 2>/dev/null || true
+  while (( waited < grace )); do
+    kill -0 "-${pgid}" 2>/dev/null || kill -0 "$pgid" 2>/dev/null || return 0
+    sleep 1
+    waited=$(( waited + 1 ))
+  done
+  kill -KILL "-${pgid}" 2>/dev/null || kill -KILL "$pgid" 2>/dev/null || true
+}
+
+_watchdog() {
+  # Stall detection is two signals, not one: a worker that is thinking still
+  # writes to the log, and a worker that is editing still moves the tree.
+  local dir="$1" leader="$2" pgid="$3"
+  local interval="${SSA_WATCHDOG_INTERVAL_SECS:-30}"
+  local stall="${SSA_STALL_SECS:-600}"
+  local deadline="${SSA_DEADLINE_SECS:-0}"
+  local wt started idle=0 last_sz="" last_fp="" sz fp now reason=""
+  wt="$(_read1 "$dir/wt.txt")"
+  started="$(_now)"
+  trap '' TERM
+  while _pid_alive "$leader"; do
+    sleep "$interval"
+    _pid_alive "$leader" || break
+    sz="$(wc -c <"$dir/stdout.log" 2>/dev/null | tr -d ' ' || true)"
+    [[ -n "$sz" ]] || sz=0
+    fp=""
+    if [[ -n "$wt" && -d "$wt" ]]; then
+      fp="$(git -C "$wt" status --porcelain 2>/dev/null | cksum || true)"
+    fi
+    if [[ "$sz" == "$last_sz" && "$fp" == "$last_fp" ]]; then
+      idle=$(( idle + interval ))
+    else
+      idle=0
+    fi
+    last_sz="$sz"; last_fp="$fp"
+    if (( stall > 0 )) && (( idle >= stall )); then reason="stalled"; break; fi
+    if (( deadline > 0 )); then
+      now="$(_now)"
+      if (( now - started >= deadline )); then reason="deadline"; break; fi
+    fi
+  done
+  [[ -n "$reason" ]] || return 0
+  _pid_alive "$leader" || return 0
+  {
+    echo "$(_utc) $reason after ${idle}s idle (stall=${stall}s deadline=${deadline}s)"
+  } >>"$dir/stalled.txt"
+  _kill_group "$pgid"
+}
+
+_dispatch_background() {
+  local dir="$1" worker="$2" pid="" waited=0
+  local state
+  state="$(_worker_state "$dir")"
+  [[ "$state" != "running" ]] || \
+    die "dispatch: a worker is already running for $dir (pid $(_read1 "$dir/worker.pid"))"
+  rm -f "$dir/worker.pid" "$dir/worker.pgid" "$dir/worker-start.txt" \
+    "$dir/stalled.txt" "$dir/stopped.txt"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid bash "$SSA_SELF" bg-run --dir "$dir" --worker "$worker" \
+      >>"$dir/bg.log" 2>&1 &
+  else
+    # bash 3.2 on macOS has no setsid: job control gives the child its own
+    # process group, nohup keeps it alive past this shell.
+    set -m
+    nohup bash "$SSA_SELF" bg-run --dir "$dir" --worker "$worker" \
+      >>"$dir/bg.log" 2>&1 &
+    set +m
+    disown 2>/dev/null || true
+  fi
+  # The wrapper records its own pid, which is the one worth killing.
+  while (( waited < 100 )); do
+    pid="$(_read1 "$dir/worker.pid")"
+    [[ -z "$pid" ]] || break
+    sleep 0.1
+    waited=$(( waited + 1 ))
+  done
+  [[ -n "$pid" ]] || die "dispatch: background worker did not start (see $dir/bg.log)"
+  echo "smart-subagents: background worker=$worker pid=$pid dir=$dir"
+  echo "  tail:   bash \"$SSA_SELF\" tail --dir \"$dir\""
+  echo "  status: bash \"$SSA_SELF\" status --dir \"$dir\""
+  echo "  stop:   bash \"$SSA_SELF\" stop --dir \"$dir\""
+}
+
+cmd_bg_run() {
+  # Internal: the detached wrapper. Records identity, arms the watchdog, runs
+  # the ordinary foreground dispatch, then reaps the watchdog.
+  local dir="" worker="" rc=0 pgid wd=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dir="${2:-}"; shift 2 ;;
+      --worker) worker="${2:-}"; shift 2 ;;
+      *) die "bg-run: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$dir" && -d "$dir" ]] || die "bg-run: --dir required"
+  echo "$$" >"$dir/worker.pid"
+  _pid_start "$$" >"$dir/worker-start.txt"
+  pgid="$(_pgid_of "$$")"
+  echo "$pgid" >"$dir/worker.pgid"
+  _utc >"$dir/started-at.txt"
+  _watchdog "$dir" "$$" "$pgid" &
+  wd=$!
+  cmd_dispatch --dir "$dir" --worker "$worker" || rc=$?
+  kill "$wd" 2>/dev/null || true
+  wait "$wd" 2>/dev/null || true
+  return "$rc"
+}
+
+cmd_tail() {
+  local dir=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dir="${2:-}"; shift 2 ;;
+      *) die "tail: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$dir" && -d "$dir" ]] || die "tail: --dir required"
+  [[ -f "$dir/stdout.log" ]] || die "tail: no stdout.log yet in $dir"
+  exec tail -f "$dir/stdout.log"
+}
+
+cmd_stop() {
+  local dir=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dir="${2:-}"; shift 2 ;;
+      *) die "stop: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$dir" && -d "$dir" ]] || die "stop: --dir required"
+  local pid pgid state
+  pid="$(_read1 "$dir/worker.pid")"
+  state="$(_worker_state "$dir")"
+  if [[ -z "$pid" ]]; then
+    echo "stop: nothing to stop, no worker.pid in $dir (phase=$(_task_phase "$dir"))"
+    return 1
+  fi
+  case "$state" in
+    running) ;;
+    reused)
+      echo "stop: refusing, pid $pid is alive but its start time does not match" \
+        "the recorded one, so it is a different process now"
+      return 1 ;;
+    *)
+      echo "stop: worker $pid is not running (state=$state," \
+        "exit=$(_read1 "$dir/exit-code.txt" '?'))"
+      return 1 ;;
+  esac
+  pgid="$(_read1 "$dir/worker.pgid" "$pid")"
+  _kill_group "$pgid"
+  echo "$(_utc) stopped by operator (pid $pid, pgid $pgid)" >>"$dir/stopped.txt"
+  echo "stop: signalled process group $pgid for $dir"
+}
+
+# --- ls / status: what is on this machine right now ---------------------------
+
+cmd_ls() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      *) die "ls: unknown arg $1" ;;
+    esac
+  done
+  [[ -d "$SSA_WORK_DIR" ]] || { echo "no task dirs under $SSA_WORK_DIR"; return 0; }
+  local now d id age repo worker class phase diff rows=0
+  now="$(_now)"
+  printf '%-18s %5s %-16s %-7s %-22s %-9s %s\n' \
+    TASK AGE REPO WORKER SIZE/DIFF/KIND PHASE DIFF
+  for d in "$SSA_WORK_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    id="$(basename "$d")"
+    age="$(_age_human $(( now - $(_mtime "$d") )) )"
+    repo="$(basename "$(_read1 "$d/repo.txt" '?')")"
+    if [[ "$id" == plan-* ]]; then
+      local plans
+      plans="$(find "$d" -maxdepth 1 -name 'plan-*.md' 2>/dev/null | wc -l | tr -d ' ')"
+      printf '%-18s %5s %-16s %-7s %-22s %-9s %s\n' \
+        "$id" "$age" "$repo" "panel" "$(_task_class "$d")" "panel" \
+        "${plans} plan(s)"
+      rows=$(( rows + 1 ))
+      continue
+    fi
+    [[ -f "$d/task-id.txt" ]] || continue
+    worker="$(_read1 "$d/worker.txt" '-')"
+    class="$(_task_class "$d")"
+    phase="$(_task_phase "$d")"
+    diff="$(_diff_summary "$d")"
+    [[ ! -f "$d/stalled.txt" ]] || phase="${phase}!"
+    printf '%-18s %5s %-16s %-7s %-22s %-9s %s\n' \
+      "$id" "$age" "$repo" "$worker" "$class" "$phase" "$diff"
+    rows=$(( rows + 1 ))
+  done
+  (( rows > 0 )) || echo "(none)"
+}
+
+cmd_status() {
+  local dir=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dir="${2:-}"; shift 2 ;;
+      *) die "status: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$dir" && -d "$dir" ]] || die "status: --dir required"
+  local now wt sid state pid
+  now="$(_now)"
+  wt="$(_read1 "$dir/wt.txt" '-')"
+  sid="$(_read1 "$dir/session-id.txt")"
+  state="$(_worker_state "$dir")"
+  pid="$(_read1 "$dir/worker.pid" '-')"
+  echo "task      : $(_read1 "$dir/task-id.txt" "$(basename "$dir")")"
+  echo "dir       : $dir"
+  echo "age       : $(_age_human $(( now - $(_mtime "$dir") )) )"
+  echo "repo      : $(_read1 "$dir/repo.txt" '?')"
+  echo "worktree  : $wt"
+  echo "worker    : $(_read1 "$dir/worker.txt" '-')"
+  echo "class     : $(_task_class "$dir")"
+  echo "phase     : $(_task_phase "$dir")"
+  echo "base sha  : $(_read1 "$dir/base-sha.txt" '-')"
+  if [[ -d "$wt" ]]; then
+    echo "branch    : $(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+  else
+    echo "branch    : -"
+  fi
+  echo "exit code : $(_read1 "$dir/exit-code.txt" '-')"
+  if [[ -n "$sid" ]]; then
+    echo "session   : $sid"
+  else
+    echo "session   : resume=unavailable"
+  fi
+  echo "worker pid: $pid ($state)"
+  [[ ! -f "$dir/stalled.txt" ]] || echo "stalled   : $(tail -n1 "$dir/stalled.txt")"
+  [[ ! -f "$dir/stopped.txt" ]] || echo "stopped   : $(tail -n1 "$dir/stopped.txt")"
+  echo "diff      : $(_diff_summary "$dir")"
+  if [[ -f "$dir/outcome.json" ]]; then
+    echo "verify    : $(python3 - "$dir/outcome.json" <<'PY'
+import json, sys
+try:
+    doc = json.load(open(sys.argv[1]))
+except Exception as exc:
+    print("unreadable outcome.json: %s" % exc)
+else:
+    v = doc.get("verify") or {}
+    print("verdict=%s new_failures=%s scope_ok=%s secrets_ok=%s" % (
+        v.get("verdict"), v.get("new_failures"), v.get("scope_ok"),
+        v.get("secrets_ok")))
+PY
+)"
+  else
+    echo "verify    : not run (bash \"$SSA_SELF\" verify --dir \"$dir\")"
+  fi
+  if [[ -f "$dir/outcome-record.json" ]]; then
+    echo "recorded  : yes"
+  else
+    echo "recorded  : no (bash \"$SSA_SELF\" record --dir \"$dir\" --outcome ...)"
+  fi
+  if [[ -f "$dir/stdout.log" ]]; then
+    echo "log tail  :"
+    tail -n3 "$dir/stdout.log" | sed 's/^/  | /'
+  else
+    echo "log tail  : (no stdout.log)"
+  fi
 }
 
 # --- plan: parallel planning panel -------------------------------------------
@@ -657,6 +1093,644 @@ cmd_verify_summary() {
   fi
 }
 
+# --- cleanup / gc: retire worktrees without losing work -----------------------
+# Deleting a task dir throws away a worktree, a branch and every log. So the
+# default is to refuse and explain, and only an explicit --force overrides.
+
+_task_unsafe_reason() {
+  # Prints the reason a task dir must not be deleted, empty when it is safe.
+  local dir="$1" wt base state cnt
+  state="$(_worker_state "$dir")"
+  if [[ "$state" == "running" || "$state" == "reused" ]]; then
+    printf 'worker process %s is alive' "$(_read1 "$dir/worker.pid" '?')"
+    return 0
+  fi
+  wt="$(_read1 "$dir/wt.txt")"
+  if [[ -n "$wt" && "$wt" != "NOT_GIT" && -d "$wt" ]]; then
+    if [[ -n "$(git -C "$wt" status --porcelain -uall 2>/dev/null || echo unreadable)" ]]; then
+      printf 'worktree has uncommitted changes'
+      return 0
+    fi
+    base="$(_read1 "$dir/base-sha.txt")"
+    if [[ -n "$base" ]]; then
+      cnt="$(git -C "$wt" rev-list --count "${base}..HEAD" 2>/dev/null || echo 0)"
+      if [[ "$cnt" != "0" ]]; then
+        printf 'branch has %s commit(s) not reachable from base' "$cnt"
+        return 0
+      fi
+    fi
+  fi
+  printf ''
+}
+
+_cleanup_apply() {
+  local dir="$1" force="${2:-}" repo wt id
+  repo="$(_read1 "$dir/repo.txt")"
+  wt="$(_read1 "$dir/wt.txt")"
+  id="$(_read1 "$dir/task-id.txt" "$(basename "$dir")")"
+  if [[ -n "$repo" && -d "$repo" && -n "$wt" && "$wt" != "NOT_GIT" ]]; then
+    if [[ -n "$force" ]]; then
+      git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+    else
+      git -C "$repo" worktree remove "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+    fi
+    git -C "$repo" branch -D "ssa/${id}" >/dev/null 2>&1 || true
+    git -C "$repo" worktree prune >/dev/null 2>&1 || true
+  fi
+  rm -rf "$dir"
+}
+
+cmd_cleanup() {
+  local dir="" force=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dir="${2:-}"; shift 2 ;;
+      --force) force=1; shift ;;
+      *) die "cleanup: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$dir" && -d "$dir" ]] || die "cleanup: --dir required"
+  local reason
+  reason="$(_task_unsafe_reason "$dir")"
+  if [[ -n "$reason" && -z "$force" ]]; then
+    echo "cleanup: refused for $dir: $reason (use --force to delete anyway)"
+    return 1
+  fi
+  _cleanup_apply "$dir" "$force"
+  if [[ -n "$reason" ]]; then
+    echo "cleanup: forced removal of $dir despite: $reason"
+  else
+    echo "cleanup: removed worktree, ssa branch and task dir $dir"
+  fi
+}
+
+cmd_gc() {
+  local days=7 dry=1
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --older-than) days="${2:-}"; shift 2 ;;
+      --dry-run) dry=1; shift ;;
+      --no-dry-run) dry=0; shift ;;
+      *) die "gc: unknown arg $1" ;;
+    esac
+  done
+  [[ "$days" =~ ^[0-9]+$ ]] || die "gc: --older-than takes whole days"
+  [[ -d "$SSA_WORK_DIR" ]] || { echo "gc: nothing under $SSA_WORK_DIR"; return 0; }
+  local now cutoff d age reason kind plans deleted=0 kept=0
+  now="$(_now)"
+  cutoff=$(( days * 86400 ))
+  for d in "$SSA_WORK_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    age=$(( now - $(_mtime "$d") ))
+    reason="$(_task_unsafe_reason "$d")"
+    kind="task"
+    if [[ "$(basename "$d")" == plan-* ]]; then
+      kind="panel"
+      plans="$(find "$d" -maxdepth 1 -name 'plan-*.md' 2>/dev/null | wc -l | tr -d ' ')"
+      # A finished panel is pure read-only scratch: its worktree is detached and
+      # its value is the plan files a supervisor already consumed.
+      if [[ -z "$reason" && "$plans" != "0" ]]; then
+        age="$cutoff"
+      fi
+    fi
+    if [[ -n "$reason" ]]; then
+      echo "kept  $kind $(basename "$d") ($(_age_human "$age")): $reason"
+      kept=$(( kept + 1 ))
+      continue
+    fi
+    if (( age < cutoff )); then
+      echo "kept  $kind $(basename "$d") ($(_age_human "$age")): younger than ${days}d"
+      kept=$(( kept + 1 ))
+      continue
+    fi
+    if (( dry == 1 )); then
+      echo "safe  $kind $(basename "$d") ($(_age_human "$age")): would delete"
+    else
+      _cleanup_apply "$d" ""
+      echo "gone  $kind $(basename "$d") ($(_age_human "$age")): deleted"
+    fi
+    deleted=$(( deleted + 1 ))
+  done
+  if (( dry == 1 )); then
+    echo "gc: dry run, $deleted safe, $kept kept (pass --no-dry-run to delete)"
+  else
+    echo "gc: deleted $deleted, kept $kept"
+  fi
+}
+
+# --- doctor: is this machine able to dispatch at all? -------------------------
+
+_doc_row() {
+  # state<TAB>check<TAB>detail, collected then rendered once.
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$_DOC_FILE"
+  [[ "$1" != "fail" ]] || _DOC_FATAL=$(( _DOC_FATAL + 1 ))
+}
+
+_DOC_FILE=""
+_DOC_FATAL=0
+
+cmd_doctor() {
+  local json=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      *) die "doctor: unknown arg $1" ;;
+    esac
+  done
+  _DOC_FILE="$(mktemp "${TMPDIR:-/tmp}/ssa-doctor.XXXXXX")"
+  _DOC_FATAL=0
+
+  if command -v python3 >/dev/null 2>&1; then
+    _doc_row ok python3 "$(python3 -V 2>&1 | head -n1)"
+  else
+    _doc_row fail python3 "not on PATH, no command can run"
+  fi
+  if command -v git >/dev/null 2>&1; then
+    _doc_row ok git "$(git --version 2>&1 | head -n1)"
+  else
+    _doc_row fail git "not on PATH, worktrees are impossible"
+  fi
+
+  local name bin
+  for name in codex grok kimi; do
+    case "$name" in
+      codex) bin="$CODEX_BIN" ;;
+      grok) bin="$GROK_BIN" ;;
+      kimi) bin="$KIMI_BIN" ;;
+    esac
+    if [[ -n "$bin" && -x "$bin" ]]; then
+      _doc_row ok "bin:$name" "$bin"
+    else
+      _doc_row warn "bin:$name" "not executable at ${bin:-<unset>}"
+    fi
+  done
+
+  # Auth is checked by file existence only. Never read, never print.
+  _doc_auth codex "$HOME/.codex/auth.json"
+  _doc_auth grok "$HOME/.grok/auth.json"
+  _doc_auth kimi "$HOME/.kimi-code/credentials/kimi-code.json"
+  if command -v security >/dev/null 2>&1; then
+    if security find-generic-password -s 'Claude Code-credentials' \
+        >/dev/null 2>&1; then
+      _doc_row ok auth:claude "keychain item present"
+    else
+      _doc_row warn auth:claude "no keychain item for Claude Code-credentials"
+    fi
+  else
+    _doc_row warn auth:claude "no security(1) on this platform, cannot check"
+  fi
+
+  local cache_dir cache_file perms age
+  cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/smart-subagents"
+  cache_file="$cache_dir/ai-cli-usage.json"
+  if [[ -d "$cache_dir" ]]; then
+    perms="$(stat -f '%OLp' "$cache_dir" 2>/dev/null \
+      || stat -c '%a' "$cache_dir" 2>/dev/null || echo '?')"
+    if [[ "$perms" == "700" ]]; then
+      _doc_row ok cache:perms "$cache_dir is 0700"
+    else
+      _doc_row warn cache:perms "$cache_dir is $perms, want 0700"
+    fi
+    if [[ -f "$cache_file" ]]; then
+      age=$(( $(_now) - $(_mtime "$cache_file") ))
+      _doc_row ok cache:usage "quota cache $(_age_human "$age") old"
+    else
+      _doc_row warn cache:usage "no quota cache yet, first pick will be slow"
+    fi
+  else
+    _doc_row warn cache:perms "$cache_dir does not exist yet"
+  fi
+
+  if mkdir -p "$SSA_WORK_DIR" 2>/dev/null && [[ -w "$SSA_WORK_DIR" ]]; then
+    _doc_row ok workdir "$SSA_WORK_DIR writable"
+  else
+    _doc_row fail workdir "$SSA_WORK_DIR not writable, dispatch cannot mint a task"
+  fi
+
+  local d repos_file orphans=0 pending=0 noresume=0
+  repos_file="$(mktemp "${TMPDIR:-/tmp}/ssa-doctor-repos.XXXXXX")"
+  if [[ -d "$SSA_WORK_DIR" ]]; then
+    for d in "$SSA_WORK_DIR"/*; do
+      [[ -d "$d" ]] || continue
+      if [[ "$(basename "$d")" != plan-* && ! -f "$d/task-id.txt" ]]; then
+        orphans=$(( orphans + 1 ))
+        continue
+      fi
+      [[ ! -f "$d/repo.txt" ]] || cat "$d/repo.txt" >>"$repos_file"
+      if [[ -f "$d/exit-code.txt" && ! -f "$d/outcome.json" ]]; then
+        pending=$(( pending + 1 ))
+      fi
+      [[ ! -f "$d/resume-unavailable.txt" ]] || noresume=$(( noresume + 1 ))
+    done
+  fi
+  if (( orphans == 0 )); then
+    _doc_row ok orphans "no task dirs without task-id.txt"
+  else
+    _doc_row warn orphans "$orphans dir(s) without task-id.txt under $SSA_WORK_DIR"
+  fi
+  if (( pending == 0 )); then
+    _doc_row ok verify:pending "every finished task has an outcome.json"
+  else
+    _doc_row warn verify:pending \
+      "$pending finished task(s) unverified, run: smart-subagents.sh verify --dir DIR"
+  fi
+  if (( noresume == 0 )); then
+    _doc_row ok resume "no tasks marked resume-unavailable"
+  else
+    _doc_row warn resume "$noresume task(s) have no resumable session id"
+  fi
+
+  local repo stale=0 wtpath
+  if [[ -s "$repos_file" ]]; then
+    while IFS= read -r repo; do
+      [[ -n "$repo" && -d "$repo" ]] || continue
+      while IFS= read -r wtpath; do
+        [[ -n "$wtpath" ]] || continue
+        [[ -d "$wtpath" ]] || stale=$(( stale + 1 ))
+      done < <(git -C "$repo" worktree list --porcelain 2>/dev/null \
+        | sed -n 's/^worktree //p')
+    done < <(sort -u "$repos_file")
+  fi
+  rm -f "$repos_file"
+  if (( stale == 0 )); then
+    _doc_row ok worktrees "no registered worktree points at a missing path"
+  else
+    _doc_row warn worktrees "$stale stale worktree entr(ies), run git worktree prune"
+  fi
+
+  if [[ -n "$json" ]]; then
+    python3 - "$_DOC_FILE" <<'PY'
+import json, sys
+rows = []
+for line in open(sys.argv[1], errors="replace"):
+    parts = line.rstrip("\n").split("\t", 2)
+    if len(parts) == 3:
+        rows.append({"state": parts[0], "check": parts[1], "detail": parts[2]})
+print(json.dumps(rows, indent=2))
+PY
+  else
+    while IFS=$'\t' read -r state check detail; do
+      printf '[%-4s] %-16s %s\n' "$state" "$check" "$detail"
+    done <"$_DOC_FILE"
+  fi
+  local fatal="$_DOC_FATAL"
+  rm -f "$_DOC_FILE"
+  (( fatal == 0 )) || return 1
+}
+
+_doc_auth() {
+  local cli="$1" path="$2"
+  if [[ -f "$path" ]]; then
+    _doc_row ok "auth:$cli" "credentials file present"
+  else
+    _doc_row warn "auth:$cli" "no credentials file at $path"
+  fi
+}
+
+# --- verify: machine-readable, baseline-aware ---------------------------------
+
+cmd_verify() {
+  local dir=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dir="${2:-}"; shift 2 ;;
+      *) die "verify: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$dir" && -d "$dir" ]] || die "verify: --dir required"
+  need git; need python3
+  local wt base
+  wt="$(_read1 "$dir/wt.txt")"
+  base="$(_read1 "$dir/base-sha.txt")"
+  [[ -n "$wt" && -d "$wt" ]] || die "verify: missing worktree ($dir/wt.txt)"
+  [[ -n "$base" ]] || die "verify: missing base SHA ($dir/base-sha.txt)"
+
+  local results="$dir/verify-results.txt"
+  local final="$dir/verify-final.log"
+  : >"$results"
+  : >"$final"
+  if [[ -f "$dir/verify-cmds.txt" ]]; then
+    local cmd rc out
+    while IFS= read -r cmd; do
+      [[ -n "$cmd" ]] || continue
+      case "$cmd" in \#*) continue ;; esac
+      out="$(mktemp "${TMPDIR:-/tmp}/ssa-verify.XXXXXX")"
+      rc=0
+      ( cd "$wt" && eval "$cmd" ) >"$out" 2>&1 || rc=$?
+      {
+        echo "### $cmd (exit $rc)"
+        tail -n5 "$out"
+      } >>"$final"
+      printf '%s\t%s\n' "$rc" "$cmd" >>"$results"
+      rm -f "$out"
+    done <"$dir/verify-cmds.txt"
+  fi
+
+  # Scope: every changed path must match a glob the parent declared.
+  git -C "$wt" diff --name-only -z "$base" >"$dir/verify-changed.z" 2>/dev/null || :
+
+  local secrets_ok=1
+  if cmd_scan_secrets --dir "$dir"; then secrets_ok=1; else secrets_ok=0; fi
+
+  local rc=0
+  python3 - "$dir" "$secrets_ok" <<'PY' || rc=$?
+import fnmatch, json, os, sys
+from pathlib import Path
+
+d = Path(sys.argv[1])
+secrets_ok = sys.argv[2] == "1"
+
+def lines(name):
+    p = d / name
+    if not p.exists():
+        return None
+    return [l for l in p.read_text(errors="replace").splitlines() if l.strip()]
+
+results = []
+for raw in (lines("verify-results.txt") or []):
+    code, _, cmd = raw.partition("\t")
+    results.append((int(code), cmd))
+
+baseline_raw = lines("baseline-results.txt")
+baseline = {}
+if baseline_raw is not None:
+    for raw in baseline_raw:
+        code, _, cmd = raw.partition("\t")
+        try:
+            baseline[cmd] = int(code)
+        except ValueError:
+            continue
+
+commands = []
+new_failures = 0
+any_failure = False
+for code, cmd in results:
+    base_exit = baseline.get(cmd) if baseline_raw is not None else None
+    commands.append({"cmd": cmd, "exit": code, "baseline_exit": base_exit})
+    if code != 0:
+        any_failure = True
+        if base_exit == 0 or (baseline_raw is not None and base_exit is None):
+            new_failures += 1
+
+scope_file = d / "scope.txt"
+scope_ok = None
+out_of_scope = []
+changed_path = d / "verify-changed.z"
+changed = []
+if changed_path.exists():
+    blob = changed_path.read_bytes().decode("utf-8", "replace")
+    changed = [p for p in blob.split("\0") if p]
+if scope_file.exists():
+    globs = [g.strip() for g in scope_file.read_text().splitlines() if g.strip()]
+    scope_ok = True
+    for path in changed:
+        if not any(fnmatch.fnmatch(path, g) for g in globs):
+            scope_ok = False
+            out_of_scope.append(path)
+
+if new_failures or scope_ok is False or not secrets_ok:
+    verdict = "fail"
+elif baseline_raw is None and any_failure:
+    verdict = "inconclusive"
+else:
+    verdict = "pass"
+
+doc = {
+    "schema_version": 1,
+    "verify": {
+        "commands": commands,
+        "new_failures": new_failures,
+        "scope_ok": scope_ok,
+        "out_of_scope": out_of_scope,
+        "secrets_ok": secrets_ok,
+        "changed_files": len(changed),
+        "verdict": verdict,
+    },
+}
+(d / "outcome.json").write_text(json.dumps(doc, indent=2) + "\n")
+print("verify: verdict=%s new_failures=%d scope_ok=%s secrets_ok=%s changed=%d"
+      % (verdict, new_failures, scope_ok, secrets_ok, len(changed)))
+if out_of_scope:
+    print("verify: out of scope: " + ", ".join(out_of_scope[:10]))
+sys.exit({"pass": 0, "fail": 1, "inconclusive": 2}[verdict])
+PY
+  rm -f "$dir/verify-changed.z"
+  return "$rc"
+}
+
+# --- outcome ledger -----------------------------------------------------------
+# One line per dispatch, no prompts, no diffs, no paths, no session ids. The
+# point is to learn which worker actually finishes which kind of work.
+
+cmd_record() {
+  local dir="" outcome="" retries=0 handoff="" notes=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dir="${2:-}"; shift 2 ;;
+      --outcome) outcome="${2:-}"; shift 2 ;;
+      --retries) retries="${2:-}"; shift 2 ;;
+      --handoff-to) handoff="${2:-}"; shift 2 ;;
+      --notes) notes="${2:-}"; shift 2 ;;
+      *) die "record: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$dir" && -d "$dir" ]] || die "record: --dir required"
+  case "$outcome" in
+    verified-pass|partial|rejected|blocked|env-blocked|rate-limited) ;;
+    *) die "record: --outcome must be one of verified-pass partial rejected blocked env-blocked rate-limited" ;;
+  esac
+  [[ "$retries" =~ ^[0-9]+$ ]] || die "record: --retries takes a whole number"
+  need python3
+  mkdir -p "$SSA_STATE_DIR" 2>/dev/null || true
+  chmod 700 "$SSA_STATE_DIR" 2>/dev/null || true
+  python3 - "$dir" "$outcome" "$retries" "$handoff" "$notes" "$SSA_LEDGER" <<'PY'
+import hashlib, json, os, re, sys, time
+from pathlib import Path
+
+d = Path(sys.argv[1])
+outcome, retries, handoff, notes, ledger = sys.argv[2:7]
+
+def read1(name, default=""):
+    p = d / name
+    if not p.exists():
+        return default
+    line = p.read_text(errors="replace").strip().splitlines()
+    return line[0].strip() if line else default
+
+def mtime(name):
+    p = d / name
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return None
+
+repo = read1("repo.txt")
+# The path itself never leaves the machine, only a stable hash of it.
+repo_hash = hashlib.sha256(repo.encode("utf-8")).hexdigest()[:12] if repo else ""
+
+args = []
+p = d / "worker-args.txt"
+if p.exists():
+    args = [a for a in p.read_text(errors="replace").splitlines() if a.strip()]
+
+exit_code = read1("exit-code.txt")
+try:
+    exit_code = int(exit_code)
+except ValueError:
+    exit_code = None
+
+start, end = mtime("brief.md"), mtime("stdout.log")
+wall = int(end - start) if (start and end and end >= start) else None
+
+files = insertions = deletions = None
+stat = d / "diff-stat.txt"
+if stat.exists():
+    tail = [l for l in stat.read_text(errors="replace").splitlines() if l.strip()]
+    if tail:
+        last = tail[-1]
+        m = re.search(r"(\d+) files? changed", last)
+        files = int(m.group(1)) if m else None
+        m = re.search(r"(\d+) insertions?\(\+\)", last)
+        insertions = int(m.group(1)) if m else 0
+        m = re.search(r"(\d+) deletions?\(-\)", last)
+        deletions = int(m.group(1)) if m else 0
+
+verified = None
+oc = d / "outcome.json"
+if oc.exists():
+    try:
+        verified = (json.loads(oc.read_text()).get("verify") or {}).get("verdict") == "pass"
+    except Exception:
+        verified = None
+
+def quota(name):
+    p = d / name
+    if not p.exists():
+        return None
+    try:
+        doc = json.loads(p.read_text())
+    except Exception:
+        return None
+    out = {}
+    for cli in doc.get("clis") or []:
+        windows = cli.get("windows") or []
+        pick = None
+        for w in windows:
+            if w.get("used_pct") is None:
+                continue
+            if pick is None or "primary" in (w.get("name") or ""):
+                pick = w
+        if pick is not None:
+            out[cli.get("cli")] = round(float(pick["used_pct"]), 2)
+    return out or None
+
+record = {
+    "schema_version": 1,
+    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "task_id": read1("task-id.txt", d.name),
+    "repo_hash": repo_hash,
+    "worker": read1("worker.txt"),
+    "kind": read1("kind.txt"),
+    "size": read1("size.txt"),
+    "difficulty": read1("difficulty.txt"),
+    "worker_args": args,
+    "exit_code": exit_code,
+    "wall_seconds": wall,
+    "files_changed": files,
+    "insertions": insertions,
+    "deletions": deletions,
+    "verification_passed": verified,
+    "quota_before": quota("quota-before.json"),
+    "quota_after": quota("quota-after.json"),
+    "outcome": outcome,
+    "retries": int(retries),
+    "handoff_to": handoff or None,
+    "notes": notes or None,
+}
+
+(d / "outcome-record.json").write_text(json.dumps(record, indent=2) + "\n")
+path = Path(ledger)
+path.parent.mkdir(parents=True, exist_ok=True)
+try:
+    os.chmod(path.parent, 0o700)
+except OSError:
+    pass
+existed = path.exists()
+with open(path, "a") as fh:
+    fh.write(json.dumps(record) + "\n")
+if not existed:
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+print("record: %s worker=%s outcome=%s -> %s"
+      % (record["task_id"], record["worker"] or "-", outcome, path))
+PY
+}
+
+cmd_ledger() {
+  local days=7
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --days) days="${2:-}"; shift 2 ;;
+      *) die "ledger: unknown arg $1" ;;
+    esac
+  done
+  [[ "$days" =~ ^[0-9]+$ ]] || die "ledger: --days takes a whole number"
+  need python3
+  python3 - "$SSA_LEDGER" "$days" <<'PY'
+import calendar, json, sys, time
+from pathlib import Path
+
+path, days = Path(sys.argv[1]), int(sys.argv[2])
+if not path.exists():
+    print("ledger: no outcomes recorded yet (%s)" % path)
+    raise SystemExit(0)
+
+cutoff = time.time() - days * 86400
+rows = []
+for line in path.read_text(errors="replace").splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        rec = json.loads(line)
+    except Exception:
+        continue
+    try:
+        ts = calendar.timegm(time.strptime(rec.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        ts = cutoff
+    if ts >= cutoff:
+        rows.append(rec)
+
+if not rows:
+    print("ledger: nothing in the last %dd (%s)" % (days, path))
+    raise SystemExit(0)
+
+by = {}
+for rec in rows:
+    cli = rec.get("worker") or "-"
+    agg = by.setdefault(cli, {"n": 0, "pass": 0, "retries": 0, "quota": 0.0})
+    agg["n"] += 1
+    if rec.get("outcome") == "verified-pass":
+        agg["pass"] += 1
+    agg["retries"] += int(rec.get("retries") or 0)
+    before, after = rec.get("quota_before") or {}, rec.get("quota_after") or {}
+    if cli in before and cli in after:
+        agg["quota"] += max(0.0, after[cli] - before[cli])
+
+print("ledger: last %dd, %d dispatch(es)" % (days, len(rows)))
+print("%-8s %10s %14s %12s %14s" % ("WORKER", "DISPATCH", "VERIFIED-PASS",
+                                     "MEAN RETRY", "QUOTA USED %"))
+for cli in sorted(by):
+    agg = by[cli]
+    print("%-8s %10d %13.0f%% %12.2f %13.1f%%" % (
+        cli, agg["n"], 100.0 * agg["pass"] / agg["n"],
+        agg["retries"] / agg["n"], agg["quota"]))
+PY
+}
+
 cmd_help() {
   cat <<'EOF'
 Usage: smart-subagents.sh <command> [options]
@@ -674,8 +1748,57 @@ Usage: smart-subagents.sh <command> [options]
   Difficulty is how much thinking it needs (gates worker reasoning effort).
   They are independent: a 15-line lock-free ring buffer is small and hard.
 
-  dispatch --dir DIR [--worker CLI]
-      Run the worker against DIR/brief.md in the worktree. Captures logs + session id.
+  dispatch --dir DIR [--worker CLI] [--background]
+      Run the worker against DIR/brief.md in the worktree. Captures logs +
+      session id. With --background the worker is detached into its own process
+      group, the pid lands in DIR/worker.pid, and a watchdog kills a run whose
+      log and worktree both stop changing (SSA_STALL_SECS, default 600).
+
+  ls
+      One line per task and planning panel under SSA_WORK_DIR: age, repo,
+      worker, size/difficulty/kind, inferred phase, diff summary.
+
+  status --dir DIR
+      Full detail for one task: base sha, branch, exit code, session or
+      resume=unavailable, worker pid state, verify state, last log lines.
+
+  tail --dir DIR
+      Follow DIR/stdout.log.
+
+  stop --dir DIR
+      TERM then KILL the recorded process group. Refuses when the pid is gone
+      or belongs to a different process now.
+
+  verify --dir DIR
+      Run DIR/verify-cmds.txt in the worktree, compare against
+      DIR/baseline-results.txt, check changed paths against DIR/scope.txt, run
+      the secret scan, and write DIR/outcome.json. Exit 0 pass, 1 fail,
+      2 inconclusive.
+
+  record --dir DIR --outcome verified-pass|partial|rejected|blocked|env-blocked|rate-limited
+         [--retries N] [--handoff-to CLI] [--notes STR]
+      Append one outcome line to the ledger and write DIR/outcome-record.json.
+      Carries no prompts, diffs, paths, session ids or account identifiers.
+
+  ledger [--days N]
+      Per-CLI dispatch count, verified-pass rate, mean retries and quota
+      consumed over the last N days (default 7).
+
+  cleanup --dir DIR [--force]
+      Remove the worktree, the ssa/<id> branch and the task dir. Refuses while
+      a worker is alive, the worktree is dirty, or the branch has commits the
+      base does not have.
+
+  gc [--older-than DAYS] [--dry-run|--no-dry-run]
+      Classify every task dir as safe or kept and, with --no-dry-run, delete
+      the safe ones. Dry run and 7 days by default. Finished planning panels
+      are collected regardless of age.
+
+  doctor [--json]
+      Offline health check: interpreter and git, worker binaries, credential
+      files (existence only), cache perms and freshness, work dir writability,
+      orphan task dirs, stale worktrees, unverified and unresumable tasks.
+      Nonzero only when a new dispatch could not run at all.
 
   plan --repo PATH (--goal TEXT | --goal-file FILE) [--n 3] [--kind KIND]
        [--difficulty LEVEL] [--size SIZE]
@@ -695,6 +1818,13 @@ Env:
   SSA_WORK_DIR                    task scratch root (default: $TMPDIR/smart-subagents)
   SSA_USAGE_PY                    override path to ai-cli-usage.py
   SSA_PREMIUM_MODELS              model names that gate local labor (default: Fable,Opus)
+  SSA_ALLOW_KIMI_WRITE=1          accept the risk of a write dispatch to kimi
+  SSA_STALL_SECS                  watchdog stall threshold (default 600)
+  SSA_DEADLINE_SECS               absolute run deadline (default 0, off)
+  SSA_KILL_GRACE_SECS             seconds between TERM and KILL (default 10)
+  SSA_NO_QUOTA_SNAPSHOT=1         skip the post-dispatch quota snapshot
+  SSA_LEDGER                      outcome ledger path
+                                  (default: $XDG_STATE_HOME/smart-subagents/outcomes.jsonl)
 EOF
 }
 
@@ -705,6 +1835,17 @@ main() {
     init) cmd_init "$@" ;;
     pick) cmd_pick "$@" ;;
     dispatch) cmd_dispatch "$@" ;;
+    bg-run) cmd_bg_run "$@" ;;
+    ls|list) cmd_ls "$@" ;;
+    status) cmd_status "$@" ;;
+    tail) cmd_tail "$@" ;;
+    stop) cmd_stop "$@" ;;
+    verify) cmd_verify "$@" ;;
+    record) cmd_record "$@" ;;
+    ledger) cmd_ledger "$@" ;;
+    cleanup) cmd_cleanup "$@" ;;
+    gc) cmd_gc "$@" ;;
+    doctor) cmd_doctor "$@" ;;
     plan) cmd_plan "$@" ;;
     scan-secrets) cmd_scan_secrets "$@" ;;
     verify-summary|summary) cmd_verify_summary "$@" ;;
