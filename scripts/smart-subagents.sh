@@ -306,6 +306,66 @@ PY
   rm -f "$tmp"
 }
 
+_classify_failure() {
+  # Tail of a failed worker log -> rate-limit | auth | "" (nothing conclusive).
+  # Conservative on purpose: a wrong classification benches a healthy worker.
+  local log="$1" tail_txt=""
+  [[ -f "$log" ]] || return 0
+  tail_txt="$(tail -n 40 "$log" 2>/dev/null | tr 'A-Z' 'a-z' || true)"
+  [[ -n "$tail_txt" ]] || return 0
+  if printf '%s\n' "$tail_txt" \
+      | grep -Eq 'rate.?limit|429|too many requests|quota exceeded'; then
+    printf 'rate-limit'
+    return 0
+  fi
+  if printf '%s\n' "$tail_txt" \
+      | grep -Eq 'unauthori[sz]ed|401|invalid.*(token|credential)|please (log ?in|sign ?in)'; then
+    printf 'auth'
+    return 0
+  fi
+  return 0
+}
+
+_maybe_cooldown() {
+  # _maybe_cooldown DIR WORKER RC -> set a cross-task cooldown when the log says why
+  local dir="$1" worker="$2" rc="$3" reason=""
+  [[ "$rc" != "0" ]] || return 0
+  reason="$(_classify_failure "$dir/stdout.log")"
+  [[ -n "$reason" ]] || return 0
+  printf '%s\n' "$reason" >"$dir/cooldown.txt"
+  if [[ -f "$USAGE_PY" ]]; then
+    python3 "$USAGE_PY" --cooldown "$worker" --cooldown-reason "$reason" \
+      >/dev/null 2>&1 || true
+  fi
+  echo "cooldown=$worker:$reason"
+}
+
+cmd_cooldown() {
+  local cli="" clear="" reason="rate-limit" minutes=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cli) cli="${2:-}"; shift 2 ;;
+      --clear) clear=1; shift ;;
+      --reason) reason="${2:-}"; shift 2 ;;
+      --minutes) minutes="${2:-}"; shift 2 ;;
+      *) die "cooldown: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$cli" ]] || die "cooldown: --cli required"
+  need python3
+  [[ -f "$USAGE_PY" ]] || die "cooldown: no usage script at $USAGE_PY"
+  if [[ -n "$clear" ]]; then
+    python3 "$USAGE_PY" --clear-cooldown "$cli"
+    return $?
+  fi
+  if [[ -n "$minutes" ]]; then
+    python3 "$USAGE_PY" --cooldown "$cli" --cooldown-reason "$reason" \
+      --cooldown-minutes "$minutes"
+  else
+    python3 "$USAGE_PY" --cooldown "$cli" --cooldown-reason "$reason"
+  fi
+}
+
 cmd_dispatch() {
   local dir="" worker="" background=""
   while [[ $# -gt 0 ]]; do
@@ -448,6 +508,9 @@ PY
 
   echo "$rc" >"$dir/exit-code.txt"
   echo "$sid" >"$dir/session-id.txt"
+  # A 429 or a dead token is not this task's problem alone: bench the worker for
+  # every task until the cooldown expires.
+  _maybe_cooldown "$dir" "$worker" "$rc"
   if [[ -z "$sid" ]]; then
     echo "worker did not emit a resumable session id" >"$dir/resume-unavailable.txt"
   fi
@@ -1775,6 +1838,11 @@ Usage: smart-subagents.sh <command> [options]
       the secret scan, and write DIR/outcome.json. Exit 0 pass, 1 fail,
       2 inconclusive.
 
+  cooldown --cli CLI [--clear] [--reason rate-limit|auth] [--minutes N]
+      Bench a worker for every task until the cooldown expires. dispatch sets
+      one by itself when a failed run's log shows a rate limit or an auth
+      failure (defaults: 15 min rate-limit, 24h auth, never open-ended).
+
   record --dir DIR --outcome verified-pass|partial|rejected|blocked|env-blocked|rate-limited
          [--retries N] [--handoff-to CLI] [--notes STR]
       Append one outcome line to the ledger and write DIR/outcome-record.json.
@@ -1825,6 +1893,9 @@ Env:
   SSA_NO_QUOTA_SNAPSHOT=1         skip the post-dispatch quota snapshot
   SSA_LEDGER                      outcome ledger path
                                   (default: $XDG_STATE_HOME/smart-subagents/outcomes.jsonl)
+  SSA_SHORT_HORIZON_HOURS         reset horizon that makes short-window quota free (default 4)
+  SSA_FIT_HALFLIFE_DAYS           decay half-life for learned fit (default 30)
+  SSA_FIT_MIN_SAMPLES             effective samples before a posterior is used (default 10)
 EOF
 }
 
@@ -1841,6 +1912,7 @@ main() {
     tail) cmd_tail "$@" ;;
     stop) cmd_stop "$@" ;;
     verify) cmd_verify "$@" ;;
+    cooldown) cmd_cooldown "$@" ;;
     record) cmd_record "$@" ;;
     ledger) cmd_ledger "$@" ;;
     cleanup) cmd_cleanup "$@" ;;

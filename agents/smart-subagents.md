@@ -118,15 +118,33 @@ Read:
 - `recommendation.local_labor_ok` (if false: supervision only)
 - `recommendation.worker_args`: the exact effort/model flags for each CLI
 - `recommendation.cross_review_required`
-- per-CLI `eligible`, `skip_reason`, `score`
+- `recommendation.rank_basis`: `fit` on hard/frontier, `headroom` otherwise
+- `recommendation.fit`: per CLI `prior`, `posterior`, `n_eff`, `used`. `used`
+  false means the posterior is advisory and the static prior did the ranking
+- `recommendation.cooldowns`: workers benched by an earlier task's 429 or auth
+  failure, with minutes left. They are already filtered out of `ranked[]`
+- per-CLI `eligible`, `skip_reason`, `score`, `effective_score`, `admission_score`
+
+Three numbers, three jobs. `score` is raw percent left and drives severity only.
+`effective_score` is the ranking key: short windows discount quota that resets
+soon, long windows price being ahead of pace. `admission_score` is what the
+quota floor checks, and it never reads pace, so a weekly window at 7% left is a
+7 no matter how early in the week it was spent. When you want to know who can
+actually carry the work, read `admission_score`.
 
 **Pick algorithm:**
 
-1. Start from `ranked` (highest headroom among eligible workers).
+1. Start from `ranked` (already filtered for eligibility, cooldowns and the
+   quota floor, then ordered by the objective `rank_basis` names).
 2. Filter by **capability fit** (below). First that passes wins.
-3. If parent named a preferred CLI and it is eligible + fit → honor it.
+3. If parent named a preferred CLI and it survived the filter → honor it.
 4. If none eligible → stop, report usage path. Do not implement.
 5. Write choice to `$DIR/worker.txt` and a one-line reason to `$DIR/pick.json`.
+
+Do not re-derive the ranking. If you disagree with the order, say why in
+`pick.json` and pick from `ranked[]` anyway, or change size/difficulty/kind and
+re-run. Hand-overriding the router silently is how the ledger stops meaning
+anything.
 
 `init` also writes `$DIR/worker-args.txt` (the difficulty-derived effort flags
 for the chosen CLI) and `dispatch` applies them. **Never hand-pick `-m` or a
@@ -141,11 +159,22 @@ Capability fit (filter, not a fixed default):
 | **grok** | leads scoreboard; wants `--check` / `--best-of-n` (small only); strong when codex empty | ineligible; huge unscoped thrash |
 | **kimi** | read-only planning or explicit `SSA_ALLOW_KIMI_WRITE=1` override | write dispatch by default; no sandbox, worktree does not contain system access |
 
-**Mid-run 429 / quota:** re-run usage (`--fresh`), mark that worker skipped for
-this task, hand off to next eligible with **fresh** brief + `git diff` summary.
+**Mid-run 429 / quota:** `dispatch` already classified the failure and set the
+cooldown, so the handoff is one step: re-run `pick --fresh` and take the new
+top of `ranked[]`. The benched worker is gone from it and the reason is in
+`recommendation.cooldowns`. Do not re-rank by hand and do not retry the same
+worker "once more to check". Hand the next worker a **fresh** brief plus a
+`git diff` summary, never a resume. If a worker fails on quota and no cooldown
+was set, the log said nothing conclusive: classify it yourself and set one with
+`smart-subagents.sh cooldown --cli <cli> --reason rate-limit|auth`.
 
 Usage cache: `ai-cli-usage.py` caches ~3 minutes. Use `--fresh` after a 429 or
 login change.
+
+**Advisory lines are not gates.** `advisory: <cli> <window> exhausts in ~Nh at
+current burn` is a burn-rate projection. Let it break a tie toward starting the
+long job now; never let it block a dispatch or flip your read of
+`local_labor_ok`.
 
 ---
 
@@ -458,6 +487,14 @@ and drops a copy in `$DIR/outcome-record.json`. It carries no prompts, no diffs,
 no paths, no session ids, so it is safe to keep forever. It is what makes the
 next routing decision better than a guess; `bash "$SSA" ledger --days 7` reads
 it back. A report without a record is an unfinished run.
+
+The ledger is also the evidence behind `recommendation.fit`, so the outcome you
+write is the one that trains the next pick. Record what happened, not what you
+wish had: `verified-pass` with the honest retry count, `partial` when the diff
+landed short, `rejected` when you threw it away. `blocked`, `env-blocked` and
+`rate-limited` are excluded from the posterior on purpose, so mislabeling a
+capability failure as `rate-limited` quietly protects a worker that earned a
+lower fit.
 
 Retire the worktree only after the parent has taken the change. When it has:
 

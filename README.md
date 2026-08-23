@@ -35,22 +35,30 @@ $ ai-cli-usage.py --task-size large --difficulty hard
 AI CLI usage  (2026-08-20 22:43 EEST)
 ================================================================
 
-[OK]   CLAUDE  plan=claude_max                        score=18
-  (LOW) 5h_session: 82% used, 18% left, resets in 0.6h
-  (OK)  weekly_all: 46% used, 54% left, resets in 2.5d
+[OK] CLAUDE  plan=claude_max  score=18  eff=88  adm=54
+  (LOW) 5h_session: 82% used, 18% left, resets in 0.6h, eff=88
+  (OK) weekly_all: 46% used, 54% left, resets in 2.5d, eff=100, adm=54
 
-[SKIP] CODEX   plan=plus                              score=0
+[SKIP] CODEX  plan=plus  score=0  eff=90  adm=90
   skip: Codex rate limit exhausted
-  (EXHAUSTED) primary_window: 100% used, resets in 0.4h
+  (EXHAUSTED) primary_window: 100% used, 0% left, resets in 0.4h, eff=90
 
-[OK]   GROK    plan=SUBSCRIPTION_TIER_SUPER_GROK_PRO  score=100
-  (OK)  weekly: 0% used, 100% left
+[OK] GROK  plan=SUBSCRIPTION_TIER_SUPER_GROK_PRO  score=100  eff=100  adm=100
+  (OK) monthly_cli_credits: 0% used, 100% left, resets in 12.1d, eff=100
 
+================================================================
 RECOMMENDATION
   primary_worker : grok
+  fallbacks      : kimi
   local_labor_ok : True
   difficulty     : hard (effort=high, floor=56.0)
   worker_args    : --reasoning-effort high
+  rank_basis     : fit
+  fit codex      : prior=1.05 posterior=1.02 n_eff=6.4 used=no (advisory)
+  fit grok       : prior=1.00 posterior=1.08 n_eff=11.2 used=yes
+  fit kimi       : prior=0.90 posterior=0.92 n_eff=2.1 used=no (advisory)
+  - primary=grok (headroom=100, effective=100, admission=100, fit=1.08, ...)
+  - codex: Codex rate limit exhausted
 ```
 
 Then it runs the job on grok at high reasoning effort, in a throwaway worktree,
@@ -59,8 +67,10 @@ and checks the result itself.
 ```mermaid
 flowchart LR
     A[Task brief] --> B{Quota preflight}
-    B -->|live usage API<br/>per CLI| C[Rank by headroom<br/>x capability fit]
-    C --> D[Isolated worktree<br/>ssa/&lt;id&gt;]
+    B -->|live usage API<br/>per CLI| C[Filter: eligible,<br/>no cooldown,<br/>over the floor]
+    C --> R{Rank}
+    R -->|hard: by fit| D[Isolated worktree<br/>ssa/&lt;id&gt;]
+    R -->|routine: by<br/>effective headroom| D
     D --> E[Dispatch<br/>effort set by difficulty]
     E --> F{Verify}
     F -->|diff in scope?<br/>tests pass?<br/>no secrets?| G[Report]
@@ -94,6 +104,102 @@ Harder work gets a higher quota floor on purpose: retries are likelier and each
 turn costs more. For `hard` and `frontier`, if no worker meets the floor, the
 router returns no primary worker and does not dispatch on fumes. `trivial` and
 `routine` keep the best eligible worker as a fallback when all are below it.
+
+## What the router actually optimizes
+
+Subscription quota costs nothing at the margin and is worth nothing at reset.
+Hoarding it is not a strategy. The two things that are genuinely scarce are
+quality on hard work, and the best worker's headroom when the next hard task
+arrives. Routing is built around those, not around "percent left".
+
+### Effective headroom, not percent left
+
+Raw `used_pct` still drives every severity label and every exhaustion gate.
+Ranking uses a corrected number instead:
+
+| Window | Correction | Why |
+|---|---|---|
+| Short (period ≤ 6h) | `100 - used * min(1, resets_in_hours / 4)` | Quota that comes back in minutes is nearly free |
+| Long (weekly, monthly) | `100 - max(0, used - pace)`, where `pace = 100 * elapsed / period` | Only being **ahead** of pace is a cost; being behind is not a bonus |
+| Period unknown | raw `remaining_pct`, marked `forecast_basis: "raw"` | Never invent a period the provider did not report |
+
+A 5h window at 90% that resets in 24 minutes scores **91**, not 10. That is the
+correct answer: you are about to get all of it back, so spending the rest of it
+now is close to free. The same 90% with four hours still to run scores 10.
+
+Each CLI's `effective_score` is the worst of its binding windows, and every
+window carries its own `effective` in `--json` and an `eff=` on the human line.
+The reset horizon is tunable with `SSA_SHORT_HORIZON_HOURS`.
+
+Pace ranks; it does not admit. Being behind pace on a weekly window means you
+spent it slowly, not that there is more of it, so the quota floor reads
+`admission_score` instead: raw remaining on long windows, and the discounted
+value only on a short window whose reset is close enough to refill it before the
+run can spend what is left. A weekly window at 93% used ranks like a 51 and
+admits like a 7, which is what it is.
+
+### Filter, then rank
+
+The quota floor is a filter at **every** size, checked against `admission_score`.
+Ranking is a separate step on `effective_score`, and what it ranks by depends on
+difficulty:
+
+| Difficulty | Ranks by | Tie-break | Reason |
+|---|---|---|---|
+| `hard`, `frontier` | capability fit | effective headroom | A cheap worker that fails costs more than the quota it saved |
+| `trivial`, `routine` | effective headroom | fit | Spend the quota that is about to evaporate |
+
+There is no headroom-times-fit product any more. A product lets a large headroom
+number drown a real capability gap on exactly the tasks where the gap matters. A
+CLI named with `--prefer` wins outright when it survives the filter, with no
+thumb on the scale.
+
+### Cooldowns are cross-task
+
+A 429 is not one task's problem. When a dispatch fails, the tail of the worker
+log is classified conservatively: rate limit, auth failure, or nothing. On a
+match the worker is benched for every task until the cooldown expires, 15
+minutes for a rate limit and 24 hours for auth, never open-ended.
+
+```bash
+smart-subagents.sh cooldown --cli codex --reason rate-limit   # manual bench
+smart-subagents.sh cooldown --cli codex --clear               # lift it early
+```
+
+The state lives in `$XDG_STATE_HOME/smart-subagents/cooldowns.json`, so a
+cooldown one task discovered is honored by the next one. Benched workers show
+up in the human table and in `recommendation.reasons`.
+
+### Fit is measured, then promoted
+
+`FIT` is a cold-start prior now, not the final word. Every recorded outcome
+updates a posterior per (worker, kind) cell: empirical Bayes with 8
+pseudo-observations behind the prior, a 30-day half-life on old evidence, and
+shrinkage toward the worker's own cross-kind average while a cell is thin.
+Rewards come from the ledger, 1.0 for a verified pass in at most one retry, 0.5
+for a messier pass or a partial, 0.0 for a rejection. Blocked, env-blocked and
+rate-limited runs say nothing about capability, so they are excluded.
+
+The posterior only takes over once a cell has 10 effective observations
+(`SSA_FIT_MIN_SAMPLES`), and it is clamped to `[0.85, 1.15]` either way. Until
+then it is advisory and visible: `recommendation.fit` always carries `prior`,
+`posterior`, `n_eff` and `used` per CLI. A bad streak cannot retire a worker,
+and a corrupt ledger line is skipped and counted, never fatal.
+
+### Burn rate is advisory
+
+Every fresh fetch appends one line per window to
+`$XDG_STATE_HOME/smart-subagents/usage-history.jsonl`, compacted to 7 days. From
+the last 6 hours of snapshots the router takes a robust slope (median of pairwise
+slopes, ignoring any pair that straddles a reset) and projects when the window
+would exhaust. When that is sooner than the reset, you get a line like:
+
+```
+- advisory: codex primary_window exhausts in ~2h at current burn
+```
+
+It changes no gate and never flips `local_labor_ok`. Three snapshots and a
+positive slope is a hint about what to start now, not a measurement to route on.
 
 ## Planning is a panel, not a guess
 
@@ -230,6 +336,7 @@ smart-subagents.sh dispatch --dir "$DIR" --background   # detach, watchdog armed
 | `tail --dir DIR` | follow the worker's `stdout.log` |
 | `stop --dir DIR` | TERM then KILL the worker's process group, refusing when the pid now belongs to someone else |
 | `verify --dir DIR` | run the verify commands, diff them against the baseline, check scope globs and secrets, write `outcome.json`; exit 0 pass, 1 fail, 2 inconclusive |
+| `cooldown --cli CLI [--clear]` | bench a worker across every task, or lift the bench early; `dispatch` sets one itself on a rate limit or auth failure |
 | `record --dir DIR --outcome ...` | append one line to the outcome ledger, no prompts, diffs, paths or session ids in it |
 | `ledger [--days N]` | per-CLI dispatch count, verified-pass rate, mean retries, quota consumed |
 | `cleanup --dir DIR` | remove worktree, `ssa/<id>` branch and task dir, refusing while dirty, unmerged, or running |
@@ -260,6 +367,9 @@ grok              5            60%         1.20          12.7%
 | `SSA_WORK_DIR` | `$TMPDIR/smart-subagents` | Task scratch root |
 | `SSA_USAGE_PY` | alongside the script | Path to `ai-cli-usage.py` |
 | `SSA_PREMIUM_MODELS` | `Fable,Opus` | Model-scoped weekly windows that gate whether your local session should do labor itself |
+| `SSA_SHORT_HORIZON_HOURS` | `4` | Reset horizon over which a short window's spent quota stops counting against it |
+| `SSA_FIT_HALFLIFE_DAYS` | `30` | Half-life on ledger evidence feeding the learned fit posterior |
+| `SSA_FIT_MIN_SAMPLES` | `10` | Effective observations before a posterior is used for ranking instead of the prior |
 | `SSA_STALL_SECS` | `600` | Watchdog patience before it kills a silent background worker |
 | `SSA_DEADLINE_SECS` | off | Absolute ceiling on a background run |
 | `SSA_LEDGER` | `$XDG_STATE_HOME/smart-subagents/outcomes.jsonl` | Outcome ledger path |
@@ -294,9 +404,20 @@ identifier. It lives at `$XDG_STATE_HOME/smart-subagents/outcomes.jsonl`, mode
 
 ## Known gaps
 
-The capability priors in `FIT` are hand-tuned constants, not measurements. They
-only break ties between CLIs that both have quota, so a bad prior costs you a
-suboptimal pick rather than a failed run, but they're guesses.
+The `FIT` table is now the cold-start prior of a measured posterior, so a fresh
+install still routes on hand-tuned constants and stays there until a
+(worker, kind) cell reaches 10 effective observations. Kinds you rarely dispatch
+may never get there. The reward function is a guess too: it reads verified-pass,
+retry count and partial as a proxy for quality, which cannot see a diff that
+passed the tests and was still the wrong design.
+
+The clamp to `[0.85, 1.15]` is deliberate and unmeasured. It bounds how much
+evidence is allowed to move a pick, which also bounds how fast the router can
+learn something true.
+
+The burn-rate forecast is a robust slope over at least three snapshots in six
+hours. That is enough to notice a fast burn and not enough to trust a number.
+It stays advisory for that reason.
 
 Difficulty sets reasoning effort, not model choice, for codex and grok. Only kimi
 switches models, because it's the only one of the three without an effort flag.

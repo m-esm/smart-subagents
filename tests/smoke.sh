@@ -186,6 +186,301 @@ assert "not dispatching on fumes" in " ".join(hard["reasons"])
 PY
 pass "recommend enforces hard quota floor"
 
+route_state="$TEST_TMP/route-state"
+mkdir -p "$route_state"
+
+XDG_STATE_HOME="$route_state" python3 - "$USAGE" <<'PY' || fail "effective headroom"
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("ai_cli_usage", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+# 90% of a 5h window spent, but it resets in 24 minutes: nearly free.
+short = module.Window(
+    name="5h_session", used_pct=90.0, remaining_pct=10.0,
+    resets_in_hours=0.4, period_seconds=5 * 3600,
+)
+assert module.effective_score(short) > 85, module.effective_score(short)
+assert module._effective_basis(short) == "short"
+
+# Weekly windows are judged against pace, not against raw percent left.
+week = 7 * 86400
+ahead = module.Window(  # 30% used with 10% of the week gone: ahead of pace
+    name="weekly_all", used_pct=30.0, resets_in_hours=0.9 * week / 3600.0,
+    period_seconds=week,
+)
+behind = module.Window(  # 50% used with 80% of the week gone: comfortably behind
+    name="weekly_all", used_pct=50.0, resets_in_hours=0.2 * week / 3600.0,
+    period_seconds=week,
+)
+assert module.effective_score(behind) > module.effective_score(ahead)
+assert module._effective_basis(behind) == "pace"
+
+unknown = module.Window(name="mystery", used_pct=40.0, remaining_pct=60.0)
+assert module.effective_score(unknown) == 60.0
+assert module._effective_basis(unknown) == "raw"
+PY
+pass "effective headroom discounts resets and prices pace"
+
+XDG_STATE_HOME="$route_state" python3 - "$USAGE" <<'PY' || fail "filter then rank"
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("ai_cli_usage", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+
+def fleet(scores):
+    return [
+        module.CliStatus(
+            cli=cli, available=True, eligible=True, score=v, effective_score=v
+        )
+        for cli, v in scores.items()
+    ]
+
+
+# The floor now applies at every size, not just medium and large.
+thin = {cli: 10.0 for cli in module.WORKER_CLIS}
+small_hard = module.recommend(fleet(thin), task_size="small", difficulty="hard")
+assert small_hard["primary_worker"] is None, small_hard["primary_worker"]
+assert "not dispatching on fumes" in " ".join(small_hard["reasons"])
+small_routine = module.recommend(fleet(thin), task_size="small", difficulty="routine")
+assert small_routine["primary_worker"] is not None
+assert small_routine["floor_relaxed"] is True
+
+# Same fleet, two objectives: hard buys quality, routine spends the cheapest
+# headroom. kimi has the most room; codex has the best impl fit.
+mixed = {"codex": 60.0, "grok": 50.0, "kimi": 90.0}
+hard = module.recommend(fleet(mixed), task_size="medium", task_kind="impl",
+                        difficulty="hard")
+routine = module.recommend(fleet(mixed), task_size="medium", task_kind="impl",
+                           difficulty="routine")
+assert hard["rank_basis"] == "fit" and hard["primary_worker"] == "codex", hard
+assert routine["rank_basis"] == "headroom" and routine["primary_worker"] == "kimi"
+top = routine["ranked"][0]
+assert {"score", "adjusted_score", "effective_score", "fit", "rank_basis"} <= set(top)
+
+# A preferred CLI that survives the filter wins outright.
+pref = module.recommend(fleet(mixed), task_size="medium", task_kind="impl",
+                        difficulty="hard", prefer="grok")
+assert pref["primary_worker"] == "grok", pref["primary_worker"]
+PY
+pass "recommend filters then ranks by difficulty objective"
+
+XDG_STATE_HOME="$route_state" python3 - "$USAGE" <<'PY' || fail "admission floor"
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("ai_cli_usage", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+# Behind pace on a weekly window ranks well, but 7% left funds nothing.
+starved = module.CliStatus(
+    cli="codex", available=True, eligible=True, score=7.0,
+    windows=[module.Window(
+        name="primary_window", used_pct=93.0, remaining_pct=7.0,
+        resets_in_hours=3.9 * 24, period_seconds=7 * 86400, severity="critical",
+    )],
+)
+module.apply_effective(starved)
+assert starved.effective_score > 21, starved.effective_score  # pace says fine
+assert starved.admission_score == 7.0, starved.admission_score  # capacity says no
+
+small_hard = module.recommend([starved], task_size="small", difficulty="hard")
+assert small_hard["min_score"] == 21.0, small_hard["min_score"]
+assert small_hard["primary_worker"] is None, small_hard["primary_worker"]
+
+# A short window about to reset is real capacity, so it still gets admitted.
+refilling = module.CliStatus(
+    cli="grok", available=True, eligible=True, score=10.0,
+    windows=[module.Window(
+        name="5h_session", used_pct=90.0, remaining_pct=10.0,
+        resets_in_hours=0.4, period_seconds=5 * 3600, severity="critical",
+    )],
+)
+module.apply_effective(refilling)
+assert refilling.admission_score > 85, refilling.admission_score
+admitted = module.recommend([refilling], task_size="small", difficulty="hard")
+assert admitted["primary_worker"] == "grok", admitted["primary_worker"]
+assert admitted["ranked"][0]["admission_score"] > 85
+PY
+pass "admission reads capacity, not pace"
+
+cooldown_state="$TEST_TMP/cooldown-state"
+mkdir -p "$cooldown_state"
+XDG_STATE_HOME="$cooldown_state" python3 - "$USAGE" <<'PY' || fail "cooldown gating"
+import importlib.util
+import json
+import sys
+import time
+
+spec = importlib.util.spec_from_file_location("ai_cli_usage", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+
+def fleet():
+    return [
+        module.CliStatus(cli=cli, available=True, eligible=True, score=90.0,
+                         effective_score=90.0)
+        for cli in module.WORKER_CLIS
+    ]
+
+
+module.set_cooldown("codex", "rate-limit")
+rec = module.recommend(fleet(), task_size="medium", difficulty="routine")
+assert rec["primary_worker"] != "codex", rec["primary_worker"]
+assert "codex" in rec["cooldowns"]
+assert any("cooldown (rate-limit" in r for r in rec["reasons"]), rec["reasons"]
+assert "codex" not in {r["cli"] for r in rec["ranked"]}
+
+path = module._cooldown_path()
+data = json.loads(path.read_text())
+data["codex"]["until"] = time.time() - 60
+path.write_text(json.dumps(data))
+rec = module.recommend(fleet(), task_size="medium", difficulty="routine")
+assert rec["cooldowns"] == {}
+assert "codex" in {r["cli"] for r in rec["ranked"]}
+
+module.set_cooldown("grok", "auth")
+assert module.load_cooldowns()["grok"]["minutes_left"] > 60
+assert module.clear_cooldown("grok") is True
+assert module.load_cooldowns() == {}
+PY
+pass "cooldowns bench a worker until they expire"
+
+fit_state="$TEST_TMP/fit-state"
+mkdir -p "$fit_state"
+XDG_STATE_HOME="$fit_state" python3 - "$USAGE" <<'PY' || fail "learned fit"
+import importlib.util
+import json
+import sys
+import time
+
+spec = importlib.util.spec_from_file_location("ai_cli_usage", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+ledger = module._ledger_path()
+ledger.parent.mkdir(parents=True, exist_ok=True)
+
+
+def write(n):
+    now = time.time()
+    lines = []
+    for i in range(n):
+        lines.append(json.dumps({
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - i * 600)),
+            "worker": "codex",
+            "kind": "impl",
+            "outcome": "verified-pass",
+            "retries": 0,
+        }))
+    lines.append("{ this is not json")
+    ledger.write_text("\n".join(lines) + "\n")
+
+
+write(12)
+value, n_eff, used = module.fit_posterior("codex", "impl")
+assert used is True, (value, n_eff)
+assert n_eff >= 10, n_eff
+assert value <= 1.15 and value >= 0.85, value
+rows, skipped = module.read_ledger()
+assert skipped == 1, skipped
+
+write(3)
+value, n_eff, used = module.fit_posterior("codex", "impl")
+assert used is False, (value, n_eff)
+assert 0.85 <= value <= 1.15, value
+
+rec = module.recommend(
+    [module.CliStatus(cli=c, available=True, eligible=True, score=90.0,
+                      effective_score=90.0) for c in module.WORKER_CLIS],
+    task_size="medium", task_kind="impl", difficulty="hard",
+)
+assert set(rec["fit"]) == set(module.WORKER_CLIS)
+assert {"prior", "posterior", "n_eff", "used"} <= set(rec["fit"]["codex"])
+assert rec["fit"]["codex"]["used"] is False
+PY
+pass "learned fit stays advisory until it has samples"
+
+forecast_state="$TEST_TMP/forecast-state"
+mkdir -p "$forecast_state"
+XDG_STATE_HOME="$forecast_state" python3 - "$USAGE" <<'PY' || fail "burn forecast"
+import importlib.util
+import json
+import sys
+import time
+
+spec = importlib.util.spec_from_file_location("ai_cli_usage", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+now = time.time()
+rows = [
+    {"ts": now - 3600, "cli": "codex", "window": "thin", "used_pct": 10.0},
+    {"ts": now - 1800, "cli": "codex", "window": "thin", "used_pct": 20.0},
+]
+for i, pct in enumerate([10.0, 20.0, 30.0, 40.0]):
+    rows.append({"ts": now - (4 - i) * 1800, "cli": "grok", "window": "rising",
+                 "used_pct": pct})
+path = module._history_path()
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+assert module.forecast("codex", "thin") is None
+hours = module.forecast("grok", "rising")
+assert hours is not None and hours > 0, hours
+
+statuses = [module.CliStatus(
+    cli="grok", available=True, eligible=True, score=60.0,
+    windows=[module.Window(name="rising", used_pct=40.0, remaining_pct=60.0,
+                           resets_in_hours=48.0, period_seconds=7 * 86400)],
+)]
+module.annotate_forecasts(statuses, now=now)
+assert statuses[0].windows[0].forecast_exhausts_in_hours == hours
+rec = module.recommend(statuses, task_size="medium", difficulty="routine")
+assert any("at current burn" in r for r in rec["reasons"]), rec["reasons"]
+assert rec["local_labor_ok"] is True
+PY
+pass "burn forecast stays advisory"
+
+cool_repo="$TEST_TMP/cooldown-repo"
+cool_task="$TEST_TMP/cooldown-task"
+cool_dispatch_state="$TEST_TMP/cooldown-dispatch-state"
+codex_429="$TEST_TMP/codex-429.sh"
+make_repo "$cool_repo"
+make_task "$cool_task" "$cool_repo"
+cat >"$codex_429" <<'SH'
+#!/bin/sh
+echo "429 Too Many Requests"
+exit 1
+SH
+chmod +x "$codex_429"
+cool_rc=0
+XDG_STATE_HOME="$cool_dispatch_state" CODEX_BIN="$codex_429" "$SSA" dispatch \
+  --dir "$cool_task" --worker codex >"$TEST_TMP/cooldown-dispatch.txt" 2>&1 || cool_rc=$?
+[[ "$cool_rc" == "1" ]] || fail "cooldown dispatch exit status"
+grep -q 'cooldown=codex:rate-limit' "$TEST_TMP/cooldown-dispatch.txt" || \
+  fail "dispatch reports the cooldown"
+grep -q 'rate-limit' "$cool_dispatch_state/smart-subagents/cooldowns.json" || \
+  fail "dispatch writes the cooldown state"
+XDG_STATE_HOME="$cool_dispatch_state" "$SSA" cooldown --cli codex --clear \
+  >"$TEST_TMP/cooldown-clear.txt" || fail "cooldown clear"
+grep -q 'cooldown cleared' "$TEST_TMP/cooldown-clear.txt" || \
+  fail "cooldown clear reports"
+pass "dispatch benches a rate-limited worker"
+
 plan_repo="$TEST_TMP/plan-repo"
 plan_work="$TEST_TMP/plan-work"
 plan_usage_argv="$TEST_TMP/plan-usage-argv.txt"
