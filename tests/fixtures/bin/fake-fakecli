@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Fake fourth worker CLI, used only by tests/test_registry.py.
+
+It exists to prove the claim in the README: adding a worker is a registry
+entry, not a code fork. Nothing in scripts/ knows this binary's name. The
+conformance test registers it through SSA_WORKERS_JSON alone, and this script
+records what it was actually handed.
+
+Records argv and cwd under $HOME/.ssa-test/fake-fakecli/, then prints one JSON
+object carrying a session id, which is what its registry entry says to scrape.
+It never reads stdin: its registry entry uses the "arg" prompt transport, so
+the dispatcher hands it nothing there and a read would block on the parent's
+inherited stdin. Same control-file contract as the other fakes:
+$HOME/.ssa-test-control.json holds {"exit_code": int, "session_id": str|null}.
+No real tokens, emails or account ids appear anywhere here.
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+home = Path(os.environ.get("HOME") or ".")
+recorder = home / ".ssa-test" / "fake-fakecli"
+recorder.mkdir(parents=True, exist_ok=True)
+(recorder / "argv.txt").write_text("\n".join(sys.argv[1:]) + ("\n" if sys.argv[1:] else ""))
+(recorder / "cwd.txt").write_text(os.getcwd() + "\n")
+
+control_path = home / ".ssa-test-control.json"
+control = {}
+if control_path.exists():
+    try:
+        control = json.loads(control_path.read_text())
+    except Exception:
+        control = {}
+
+exit_code = int(control.get("exit_code", 0))
+session_id = control.get("session_id", "fake-fakecli-session-000000000001")
+
+payload = {"result": "ok"}
+if session_id:
+    payload["session_id"] = session_id
+print(json.dumps(payload))
+sys.exit(exit_code)

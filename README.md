@@ -90,15 +90,29 @@ as one is why easy work gets expensive models and subtle work gets rushed.
 | **Example A** | a 15-line lock-free ring buffer is `small` | ...and `hard` |
 | **Example B** | a 40-file mechanical rename is `large` | ...and `trivial` |
 
-Difficulty maps to whatever knob each CLI actually exposes, clamped to what that
-CLI supports:
+Difficulty asks for a reasoning effort, and each worker's registry entry decides
+what that means for it:
 
-| Difficulty | codex | grok | kimi | Quota floor | Cross-review |
-|---|---|---|---|---|---|
-| `trivial` | `model_reasoning_effort=low` | `--reasoning-effort low` | `-m kimi-for-coding-highspeed` | 0.6x | no |
-| `routine` | `=medium` | `medium` | default | 1.0x | no |
-| `hard` | `=high` | `high` | default | 1.4x | no |
-| `frontier` | `=high` | `xhigh` | default | 1.8x | **required** |
+| Difficulty | Asks for | Quota floor | Cross-review |
+|---|---|---|---|
+| `trivial` | `low` | 0.6x | no |
+| `routine` | `medium` | 1.0x | no |
+| `hard` | `high` | 1.4x | no |
+| `frontier` | `xhigh` | 1.8x | **required** |
+
+The rung is clamped to the worker's own ladder, and a worker with no effort flag
+falls back to whatever lever it does have. Today that means codex clamps
+`xhigh` down to `high` because its ladder stops there, grok takes `xhigh`
+verbatim, and kimi (which has no effort flag at all) switches to a faster model
+alias for cheap work instead. All three of those facts live in
+[`scripts/workers.json`](scripts/workers.json), not in the router:
+
+```console
+$ python3 scripts/ssa/cli.py build-command --worker kimi --mode implement \
+    --worktree "$WT" --brief "$DIR/brief.md" --model kimi-for-coding-highspeed
+{"argv": ["-p", "Read the file ...", "--output-format", "stream-json",
+          "-m", "kimi-for-coding-highspeed"], "cwd": "...", "env_scrub": true, ...}
+```
 
 Harder work gets a higher quota floor on purpose: retries are likelier and each
 turn costs more. For `hard` and `frontier`, if no worker meets the floor, the
@@ -261,15 +275,127 @@ The supervisor still reads the diff against the recorded base SHA itself.
 | Rate limit or auth | switch worker with a fresh brief, never a resume |
 | Missing toolchain or sandboxed network | **0**, classified `env-blocked` |
 
+## Architecture
+
+Four pieces, one direction of dependency. The shell launches and owns the task
+lifecycle; it knows nothing about any particular CLI.
+
+```
+scripts/smart-subagents.sh   launcher: init, dispatch, plan, verify, record,
+                             ls/status/tail/stop, cleanup, gc, doctor
+        |
+        v
+scripts/ssa/                 runtime (Python 3.9, stdlib only)
+  registry.py                load + validate workers.json, fail closed
+  adapters.py                build_command / parse_session / classify_failure
+  state.py                   task.json + events.jsonl + transition table
+  cli.py                     the seam: the shell calls this, not a CLI
+        |
+        v
+scripts/workers.json         one entry per worker. The only place a CLI's
+                             name, flags, sandbox or session format appears.
+
+scripts/ai-cli-usage.py      routing: live quota per provider, ranked. Reads
+                             the registry for who the workers are, their effort
+                             ladders, their fit priors and their probes.
+```
+
+**The registry** is the single source of per-CLI knowledge: binary discovery
+(env var, candidate paths, PATH name), which quota probe reports on it, sandbox
+capability and whether writes are allowed by default, how a prompt reaches it
+(`stdin`, `arg`, `file-ref`), the argv template for each mode
+(`implement` / `plan` / `resume`), how a session id is scraped back out, the
+effort ladder and flag shape, model rules per difficulty, and capability priors
+per task kind.
+
+Argv templates are arrays of tokens, never strings. The allowed placeholders are
+`{worktree} {brief} {output} {session_id} {prompt} {effort} {model}`; `{effort}`
+and `{model}` splice zero or more tokens, the rest are single values. A template
+naming anything else, or carrying a shell metacharacter, is rejected at load
+time. The argv goes to `execve`, never through a shell.
+
+**The task record** is data, not inference. Every task dir carries a `task.json`
+(schema version, task id, repo, base sha, worker, class, state, attempts) and an
+append-only `events.jsonl` with a monotonic `seq`. Writes are atomic and
+serialized by a per-task lock, so an interrupted write leaves the previous
+record intact. The lifecycle is explicit:
+
+```
+minted -> preflighted -> picked -> running -> exited -> verified
+                                                     -> failed        -> reported
+                                                     -> inconclusive
+                            running -> aborted | stalled
+```
+
+Illegal transitions raise. `status` shows both the recorded `state` and the
+`phase` inferred from which artifacts exist: they disagree exactly when
+something went wrong, which is the point.
+
+## Adding a worker
+
+A fourth worker is a registry entry plus a probe. Two files, no new code paths.
+
+1. **Add an entry to `scripts/workers.json`.** The minimum:
+
+```json
+"acme": {
+  "display_name": "Acme Code",
+  "binary": {"env": "ACME_BIN", "candidates": ["~/.acme/bin/acme"], "path_name": "acme"},
+  "auth_file": "~/.acme/auth.json",
+  "probe": "check_acme",
+  "sandbox": "workspace",
+  "write_allowed_default": true,
+  "run": {"cwd": "inherit", "env_scrub": false},
+  "prompt": {"implement": {"transport": "arg"}, "plan": {"transport": "arg"}},
+  "argv": {
+    "implement": ["run", "--cwd", "{worktree}", "-p", "{prompt}", "{effort}"],
+    "plan": ["run", "--read-only", "--cwd", "{worktree}", "-p", "{prompt}", "{effort}"]
+  },
+  "output": {"implement": "none", "plan": "stdout"},
+  "session": {"kind": "json-keys", "keys": ["session_id"]},
+  "effort_ladder": ["low", "medium", "high"],
+  "effort_flags": ["--effort", "{effort}"],
+  "models": {"flag": ["-m", "{model}"], "rules": []},
+  "fit": {"default": 1.0}
+}
+```
+
+2. **Add a probe** to `scripts/ai-cli-usage.py`: a `check_acme()` returning a
+   `CliStatus`, registered in the `PROBES` table under the name the entry gives.
+   Until that exists the worker is listed but reported unavailable with
+   `skip_reason: "no quota probe"`. It is never handed invented headroom.
+
+Then check your work:
+
+```bash
+python3 scripts/ssa/cli.py registry-validate
+python3 scripts/ssa/cli.py workers
+python3 scripts/ssa/cli.py build-command --worker acme --mode implement \
+  --worktree /tmp/wt --brief /tmp/brief.md --effort high
+```
+
+`tests/test_registry.py` is the conformance test for this claim: it registers a
+fourth worker through `SSA_WORKERS_JSON` alone and asserts that validate, list,
+route, dispatch, plan and record all carry it, without editing a line of Python.
+If adding a worker ever requires a code change, that suite is what fails.
+
 ## Requirements
 
-Python 3.9+, git, bash, and at least one worker CLI you're already logged into:
+Python 3.9+, git, bash, and at least one worker CLI you're already logged into.
+The workers, their sandboxes and their binary lookup are declared in
+[`scripts/workers.json`](scripts/workers.json), which is the source of truth
+rather than a table here:
 
-| Worker | CLI | Write sandbox |
-|---|---|---|
-| codex | [OpenAI Codex CLI](https://github.com/openai/codex) | `-s workspace-write` |
-| grok | Grok CLI | always `--sandbox workspace` |
-| kimi | Kimi Code | none, write dispatch blocked unless `SSA_ALLOW_KIMI_WRITE=1` |
+```console
+$ python3 scripts/ssa/cli.py workers
+codex  OpenAI Codex CLI  os         write     check_codex  /Users/you/.local/bin/codex
+grok   Grok CLI          workspace  write     check_grok   /Users/you/.grok/bin/grok
+kimi   Kimi Code         none       no-write  check_kimi   /Users/you/.kimi-code/bin/kimi
+```
+
+`no-write` means exactly what it says: kimi has no sandbox, so a write dispatch
+is refused unless `SSA_ALLOW_KIMI_WRITE=1` accepts that risk. `doctor` reports
+the same rows with whether each binary and credential file is actually there.
 
 Nothing here handles authentication. It reads whatever credentials those CLIs
 already stored, to call each provider's own usage endpoint.
@@ -331,8 +457,8 @@ smart-subagents.sh dispatch --dir "$DIR" --background   # detach, watchdog armed
 
 | Command | Does |
 |---|---|
-| `ls` | one line per task and planning panel: age, repo, worker, size/difficulty/kind, inferred phase, diff size |
-| `status --dir DIR` | one task in full: base sha, branch, exit code, session or `resume=unavailable`, worker pid state, verify verdict, last log lines |
+| `ls` | one line per task and planning panel: age, repo, worker, size/difficulty/kind, inferred phase, recorded state, diff size |
+| `status --dir DIR` | one task in full: base sha, branch, exit code, session or `resume=unavailable`, worker pid state, recorded lifecycle state and event count, verify verdict, last log lines |
 | `tail --dir DIR` | follow the worker's `stdout.log` |
 | `stop --dir DIR` | TERM then KILL the worker's process group, refusing when the pid now belongs to someone else |
 | `verify --dir DIR` | run the verify commands, diff them against the baseline, check scope globs and secrets, write `outcome.json`; exit 0 pass, 1 fail, 2 inconclusive |
@@ -365,7 +491,9 @@ grok              5            60%         1.20          12.7%
 | Variable | Default | Purpose |
 |---|---|---|
 | `SSA_WORK_DIR` | `$TMPDIR/smart-subagents` | Task scratch root |
+| `SSA_WORKERS_JSON` | `scripts/workers.json` | Alternative worker registry |
 | `SSA_USAGE_PY` | alongside the script | Path to `ai-cli-usage.py` |
+| `SSA_CLI_PY` | alongside the script | Path to `ssa/cli.py` |
 | `SSA_PREMIUM_MODELS` | `Fable,Opus` | Model-scoped weekly windows that gate whether your local session should do labor itself |
 | `SSA_SHORT_HORIZON_HOURS` | `4` | Reset horizon over which a short window's spent quota stops counting against it |
 | `SSA_FIT_HALFLIFE_DAYS` | `30` | Half-life on ledger evidence feeding the learned fit posterior |
@@ -374,7 +502,7 @@ grok              5            60%         1.20          12.7%
 | `SSA_DEADLINE_SECS` | off | Absolute ceiling on a background run |
 | `SSA_LEDGER` | `$XDG_STATE_HOME/smart-subagents/outcomes.jsonl` | Outcome ledger path |
 | `SSA_NO_QUOTA_SNAPSHOT` | unset | Skip the post-dispatch quota snapshot (offline machines, tests) |
-| `CODEX_BIN` / `GROK_BIN` / `KIMI_BIN` | auto-detected | Override worker binary paths |
+| `CODEX_BIN` / `GROK_BIN` / `KIMI_BIN` | auto-detected | Override worker binary paths. The variable name per worker comes from its registry entry, so a new worker declares its own |
 
 `SSA_PREMIUM_MODELS` is the one worth setting. Claude's usage API reports weekly
 caps scoped to individual models by display name. When your top tier is near its
@@ -419,11 +547,27 @@ The burn-rate forecast is a robust slope over at least three snapshots in six
 hours. That is enough to notice a fast burn and not enough to trust a number.
 It stays advisory for that reason.
 
-Difficulty sets reasoning effort, not model choice, for codex and grok. Only kimi
-switches models, because it's the only one of the three without an effort flag.
+Difficulty sets reasoning effort, not model choice, for codex and grok. Their
+registry entries carry an empty model rule list on purpose: model names are
+account-scoped and this repo will not invent one. Only kimi switches models,
+because it's the only one of the three without an effort flag.
 
 Cross-CLI handoff always starts from a fresh brief plus the current diff. There's
 no conversation transfer, because none of these CLIs can import another's session.
+
+The registry describes how to *invoke* a worker, not how to *meter* it. A probe
+is still Python: a new worker gets full routing only once someone writes a
+`check_*` that speaks its provider's usage API. Until then it is listed and
+skipped with `no quota probe`, which is honest but not useful.
+
+Argv templates are validated, not simulated. A registry entry can pass load-time
+validation and still be wrong about a real CLI's flags, and the first sign of
+that is a failed dispatch. The conformance suite proves the plumbing carries a
+fourth worker; it cannot prove your flags exist.
+
+Session ids are scraped from logs, so a provider that changes its output shape
+silently costs you resumability. `resume-unavailable.txt` and `doctor` surface
+that, but only after the fact.
 
 ## Develop
 
@@ -458,6 +602,13 @@ instead of doing anything real; `tests/test_shell.py` uses them to assert the
 argv-for-argv assertion is the contract a new worker adapter (or a runtime
 migration) has to satisfy. If you're changing how a worker gets invoked,
 that's the test to update on purpose, not the one to make pass by accident.
+
+`tests/test_registry.py` is the other end of the same contract. It registers a
+fourth worker (`fake-fakecli`) through `SSA_WORKERS_JSON` and asserts the whole
+path carries it with no Python edited, then pins the guarantees underneath:
+templates with unknown placeholders or shell metacharacters are refused,
+illegal lifecycle transitions raise, event sequence numbers are monotonic, and
+an interrupted `task.json` write leaves the previous record intact.
 
 ## License
 

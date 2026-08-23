@@ -1,0 +1,174 @@
+{
+  "schema_version": 1,
+  "_note": "Single source of truth for per-CLI knowledge. A fourth worker is an entry here plus a probe function in ai-cli-usage.py, never a code fork. Point SSA_WORKERS_JSON at another file to override. Placeholders allowed in argv templates: {worktree} {brief} {output} {session_id} {prompt} {effort} {model}. {effort} and {model} splice zero or more tokens; the rest are single values. No token may contain shell metacharacters: the argv is executed directly, never through a shell.",
+  "workers": {
+    "codex": {
+      "display_name": "OpenAI Codex CLI",
+      "binary": {
+        "env": "CODEX_BIN",
+        "candidates": ["~/.local/bin/codex"],
+        "path_name": "codex"
+      },
+      "auth_file": "~/.codex/auth.json",
+      "probe": "check_codex",
+      "sandbox": "os",
+      "write_allowed_default": true,
+      "run": { "cwd": "inherit", "env_scrub": false },
+      "prompt": {
+        "implement": { "transport": "stdin" },
+        "plan": { "transport": "stdin" },
+        "resume": { "transport": "stdin" }
+      },
+      "argv": {
+        "implement": [
+          "exec", "-C", "{worktree}", "-s", "workspace-write", "--json",
+          "{effort}", "{model}", "-o", "{output}", "-"
+        ],
+        "plan": [
+          "exec", "-C", "{worktree}", "-s", "read-only",
+          "{effort}", "{model}", "-o", "{output}", "-"
+        ],
+        "resume": [
+          "exec", "resume", "{session_id}", "-C", "{worktree}",
+          "-s", "workspace-write", "--json", "{effort}", "{model}", "-"
+        ]
+      },
+      "output": { "implement": "arg", "plan": "arg", "resume": "none" },
+      "format": { "implement": "jsonl", "plan": "text", "resume": "jsonl" },
+      "session": {
+        "kind": "jsonl-keys",
+        "keys": ["session_id", "sessionId", "thread", "thread_id"],
+        "_note": "A bare top-level \"id\" is NOT a session id: codex emits one on ordinary stream items, and accepting it produced unresumable garbage."
+      },
+      "effort_ladder": ["low", "medium", "high"],
+      "effort_flags": ["-c", "model_reasoning_effort={effort}"],
+      "models": {
+        "_note": "No model override is configured. Codex model names are account-scoped, so nothing is invented here. To force one, add a rule such as {\"difficulty\": [\"frontier\"], \"model\": \"<name your account has>\"}.",
+        "flag": ["-m", "{model}"],
+        "rules": []
+      },
+      "fit": {
+        "default": 1.05,
+        "impl": 1.12,
+        "review": 1.15,
+        "debug": 1.1,
+        "best_of_n": 0.85,
+        "analysis": 1.05
+      }
+    },
+    "grok": {
+      "display_name": "Grok CLI",
+      "binary": {
+        "env": "GROK_BIN",
+        "candidates": ["~/.grok/bin/grok"],
+        "path_name": "grok"
+      },
+      "auth_file": "~/.grok/auth.json",
+      "probe": "check_grok",
+      "sandbox": "workspace",
+      "write_allowed_default": true,
+      "run": { "cwd": "inherit", "env_scrub": false },
+      "prompt": {
+        "implement": { "transport": "arg" },
+        "plan": { "transport": "arg" },
+        "resume": { "transport": "arg" }
+      },
+      "argv": {
+        "implement": [
+          "-p", "{prompt}", "--cwd", "{worktree}", "--sandbox", "workspace",
+          "{effort}", "{model}", "--output-format", "json"
+        ],
+        "plan": [
+          "-p", "{prompt}", "--cwd", "{worktree}", "--sandbox", "workspace",
+          "{effort}", "{model}"
+        ],
+        "resume": [
+          "--resume", "{session_id}", "-p", "{prompt}", "--cwd", "{worktree}",
+          "--sandbox", "workspace", "{effort}", "{model}"
+        ]
+      },
+      "output": { "implement": "none", "plan": "stdout", "resume": "none" },
+      "format": { "implement": "json", "plan": "text", "resume": "json" },
+      "session": { "kind": "json-keys", "keys": ["sessionId", "session_id"] },
+      "effort_ladder": ["low", "medium", "high", "xhigh"],
+      "effort_flags": ["--reasoning-effort", "{effort}"],
+      "models": {
+        "_note": "No model override is configured. Grok exposes reasoning effort instead, so difficulty already has a lever. Add rules here only if your account has a model you want pinned by difficulty.",
+        "flag": ["-m", "{model}"],
+        "rules": []
+      },
+      "fit": {
+        "default": 1.0,
+        "impl": 1.05,
+        "review": 1.0,
+        "debug": 1.05,
+        "best_of_n": 1.2,
+        "analysis": 1.0
+      }
+    },
+    "kimi": {
+      "display_name": "Kimi Code",
+      "binary": {
+        "env": "KIMI_BIN",
+        "candidates": ["~/.kimi-code/bin/kimi"],
+        "path_name": "kimi"
+      },
+      "auth_file": "~/.kimi-code/credentials/kimi-code.json",
+      "probe": "check_kimi",
+      "sandbox": "none",
+      "write_allowed_default": false,
+      "run": { "cwd": "worktree", "env_scrub": true },
+      "prompt": {
+        "implement": {
+          "transport": "file-ref",
+          "template": "Read the file {brief} and complete the task it describes."
+        },
+        "plan": {
+          "transport": "file-ref",
+          "template": "Read {brief} and complete the task it describes."
+        },
+        "resume": {
+          "transport": "file-ref",
+          "template": "Read the file {brief} and complete the task it describes."
+        }
+      },
+      "argv": {
+        "implement": [
+          "-p", "{prompt}", "--output-format", "stream-json", "{effort}", "{model}"
+        ],
+        "plan": ["-p", "{prompt}", "{effort}", "{model}"],
+        "resume": ["-S", "{session_id}", "-p", "{prompt}", "{effort}", "{model}"]
+      },
+      "output": { "implement": "none", "plan": "stdout", "resume": "none" },
+      "format": { "implement": "jsonl", "plan": "text", "resume": "jsonl" },
+      "session": {
+        "kind": "jsonl-event",
+        "event_key": "type",
+        "event": "session.resume_hint",
+        "keys": ["session_id"]
+      },
+      "effort_ladder": [],
+      "effort_flags": [],
+      "models": {
+        "_note": "Kimi has no reasoning-effort flag, so a faster model alias is the only lever difficulty can pull. Rules are ordered, first match wins.",
+        "flag": ["-m", "{model}"],
+        "rules": [
+          { "difficulty": ["trivial"], "model": "kimi-for-coding-highspeed" },
+          {
+            "difficulty": ["routine"],
+            "size": ["tiny", "small"],
+            "model": "kimi-for-coding-highspeed"
+          }
+        ]
+      },
+      "fit": {
+        "default": 0.9,
+        "impl": 0.95,
+        "review": 1.05,
+        "debug": 0.95,
+        "best_of_n": 0.8,
+        "analysis": 0.95
+      }
+    }
+  }
+}

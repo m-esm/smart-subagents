@@ -18,9 +18,33 @@ from typing import Any, Optional
 ROOT = Path(__file__).resolve().parent.parent
 SSA_SH = ROOT / "scripts" / "smart-subagents.sh"
 USAGE_PY = ROOT / "scripts" / "ai-cli-usage.py"
+SSA_CLI_PY = ROOT / "scripts" / "ssa" / "cli.py"
+WORKERS_JSON = ROOT / "scripts" / "workers.json"
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 BIN_DIR = FIXTURES_DIR / "bin"
 PROVIDERS_DIR = FIXTURES_DIR / "providers"
+
+
+def load_ssa(name: str):
+    """Import ssa.<name> (registry / adapters / state) from scripts/."""
+    scripts = str(ROOT / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import importlib
+
+    return importlib.import_module("ssa." + name)
+
+
+def run_ssa_cli(*args: str, env: Optional[dict] = None, timeout: int = 60):
+    """Run scripts/ssa/cli.py. Returns (returncode, stdout, stderr)."""
+    proc = subprocess.run(
+        [sys.executable, str(SSA_CLI_PY), *args],
+        env=env if env is not None else dict(os.environ),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
 
 
 def load_usage_module():

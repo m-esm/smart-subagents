@@ -72,6 +72,15 @@ Artifacts under `$DIR/`: `brief.md`, `usage.json`, `pick.json`, `stdout.log`,
 `init` is transactional: a failure after the worktree exists rolls the worktree
 and the `ssa/<id>` branch back, so a half-minted task never lingers.
 
+The task's own record is `$DIR/task.json` (state, class, attempts) plus an
+append-only `$DIR/events.jsonl`. **Read it through `status`, never by guessing
+from which files exist**: the lifecycle is
+`minted -> preflighted -> picked -> running -> exited -> verified|failed|
+inconclusive -> reported`, with `aborted` and `stalled` terminal from `running`.
+`status` prints both the recorded `state` and the `phase` inferred from
+artifacts; when those two disagree, something went wrong and that gap is the
+first thing to explain in the report.
+
 **Task size** (drives quota thresholds and model picks):
 
 | Size | Signals |
@@ -151,13 +160,20 @@ for the chosen CLI) and `dispatch` applies them. **Never hand-pick `-m` or a
 reasoning-effort flag yourself**, that mapping lives in one place so it stays
 consistent. Change the difficulty and re-run `pick` instead.
 
-Capability fit (filter, not a fixed default):
+Capability fit is not yours to hand-maintain. Per-worker priors live in
+`scripts/workers.json` and are already folded into `ranked[]` as `fit`, learned
+from the ledger once a cell has evidence. What is left for you is the part the
+registry cannot know:
 
-| Worker | Prefer when | Avoid when |
-|--------|-------------|------------|
-| **codex** | multi-file impl, precise diffs, tests-to-pattern, `codex review` | ineligible; needs grok-only flags |
-| **grok** | leads scoreboard; wants `--check` / `--best-of-n` (small only); strong when codex empty | ineligible; huge unscoped thrash |
-| **kimi** | read-only planning or explicit `SSA_ALLOW_KIMI_WRITE=1` override | write dispatch by default; no sandbox, worktree does not contain system access |
+| Rule | Why |
+|------|-----|
+| A worker whose registry entry says `write_allowed_default: false` needs an explicit override for a write dispatch | no sandbox means a worktree does not contain its access to the machine; `dispatch` refuses on the capability, not on a name |
+| A task that needs a flag only one CLI has is that CLI's, or it is a different task | `ranked[]` cannot see a flag your brief depends on |
+| Anything else: take `ranked[0]` | re-ranking by vibe is how the ledger stops meaning anything |
+
+`python3 "$SSA_ROOT/scripts/ssa/cli.py" workers` prints the current capability
+table (name, sandbox, write default, probe, resolved binary). Read it instead of
+assuming which CLI can do what.
 
 **Mid-run 429 / quota:** `dispatch` already classified the failure and set the
 cooldown, so the handoff is one step: re-run `pick --fresh` and take the new
@@ -267,57 +283,34 @@ Prefer the helper (captures logs + session id):
 bash "$SSA" dispatch --dir "$DIR" --worker "$(cat "$DIR/worker.txt")"
 ```
 
-Manual equivalents (default models; brief from file):
-
-**codex**
-
-```bash
-codex exec -C "$WT" -s workspace-write --json \
-  -o "$DIR/last-msg.txt" - < "$DIR/brief.md" \
-  >"$DIR/stdout.log" 2>&1
-# analysis: -s read-only
-# outside git: --skip-git-repo-check
-# structured: --output-schema "$DIR/schema.json"
-```
-
-**grok** (ALWAYS `--sandbox workspace`)
+Do not hand-write a worker command line. The exact argv, the prompt transport,
+the working directory and whether the environment is scrubbed all come from the
+registry, and `dispatch` already applies them. When you need to see what will
+run, ask for it rather than reconstructing it:
 
 ```bash
-# Prefer brief via env/file — avoid nested quotes. Helper does this.
-grok -p "$(cat "$DIR/brief.md")" --cwd "$WT" --sandbox workspace \
-  --output-format json >"$DIR/stdout.log" 2>&1
-# optional: --json-schema, --check, --best-of-n N (small tasks only)
+python3 "$SSA_ROOT/scripts/ssa/cli.py" build-command \
+  --worker "$(cat "$DIR/worker.txt")" --mode implement \
+  --worktree "$WT" --brief "$DIR/brief.md" --output "$DIR/last-msg.txt" \
+  --args-file "$DIR/worker-args.txt"
 ```
 
-**kimi** (NO sandbox — worktree only)
+That prints the argv, the stdin source, the cwd and the sandbox capability as
+JSON. Modes are `implement`, `plan` and `resume`. If a command looks wrong, the
+fix is the registry entry in `scripts/workers.json`, not a bespoke invocation
+here: a one-off command line is exactly the drift this seam exists to prevent.
 
-```bash
-cd "$WT" && kimi -p "Read the file $DIR/brief.md and complete the task it describes." \
-  --output-format stream-json >"$DIR/stdout.log" 2>&1
-# never --auto / -y (classifier-blocked; redundant)
-# small/fast: -m kimi-for-coding-highspeed when size is tiny|small
-```
-
-Session ids → `$DIR/session-id.txt`:
-
-| CLI | Extract |
-|-----|---------|
-| codex | from `--json` stream / last-msg metadata |
-| grok | `jq -r '.sessionId // .session_id' "$DIR/stdout.log"` (or last JSON object) |
-| kimi | `jq -r 'select(.type=="session.resume_hint").session_id' "$DIR/stdout.log"` |
-
-Resume **only** by id:
-
-- `codex exec resume <id>`
-- `grok --resume <id> -p "..."`
-- `cd "$WT" && kimi -S <id> -p "..."`
+Session ids land in `$DIR/session-id.txt`, scraped per the worker's own registry
+rule (`parse-session`). Resume **only** by id, through the `resume` mode. When
+the file is empty, `resume-unavailable.txt` says so and a handoff needs a fresh
+brief instead.
 
 **Long runs:** do not hold the session open on a worker. Detach it:
 
 ```bash
 bash "$SSA" dispatch --dir "$DIR" --worker "$(cat "$DIR/worker.txt")" --background
 bash "$SSA" ls                      # every task on this machine, one line each
-bash "$SSA" status --dir "$DIR"     # phase, pid state, exit code, last log lines
+bash "$SSA" status --dir "$DIR"     # state, phase, pid, exit code, last log lines
 bash "$SSA" tail --dir "$DIR"       # follow stdout.log
 bash "$SSA" stop --dir "$DIR"       # TERM then KILL the worker's process group
 ```
@@ -330,19 +323,16 @@ watchdog. The watchdog samples the log size and a worktree fingerprint every
 ceiling; it is off by default.
 
 Poll with `status`, never by re-reading the log. Do not pull multi-MB logs into
-context: `status` already shows the tail, and `tail`/`rg` cover the rest.
+context: `status` already shows the tail and the recorded state, and
+`tail`/`rg` cover the rest. `$DIR/events.jsonl` is the ordered history when you
+need to explain what happened rather than what is happening.
 
 **Effort and model inside a CLI** are derived from difficulty, not chosen by
-hand. `dispatch` reads `$DIR/worker-args.txt`, which the recommender produced:
-
-- codex → `-c model_reasoning_effort=<low|medium|high>`
-- grok → `--reasoning-effort <low|medium|high|xhigh>`
-- kimi → no effort flag exists, so `-m kimi-for-coding-highspeed` for cheap
-  work and the default model otherwise
-
-Never pass `-m` or an effort flag because of fashion. If the run needs more
-thinking, that is a difficulty reclassification, and it must be justified in
-the report.
+hand. The recommender writes `$DIR/worker-args.txt`, the registry decides which
+flags that turns into and where they land in the argv, and `dispatch` applies
+them. Never pass `-m` or an effort flag because of fashion. If the run needs
+more thinking, that is a difficulty reclassification, and it must be justified
+in the report.
 
 ---
 

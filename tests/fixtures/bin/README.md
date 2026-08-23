@@ -11,3 +11,9 @@ real CLI's JSON/JSONL output (including a session id, when the test wants
 one). Behavior (exit code, whether a session id is emitted) is steered by an
 optional `$HOME/.ssa-test-control.json` file the test writes before dispatch.
 No real tokens, emails, or account ids appear anywhere in this directory.
+
+`fake-fakecli` is the fourth worker used by `tests/test_registry.py`. Nothing
+in `scripts/` knows its name: the conformance test registers it through
+`SSA_WORKERS_JSON` alone, which is what proves adding a worker is a registry
+entry rather than a code fork. It does not read stdin, because its registry
+entry passes the prompt as an argument.

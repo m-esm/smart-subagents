@@ -18,12 +18,13 @@ SSA_SELF="${SCRIPT_DIR}/$(basename "$_self")"
 USAGE_PY="${SSA_USAGE_PY:-${SSA_ROOT}/scripts/ai-cli-usage.py}"
 [[ -f "$USAGE_PY" ]] || USAGE_PY="${SCRIPT_DIR}/ai-cli-usage.py"
 
+# The runtime: registry, worker adapters, task state machine. Everything this
+# script used to know per CLI lives behind it.
+SSA_CLI_PY="${SSA_CLI_PY:-${SSA_ROOT}/scripts/ssa/cli.py}"
+[[ -f "$SSA_CLI_PY" ]] || SSA_CLI_PY="${SCRIPT_DIR}/ssa/cli.py"
+
 # Work dir holds briefs, worktrees and worker logs: private, never world-readable.
 SSA_WORK_DIR="${SSA_WORK_DIR:-${TMPDIR:-/tmp}/smart-subagents}"
-
-CODEX_BIN="${CODEX_BIN:-$(command -v codex || true)}"
-GROK_BIN="${GROK_BIN:-${HOME}/.grok/bin/grok}"
-KIMI_BIN="${KIMI_BIN:-${HOME}/.kimi-code/bin/kimi}"
 
 # Ledger of dispatch outcomes: state, not cache, so it survives a cache wipe.
 SSA_STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/smart-subagents"
@@ -31,6 +32,73 @@ SSA_LEDGER="${SSA_LEDGER:-${SSA_STATE_DIR}/outcomes.jsonl}"
 
 die() { echo "smart-subagents: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing $1"; }
+
+# --- the runtime seam ---------------------------------------------------------
+# One registry entry describes a worker; this script never learns a CLI's name.
+# Everything below goes through scripts/ssa/cli.py.
+
+_ssa() { python3 "$SSA_CLI_PY" "$@"; }
+
+# _ssa_build WORKER MODE [args...] -> fills _BC_* for one worker invocation.
+# The command crosses the process boundary NUL-separated because that is the
+# only way to move a list of arbitrary strings intact on bash 3.2.
+_BC_BIN=""; _BC_CWD=""; _BC_STDIN=""; _BC_ENV_SCRUB=""; _BC_OUTPUT_MODE=""
+_BC_WRITE_OK=""; _BC_SANDBOX=""; _BC_ARGV=()
+_ssa_build() {
+  local worker="$1" mode="$2"; shift 2
+  local tok n=0 tmp
+  _BC_BIN=""; _BC_CWD=""; _BC_STDIN=""; _BC_ENV_SCRUB=""; _BC_OUTPUT_MODE=""
+  _BC_WRITE_OK=""; _BC_SANDBOX=""; _BC_ARGV=()
+  tmp="$(mktemp "${TMPDIR:-/tmp}/ssa-build.XXXXXX")"
+  if ! _ssa build-command --worker "$worker" --mode "$mode" --nul "$@" >"$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  while IFS= read -r -d '' tok; do
+    case "$n" in
+      0) _BC_BIN="$tok" ;;
+      1) _BC_CWD="$tok" ;;
+      2) _BC_STDIN="$tok" ;;
+      3) _BC_ENV_SCRUB="$tok" ;;
+      4) _BC_OUTPUT_MODE="$tok" ;;
+      5) _BC_WRITE_OK="$tok" ;;
+      6) _BC_SANDBOX="$tok" ;;
+      *) _BC_ARGV+=("$tok") ;;
+    esac
+    n=$(( n + 1 ))
+  done <"$tmp"
+  rm -f "$tmp"
+  (( n >= 7 )) || return 1
+}
+
+# Run the built command. Caller owns every redirection.
+_ssa_run_worker() {
+  if [[ "$_BC_ENV_SCRUB" == "1" ]]; then
+    ( cd "${_BC_CWD:-.}" \
+      && env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
+        TERM="${TERM:-dumb}" "$_BC_BIN" ${_BC_ARGV[@]+"${_BC_ARGV[@]}"} )
+  elif [[ -n "$_BC_CWD" ]]; then
+    ( cd "$_BC_CWD" && "$_BC_BIN" ${_BC_ARGV[@]+"${_BC_ARGV[@]}"} )
+  else
+    "$_BC_BIN" ${_BC_ARGV[@]+"${_BC_ARGV[@]}"}
+  fi
+}
+
+# Lifecycle bookkeeping. Neither an event nor a refused transition is allowed
+# to fail the command it annotates: the work is the point, the record is the
+# audit trail. A refusal is loud on stderr instead.
+_ssa_event() {
+  local dir="$1"; shift
+  [[ -d "$dir" ]] || return 0
+  _ssa event --dir "$dir" --quiet "$@" 2>/dev/null || true
+}
+
+_ssa_state() {
+  local dir="$1" to="$2"; shift 2
+  [[ -d "$dir" ]] || return 0
+  _ssa transition --dir "$dir" --to "$to" --quiet "$@" \
+    || echo "smart-subagents: state refused ->$to for $dir" >&2
+}
 
 # --- small artifact helpers ---------------------------------------------------
 # Task dirs are flat files, and every one of them is optional: a task killed
@@ -126,6 +194,18 @@ _diff_summary() {
   printf '%s' "$line"
 }
 
+_task_state() {
+  # Recorded lifecycle state, falling back to the artifact inference for task
+  # dirs minted before task.json existed. Read with sed rather than a python
+  # launch per row: `ls` renders every task dir on the machine.
+  local dir="$1" v=""
+  if [[ -f "$dir/task.json" ]]; then
+    v="$(sed -n 's/^  "state": "\([a-z]*\)".*/\1/p' "$dir/task.json" | head -n1)"
+  fi
+  [[ -n "$v" ]] || v="$(_task_phase "$dir")"
+  printf '%s' "$v"
+}
+
 _task_class() {
   local dir="$1"
   printf '%s/%s/%s' "$(_read1 "$dir/size.txt" '?')" \
@@ -190,6 +270,9 @@ cmd_init() {
   git -C "$repo" rev-parse --abbrev-ref HEAD >"$dir/repo-branch.txt"
   git -C "$repo" status --porcelain -uall >"$dir/repo-status.txt" || true
 
+  _ssa_state "$dir" minted
+  _ssa_event "$dir" --phase minted
+
   # Parallel: usage + worktree
   python3 "$USAGE_PY" --json --task-size "$size" --difficulty "$difficulty" \
     --task-kind "$kind" \
@@ -211,6 +294,8 @@ cmd_init() {
 
   wait "$usage_pid" || true
   [[ -s "$dir/usage.json" ]] || die "init: usage preflight produced nothing"
+  _ssa_state "$dir" preflighted
+  _ssa_event "$dir" --phase preflighted --artifact "$dir/usage.json"
 
   # Pick worker (stdout = single JSON object only)
   python3 - "$dir" "$preferred" <<'PY'
@@ -256,6 +341,9 @@ pick_doc = {
 (d / "worker.txt").write_text(pick + ("\n" if pick else ""))
 print(json.dumps({"task_id": d.name, "dir": str(d), **pick_doc}, indent=2))
 PY
+
+  _ssa_state "$dir" picked
+  _ssa_event "$dir" --phase picked --artifact "$dir/pick.json"
 
   # Success: disarm the rollback.
   trap - EXIT
@@ -307,31 +395,22 @@ PY
 }
 
 _classify_failure() {
-  # Tail of a failed worker log -> rate-limit | auth | "" (nothing conclusive).
-  # Conservative on purpose: a wrong classification benches a healthy worker.
-  local log="$1" tail_txt=""
+  # RC + log tail -> rate-limit | auth | unknown | "" (the run did not fail).
+  # The heuristics live in ssa/adapters.py now, one implementation for the
+  # shell and for anything else that needs to name a failure.
+  local rc="$1" log="$2"
   [[ -f "$log" ]] || return 0
-  tail_txt="$(tail -n 40 "$log" 2>/dev/null | tr 'A-Z' 'a-z' || true)"
-  [[ -n "$tail_txt" ]] || return 0
-  if printf '%s\n' "$tail_txt" \
-      | grep -Eq 'rate.?limit|429|too many requests|quota exceeded'; then
-    printf 'rate-limit'
-    return 0
-  fi
-  if printf '%s\n' "$tail_txt" \
-      | grep -Eq 'unauthori[sz]ed|401|invalid.*(token|credential)|please (log ?in|sign ?in)'; then
-    printf 'auth'
-    return 0
-  fi
-  return 0
+  _ssa classify --exit "$rc" --log "$log" 2>/dev/null || true
 }
 
 _maybe_cooldown() {
-  # _maybe_cooldown DIR WORKER RC -> set a cross-task cooldown when the log says why
-  local dir="$1" worker="$2" rc="$3" reason=""
+  # _maybe_cooldown DIR WORKER RC CLASS -> bench the worker when the log said why
+  local dir="$1" worker="$2" rc="$3" reason="${4:-}"
   [[ "$rc" != "0" ]] || return 0
-  reason="$(_classify_failure "$dir/stdout.log")"
-  [[ -n "$reason" ]] || return 0
+  case "$reason" in
+    rate-limit|auth) ;;
+    *) return 0 ;;
+  esac
   printf '%s\n' "$reason" >"$dir/cooldown.txt"
   if [[ -f "$USAGE_PY" ]]; then
     python3 "$USAGE_PY" --cooldown "$worker" --cooldown-reason "$reason" \
@@ -384,8 +463,6 @@ cmd_dispatch() {
   local wt
   wt="$(cat "$dir/wt.txt" 2>/dev/null || true)"
   [[ -n "$wt" && -d "$wt" ]] || die "dispatch: missing worktree ($dir/wt.txt)"
-  local size
-  size="$(cat "$dir/size.txt" 2>/dev/null || echo medium)"
 
   if [[ -n "$background" ]]; then
     _dispatch_background "$dir" "$worker"
@@ -397,120 +474,48 @@ cmd_dispatch() {
     cp "$dir/usage.json" "$dir/quota-before.json" 2>/dev/null || true
   fi
 
-  # Difficulty-derived flags come from the recommender, never re-derived here.
-  local wargs=()
-  if [[ -f "$dir/worker-args.txt" ]]; then
-    while IFS= read -r _a; do [[ -n "$_a" ]] && wargs+=("$_a"); done \
-      <"$dir/worker-args.txt"
-  fi
-
   echo "$worker" >"$dir/worker.txt"
   local log="$dir/stdout.log"
-  local sid="" rc=0
+  local sid="" rc=0 failure=""
 
-  case "$worker" in
-    codex)
-      [[ -x "$CODEX_BIN" ]] || die "codex not found at $CODEX_BIN"
-      local codex
-      codex="$CODEX_BIN"
-      # shellcheck disable=SC2094
-      if "$codex" exec -C "$wt" -s workspace-write --json \
-          ${wargs[@]+"${wargs[@]}"} \
-          -o "$dir/last-msg.txt" - <"$brief" >"$log" 2>&1; then
-        rc=0
-      else
-        rc=$?
-      fi
-      # best-effort session id from jsonl
-      sid="$(python3 - "$log" <<'PY' || true
-import json,sys,re
-path=sys.argv[1]
-sid=""
-try:
-  for line in open(path, errors="replace"):
-    line=line.strip()
-    if not line.startswith("{"): continue
-    try: o=json.loads(line)
-    except: continue
-    for k in ("session_id","sessionId","id"):
-      if isinstance(o.get(k), str) and len(o[k])>8: sid=o[k]
-    t=o.get("thread") or o.get("thread_id")
-    if isinstance(t,str) and len(t)>8: sid=t
-except: pass
-print(sid)
-PY
-)"
-      ;;
-    grok)
-      [[ -x "$GROK_BIN" ]] || die "grok not found at $GROK_BIN"
-      # Pass brief via stdin-friendly path: write prompt file
-      local prompt
-      prompt="$(cat "$brief")"
-      if "$GROK_BIN" -p "$prompt" --cwd "$wt" --sandbox workspace \
-          ${wargs[@]+"${wargs[@]}"} \
-          --output-format json >"$log" 2>&1; then
-        rc=0
-      else
-        rc=$?
-      fi
-      sid="$(python3 - "$log" <<'PY' || true
-import json,sys
-text=open(sys.argv[1],errors="replace").read().strip()
-sid=""
-# whole-file JSON
-for candidate in (text, text[text.rfind("{"):] if "{" in text else ""):
-  if not candidate: continue
-  try:
-    o=json.loads(candidate)
-  except Exception:
-    continue
-  for k in ("sessionId","session_id"):
-    if isinstance(o.get(k), str):
-      sid=o[k]
-print(sid)
-PY
-)"
-      ;;
-    kimi)
-      [[ "${SSA_ALLOW_KIMI_WRITE:-}" == "1" ]] || \
-        die "dispatch: kimi has no sandbox and write dispatch is blocked; set SSA_ALLOW_KIMI_WRITE=1 to override the risk"
-      [[ -x "$KIMI_BIN" ]] || die "kimi not found at $KIMI_BIN"
-      date -u '+%Y-%m-%dT%H:%M:%SZ' >"$dir/kimi-override.txt"
-      if (
-        cd "$wt"
-        env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
-          TERM="${TERM:-dumb}" "$KIMI_BIN" \
-          -p "Read the file ${brief} and complete the task it describes." \
-          --output-format stream-json ${wargs[@]+"${wargs[@]}"}
-      ) >"$log" 2>&1; then
-        rc=0
-      else
-        rc=$?
-      fi
-      sid="$(python3 - "$log" <<'PY' || true
-import json,sys
-sid=""
-for line in open(sys.argv[1], errors="replace"):
-  line=line.strip()
-  if not line.startswith("{"): continue
-  try: o=json.loads(line)
-  except: continue
-  if o.get("type")=="session.resume_hint" and o.get("session_id"):
-    sid=o["session_id"]
-  if isinstance(o.get("session_id"), str):
-    sid=o["session_id"]
-print(sid)
-PY
-)"
-      ;;
-    *) die "dispatch: unknown worker $worker" ;;
-  esac
+  # Difficulty-derived flags come from the recommender, never re-derived here;
+  # the registry decides where in the argv they land.
+  _ssa_build "$worker" implement \
+    --worktree "$wt" --brief "$brief" --output "$dir/last-msg.txt" \
+    --args-file "$dir/worker-args.txt" \
+    || die "dispatch: cannot build a command for worker $worker"
+
+  # Capability, not a name: a worker with no sandbox cannot be trusted with a
+  # write dispatch just because a worktree looks like containment.
+  if [[ "$_BC_WRITE_OK" != "1" ]]; then
+    [[ "${SSA_ALLOW_KIMI_WRITE:-}" == "1" ]] || \
+      die "dispatch: $worker has no sandbox and write dispatch is blocked; set SSA_ALLOW_KIMI_WRITE=1 to override the risk"
+    _utc >"$dir/kimi-override.txt"
+    _ssa_event "$dir" --phase write-override --worker "$worker"
+  fi
+  [[ -n "$_BC_BIN" && -x "$_BC_BIN" ]] || die "$worker not found at ${_BC_BIN:-<unresolved>}"
+
+  _ssa_state "$dir" running --worker "$worker" --pid "$$"
+  _ssa_event "$dir" --phase running --worker "$worker" --pid "$$"
+
+  if [[ -n "$_BC_STDIN" ]]; then
+    _ssa_run_worker <"$_BC_STDIN" >"$log" 2>&1 || rc=$?
+  else
+    _ssa_run_worker >"$log" 2>&1 || rc=$?
+  fi
+
+  sid="$(_ssa parse-session --worker "$worker" --log "$log" 2>/dev/null || true)"
+  failure="$(_classify_failure "$rc" "$log")"
 
   echo "$rc" >"$dir/exit-code.txt"
   echo "$sid" >"$dir/session-id.txt"
+  _ssa_state "$dir" exited --worker "$worker" --exit "$rc" \
+    ${failure:+--failure-class "$failure"} ${sid:+--session-id "$sid"}
+  _ssa_event "$dir" --phase exited --worker "$worker" --exit "$rc" \
+    ${failure:+--failure-class "$failure"} --artifact "$log"
   # A 429 or a dead token is not this task's problem alone: bench the worker for
   # every task until the cooldown expires.
-  _maybe_cooldown "$dir" "$worker" "$rc"
+  _maybe_cooldown "$dir" "$worker" "$rc" "$failure"
   if [[ -z "$sid" ]]; then
     echo "worker did not emit a resumable session id" >"$dir/resume-unavailable.txt"
   fi
@@ -528,11 +533,14 @@ PY
     [[ -s "$dir/quota-after.json" ]] || rm -f "$dir/quota-after.json"
   fi
 
-  local resume="unavailable"
+  local resume="unavailable" argstr="defaults"
   [[ -n "$sid" ]] && resume="available"
+  if [[ -s "$dir/worker-args.txt" ]]; then
+    argstr="$(tr '\n' ' ' <"$dir/worker-args.txt" | sed 's/ *$//')"
+  fi
   echo "smart-subagents: worker=$worker session=${sid:-unavailable}" \
     "resume=$resume exit=$rc" \
-    "args=${wargs[*]:-defaults} log=$log"
+    "args=${argstr} log=$log"
   return "$rc"
 }
 
@@ -599,6 +607,9 @@ _watchdog() {
   {
     echo "$(_utc) $reason after ${idle}s idle (stall=${stall}s deadline=${deadline}s)"
   } >>"$dir/stalled.txt"
+  _ssa_event "$dir" --phase stalled --failure-class "$reason" \
+    --artifact "$dir/stalled.txt"
+  _ssa_state "$dir" stalled --failure-class "$reason"
   _kill_group "$pgid"
 }
 
@@ -704,6 +715,8 @@ cmd_stop() {
   pgid="$(_read1 "$dir/worker.pgid" "$pid")"
   _kill_group "$pgid"
   echo "$(_utc) stopped by operator (pid $pid, pgid $pgid)" >>"$dir/stopped.txt"
+  _ssa_event "$dir" --phase aborted --pid "$pid" --artifact "$dir/stopped.txt"
+  _ssa_state "$dir" aborted
   echo "stop: signalled process group $pgid for $dir"
 }
 
@@ -716,10 +729,10 @@ cmd_ls() {
     esac
   done
   [[ -d "$SSA_WORK_DIR" ]] || { echo "no task dirs under $SSA_WORK_DIR"; return 0; }
-  local now d id age repo worker class phase diff rows=0
+  local now d id age repo worker class phase state diff rows=0
   now="$(_now)"
-  printf '%-18s %5s %-16s %-7s %-22s %-9s %s\n' \
-    TASK AGE REPO WORKER SIZE/DIFF/KIND PHASE DIFF
+  printf '%-18s %5s %-16s %-7s %-22s %-9s %-12s %s\n' \
+    TASK AGE REPO WORKER SIZE/DIFF/KIND PHASE STATE DIFF
   for d in "$SSA_WORK_DIR"/*; do
     [[ -d "$d" ]] || continue
     id="$(basename "$d")"
@@ -728,8 +741,8 @@ cmd_ls() {
     if [[ "$id" == plan-* ]]; then
       local plans
       plans="$(find "$d" -maxdepth 1 -name 'plan-*.md' 2>/dev/null | wc -l | tr -d ' ')"
-      printf '%-18s %5s %-16s %-7s %-22s %-9s %s\n' \
-        "$id" "$age" "$repo" "panel" "$(_task_class "$d")" "panel" \
+      printf '%-18s %5s %-16s %-7s %-22s %-9s %-12s %s\n' \
+        "$id" "$age" "$repo" "panel" "$(_task_class "$d")" "panel" "-" \
         "${plans} plan(s)"
       rows=$(( rows + 1 ))
       continue
@@ -738,10 +751,11 @@ cmd_ls() {
     worker="$(_read1 "$d/worker.txt" '-')"
     class="$(_task_class "$d")"
     phase="$(_task_phase "$d")"
+    state="$(_task_state "$d")"
     diff="$(_diff_summary "$d")"
     [[ ! -f "$d/stalled.txt" ]] || phase="${phase}!"
-    printf '%-18s %5s %-16s %-7s %-22s %-9s %s\n' \
-      "$id" "$age" "$repo" "$worker" "$class" "$phase" "$diff"
+    printf '%-18s %5s %-16s %-7s %-22s %-9s %-12s %s\n' \
+      "$id" "$age" "$repo" "$worker" "$class" "$phase" "$state" "$diff"
     rows=$(( rows + 1 ))
   done
   (( rows > 0 )) || echo "(none)"
@@ -770,6 +784,14 @@ cmd_status() {
   echo "worker    : $(_read1 "$dir/worker.txt" '-')"
   echo "class     : $(_task_class "$dir")"
   echo "phase     : $(_task_phase "$dir")"
+  # phase is inferred from which artifacts exist; state is what the task
+  # recorded about itself. They disagree exactly when something went wrong.
+  echo "state     : $(_task_state "$dir")$(
+    [[ -f "$dir/task.json" ]] || printf ' (inferred, no task.json)'
+  )"
+  if [[ -f "$dir/events.jsonl" ]]; then
+    echo "events    : $(wc -l <"$dir/events.jsonl" | tr -d ' ') recorded"
+  fi
   echo "base sha  : $(_read1 "$dir/base-sha.txt" '-')"
   if [[ -d "$wt" ]]; then
     echo "branch    : $(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
@@ -952,32 +974,29 @@ PY
     } >"$brief"
 
     (
-      local wargs=()
-      if [[ -f "$dir/worker-args-$worker.txt" ]]; then
-        while IFS= read -r _a; do [[ -n "$_a" ]] && wargs+=("$_a"); done \
-          <"$dir/worker-args-$worker.txt"
+      local args_file="$dir/worker-args-$worker.txt"
+      [[ -f "$args_file" ]] || : >"$args_file"
+      if ! _ssa_build "$worker" plan --worktree "$wt" --brief "$brief" \
+          --output "$plan_out" --args-file "$args_file" \
+          || [[ -z "$_BC_BIN" || ! -x "$_BC_BIN" ]]; then
+        echo "(planner produced no output; $worker binary unavailable)" >"$plan_out"
+        exit 0
       fi
-      case "$worker" in
-        codex)
-          local cx; cx="$CODEX_BIN"
-          [[ -x "$cx" ]] || exit 127
-          "$cx" exec -C "$wt" -s read-only ${wargs[@]+"${wargs[@]}"} \
-            -o "$plan_out" - <"$brief" \
-            >"$dir/plan-$i.log" 2>&1 || true
-          ;;
-        grok)
-          "$GROK_BIN" -p "$(cat "$brief")" --cwd "$wt" --sandbox workspace \
-            ${wargs[@]+"${wargs[@]}"} \
-            >"$plan_out" 2>"$dir/plan-$i.log" || true
-          ;;
-        kimi)
-          ( cd "$wt" && env -i HOME="$HOME" PATH="$PATH" \
-              TMPDIR="${TMPDIR:-/tmp}" TERM="${TERM:-dumb}" "$KIMI_BIN" \
-              -p "Read $brief and complete the task it describes." \
-              ${wargs[@]+"${wargs[@]}"} ) \
-            >"$plan_out" 2>"$dir/plan-$i.log" || true
-          ;;
-      esac
+      # Where the plan text lands is a registry fact too: codex writes it with
+      # a flag, the others write it on stdout.
+      if [[ "$_BC_OUTPUT_MODE" == "stdout" ]]; then
+        if [[ -n "$_BC_STDIN" ]]; then
+          _ssa_run_worker <"$_BC_STDIN" >"$plan_out" 2>"$dir/plan-$i.log" || true
+        else
+          _ssa_run_worker >"$plan_out" 2>"$dir/plan-$i.log" || true
+        fi
+      else
+        if [[ -n "$_BC_STDIN" ]]; then
+          _ssa_run_worker <"$_BC_STDIN" >"$dir/plan-$i.log" 2>&1 || true
+        else
+          _ssa_run_worker >"$dir/plan-$i.log" 2>&1 || true
+        fi
+      fi
       [[ -s "$plan_out" ]] || echo "(planner produced no output; see plan-$i.log)" >"$plan_out"
     ) &
     pids+=($!)
@@ -1314,24 +1333,30 @@ cmd_doctor() {
     _doc_row fail git "not on PATH, worktrees are impossible"
   fi
 
-  local name bin
-  for name in codex grok kimi; do
-    case "$name" in
-      codex) bin="$CODEX_BIN" ;;
-      grok) bin="$GROK_BIN" ;;
-      kimi) bin="$KIMI_BIN" ;;
-    esac
-    if [[ -n "$bin" && -x "$bin" ]]; then
+  # Which workers exist, where their binaries are and which credential file
+  # each uses are all registry facts. Auth is checked by file existence only:
+  # never read, never printed.
+  local reg_rows name display sandbox write probe bin auth_path
+  reg_rows="$(mktemp "${TMPDIR:-/tmp}/ssa-doctor-workers.XXXXXX")"
+  if _ssa workers >"$reg_rows" 2>/dev/null; then
+    _doc_row ok registry "$(wc -l <"$reg_rows" | tr -d ' ') worker(s) registered"
+  else
+    _doc_row fail registry "workers.json did not validate, no dispatch can build"
+  fi
+  while IFS=$'\t' read -r name display sandbox write probe bin auth_path; do
+    [[ -n "$name" ]] || continue
+    if [[ -n "$bin" && "$bin" != "-" && -x "$bin" ]]; then
       _doc_row ok "bin:$name" "$bin"
     else
       _doc_row warn "bin:$name" "not executable at ${bin:-<unset>}"
     fi
-  done
-
-  # Auth is checked by file existence only. Never read, never print.
-  _doc_auth codex "$HOME/.codex/auth.json"
-  _doc_auth grok "$HOME/.grok/auth.json"
-  _doc_auth kimi "$HOME/.kimi-code/credentials/kimi-code.json"
+    if [[ -n "$auth_path" && "$auth_path" != "-" ]]; then
+      _doc_auth "$name" "$auth_path"
+    else
+      _doc_row warn "auth:$name" "registry declares no credential file"
+    fi
+  done <"$reg_rows"
+  rm -f "$reg_rows"
   if command -v security >/dev/null 2>&1; then
     if security find-generic-password -s 'Claude Code-credentials' \
         >/dev/null 2>&1; then
@@ -1578,6 +1603,15 @@ if out_of_scope:
 sys.exit({"pass": 0, "fail": 1, "inconclusive": 2}[verdict])
 PY
   rm -f "$dir/verify-changed.z"
+  local verdict_state
+  case "$rc" in
+    0) verdict_state="verified" ;;
+    1) verdict_state="failed" ;;
+    *) verdict_state="inconclusive" ;;
+  esac
+  _ssa_event "$dir" --phase "$verdict_state" --exit "$rc" \
+    --artifact "$dir/outcome.json"
+  _ssa_state "$dir" "$verdict_state"
   return "$rc"
 }
 
@@ -1729,6 +1763,8 @@ if not existed:
 print("record: %s worker=%s outcome=%s -> %s"
       % (record["task_id"], record["worker"] or "-", outcome, path))
 PY
+  _ssa_event "$dir" --phase reported --artifact "$dir/outcome-record.json"
+  _ssa_state "$dir" reported
 }
 
 cmd_ledger() {
@@ -1819,11 +1855,12 @@ Usage: smart-subagents.sh <command> [options]
 
   ls
       One line per task and planning panel under SSA_WORK_DIR: age, repo,
-      worker, size/difficulty/kind, inferred phase, diff summary.
+      worker, size/difficulty/kind, inferred phase, recorded state, diff.
 
   status --dir DIR
       Full detail for one task: base sha, branch, exit code, session or
-      resume=unavailable, worker pid state, verify state, last log lines.
+      resume=unavailable, worker pid state, recorded lifecycle state and event
+      count, verify state, last log lines.
 
   tail --dir DIR
       Follow DIR/stdout.log.
@@ -1881,10 +1918,19 @@ Usage: smart-subagents.sh <command> [options]
   scan-secrets --dir DIR
       Scan added lines and newly added environment files for secrets.
 
+Task record:
+  Each task dir carries task.json (authoritative: state, class, attempts) and
+  events.jsonl (append-only, one line per lifecycle point). The lifecycle is
+  minted -> preflighted -> picked -> running -> exited -> verified|failed|
+  inconclusive -> reported, with aborted and stalled terminal from running.
+
 Env:
-  CODEX_BIN, GROK_BIN, KIMI_BIN   override worker binary paths
+  CODEX_BIN, GROK_BIN, KIMI_BIN   override worker binary paths (the variable
+                                  name comes from scripts/workers.json)
+  SSA_WORKERS_JSON                alternative worker registry
   SSA_WORK_DIR                    task scratch root (default: $TMPDIR/smart-subagents)
   SSA_USAGE_PY                    override path to ai-cli-usage.py
+  SSA_CLI_PY                      override path to ssa/cli.py
   SSA_PREMIUM_MODELS              model names that gate local labor (default: Fable,Opus)
   SSA_ALLOW_KIMI_WRITE=1          accept the risk of a write dispatch to kimi
   SSA_STALL_SECS                  watchdog stall threshold (default 600)

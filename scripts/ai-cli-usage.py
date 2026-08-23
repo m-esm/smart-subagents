@@ -34,8 +34,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+# The worker registry is the single source of per-CLI knowledge: which workers
+# exist, which probe reports on each, the effort ladder, the capability priors
+# and the difficulty-to-flag mapping. Adding a worker is an entry there.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ssa import registry as ssa_registry  # noqa: E402
+
 HOME = Path.home()
 TIMEOUT = 15
+
+
+def _registry():
+    try:
+        return ssa_registry.load()
+    except ssa_registry.RegistryError as exc:
+        print("ai-cli-usage: %s" % exc, file=sys.stderr)
+        raise SystemExit(2)
+
+
+REGISTRY = _registry()
 
 
 @dataclass
@@ -121,6 +138,45 @@ def _severity(used_pct: Optional[float]) -> str:
     if used_pct >= 70:
         return "low"
     return "ok"
+
+
+# ---------------------------------------------------------------------------
+# Missing and malformed provider data
+#
+# Every provider gets the same two answers, because the old per-provider
+# improvisation (codex assumed the worst, grok and kimi assumed the best) meant
+# the same silence routed three different ways.
+#
+#   missing   -> available, not eligible, skip_reason "usage data missing"
+#   malformed -> that field becomes None and the status carries a warning
+#
+# Both fail closed: a worker whose quota nobody can read is not a worker you
+# can dispatch on, and it is never given invented headroom.
+# ---------------------------------------------------------------------------
+
+USAGE_MISSING = "usage data missing"
+
+
+def _warn(st: "CliStatus", message: str) -> None:
+    st.extras.setdefault("warnings", []).append(message)
+
+
+def _num(st: "CliStatus", value: Any, field_name: str) -> Optional[float]:
+    """float(value), or None plus a warning. Never raises on provider junk."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        _warn(st, "%s: not a number (%r), dropped" % (field_name, value))
+        return None
+
+
+def _mark_missing_usage(st: "CliStatus") -> None:
+    st.available = True
+    st.eligible = False
+    st.skip_reason = USAGE_MISSING
+    st.score = 0.0
 
 
 def _env_float(name: str, default: float) -> float:
@@ -388,9 +444,8 @@ def parse_claude_usage(
     ) -> None:
         if not block:
             return
-        util = block.get("utilization")
         # Claude oauth usage: five_hour=1.0 means 1%, seven_day=63.0 means 63%.
-        used_pct = float(util) if util is not None else None
+        used_pct = _num(st, block.get("utilization"), "%s.utilization" % name)
         resets = block.get("resets_at")
         st.windows.append(
             Window(
@@ -428,10 +483,11 @@ def parse_claude_usage(
         name = f"{base}_{model}" if model else base
         if name in seen and not model:
             continue
-        pct = lim.get("percent")
-        if pct is None:
+        if lim.get("percent") is None:
             continue
-        used_pct = float(pct)
+        used_pct = _num(st, lim.get("percent"), "limits[%s].percent" % name)
+        if used_pct is None:
+            continue
         resets = lim.get("resets_at")
         note = "active binding limit" if lim.get("is_active") else ""
         st.windows.append(
@@ -464,7 +520,14 @@ def parse_claude_usage(
     ]
     if not binding:
         binding = st.windows
-    worst = max((w.used_pct or 0) for w in binding) if binding else 0
+    known = [w.used_pct for w in binding if w.used_pct is not None]
+    if not known:
+        # No readable meter on any binding window: fail closed rather than
+        # score a blank as 100.
+        _mark_missing_usage(st)
+        st.extras["local_labor"] = False
+        return st
+    worst = max(known)
     st.score = max(0.0, 100.0 - worst)
     if worst >= 99.5:
         st.eligible = False
@@ -548,9 +611,7 @@ def parse_codex_usage(data: dict, st: Optional[CliStatus] = None) -> CliStatus:
 
     rl = data.get("rate_limit") or {}
     pw = rl.get("primary_window") or {}
-    used_pct = pw.get("used_percent")
-    if used_pct is not None:
-        used_pct = float(used_pct)
+    used_pct = _num(st, pw.get("used_percent"), "primary_window.used_percent")
     reset_at = pw.get("reset_at")
     reset_after = pw.get("reset_after_seconds")
     resets_iso = None
@@ -571,9 +632,7 @@ def parse_codex_usage(data: dict, st: Optional[CliStatus] = None) -> CliStatus:
 
     if rl.get("secondary_window"):
         sw = rl["secondary_window"]
-        used2 = sw.get("used_percent")
-        if used2 is not None:
-            used2 = float(used2)
+        used2 = _num(st, sw.get("used_percent"), "secondary_window.used_percent")
         reset_after2 = sw.get("reset_after_seconds")
         st.windows.append(
             Window(
@@ -596,7 +655,13 @@ def parse_codex_usage(data: dict, st: Optional[CliStatus] = None) -> CliStatus:
     st.extras["limit_reached"] = bool(rl.get("limit_reached"))
     st.extras["allowed"] = rl.get("allowed")
 
-    used = used_pct if used_pct is not None else 100.0
+    if used_pct is None:
+        # No readable primary window: not "fully spent", just unknown, and
+        # unknown is not something to dispatch on.
+        _mark_missing_usage(st)
+        return st
+
+    used = used_pct
     st.score = max(0.0, 100.0 - used)
     # Boost slightly if banked resets exist but still mark exhausted primary
     if used >= 99.5:
@@ -706,9 +771,9 @@ def parse_grok_usage(
     period_end = cfg.get("billingPeriodEnd")
 
     st.available = True
-    if limit_v is not None and used_v is not None:
-        limit_f = float(limit_v)
-        used_f = float(used_v)
+    limit_f = _num(st, limit_v, "monthlyLimit.val")
+    used_f = _num(st, used_v, "used.val")
+    if limit_f is not None and used_f is not None:
         rem = max(0.0, limit_f - used_f)
         used_pct = (used_f / limit_f * 100.0) if limit_f > 0 else 0.0
         start_ts, end_ts = _parse_iso(str(period_start or "")), _parse_iso(
@@ -738,8 +803,8 @@ def parse_grok_usage(
         if not st.eligible:
             st.skip_reason = "Grok monthly CLI credits exhausted"
     else:
-        st.score = 50.0
-        st.eligible = True
+        # No credit meter to read. Same answer as every other provider.
+        _mark_missing_usage(st)
 
     if user is not None:
         st.extras["has_grok_code_access"] = user.get("hasGrokCodeAccess")
@@ -850,12 +915,9 @@ def parse_kimi_usage(
         st.plan = str(membership.get("level") or "")
 
     usage = data.get("usage") or {}
-    try:
-        limit_f = float(usage.get("limit")) if usage.get("limit") is not None else None
-        used_f = float(usage.get("used")) if usage.get("used") is not None else None
-        rem_f = float(usage.get("remaining")) if usage.get("remaining") is not None else None
-    except (TypeError, ValueError):
-        limit_f = used_f = rem_f = None
+    limit_f = _num(st, usage.get("limit"), "usage.limit")
+    used_f = _num(st, usage.get("used"), "usage.used")
+    rem_f = _num(st, usage.get("remaining"), "usage.remaining")
 
     used_pct = None
     if limit_f and used_f is not None and limit_f > 0:
@@ -896,11 +958,8 @@ def parse_kimi_usage(
             name = f"window_{dur}_{unit}".lower().replace("time_unit_", "")
             if unit.endswith("DAY") and dur is not None:
                 period_len = float(dur) * 86400.0
-        try:
-            d_limit = float(detail["limit"]) if detail.get("limit") is not None else None
-            d_rem = float(detail["remaining"]) if detail.get("remaining") is not None else None
-        except (TypeError, ValueError, KeyError):
-            d_limit = d_rem = None
+        d_limit = _num(st, detail.get("limit"), "limits[%s].limit" % name)
+        d_rem = _num(st, detail.get("remaining"), "limits[%s].remaining" % name)
         d_used = None
         d_pct = None
         if d_limit is not None and d_rem is not None:
@@ -926,14 +985,21 @@ def parse_kimi_usage(
     if parallel.get("limit") is not None:
         st.extras["parallel_limit"] = parallel.get("limit")
 
-    used = used_pct if used_pct is not None else 0.0
-    st.score = max(0.0, 100.0 - used)
-    st.eligible = used < 99.5
-    if not st.eligible:
-        st.skip_reason = "Kimi weekly quota exhausted"
-    # Safety note for supervisor (not a skip)
-    st.extras["sandbox"] = False
-    st.extras["dispatch_note"] = "no sandbox — worktree only"
+    if used_pct is None:
+        # No readable weekly meter: unknown is not "fully available".
+        _mark_missing_usage(st)
+    else:
+        st.score = max(0.0, 100.0 - used_pct)
+        st.eligible = used_pct < 99.5
+        if not st.eligible:
+            st.skip_reason = "Kimi weekly quota exhausted"
+    # Safety note for the supervisor (not a skip). The capability itself is a
+    # registry fact, not a hardcoded name.
+    spec = REGISTRY.workers.get("kimi")
+    sandboxed = bool(spec) and spec.sandbox != "none"
+    st.extras["sandbox"] = sandboxed
+    if not sandboxed:
+        st.extras["dispatch_note"] = "no sandbox, worktree only"
 
     return st
 
@@ -942,7 +1008,9 @@ def parse_kimi_usage(
 # Recommendation
 # ---------------------------------------------------------------------------
 
-WORKER_CLIS = ("codex", "grok", "kimi")
+# Who the workers are is a registry fact. Claude is the supervisor, never a
+# worker pick, so it is not in here.
+WORKER_CLIS = REGISTRY.names
 
 # Cache holds plan, quota and (unredacted) account identifiers, so it never goes
 # in world-readable /tmp. Honors XDG_CACHE_HOME; created 0700, written 0600.
@@ -966,16 +1034,11 @@ def _is_premium_window(name: str) -> bool:
     return any(m.lower() in (name or "").lower() for m in PREMIUM_MODEL_WINDOWS)
 
 
-# Capability priors by task kind (multiplied into headroom score, not hard gates).
-# Higher = better default fit when quotas are comparable.
-FIT = {
-    "default": {"codex": 1.05, "grok": 1.0, "kimi": 0.9},
-    "impl": {"codex": 1.12, "grok": 1.05, "kimi": 0.95},
-    "review": {"codex": 1.15, "grok": 1.0, "kimi": 1.05},  # kimi good third opinion
-    "debug": {"codex": 1.1, "grok": 1.05, "kimi": 0.95},
-    "best_of_n": {"codex": 0.85, "grok": 1.2, "kimi": 0.8},
-    "analysis": {"codex": 1.05, "grok": 1.0, "kimi": 0.95},
-}
+# Capability priors by task kind (multiplied into headroom score, not hard
+# gates). Higher = better default fit when quotas are comparable. Each worker
+# declares its own priors in the registry; a kind a worker says nothing about
+# defaults to a neutral 1.0.
+FIT = REGISTRY.fit_table()
 
 FIT_MIN, FIT_MAX = 0.85, 1.15
 # A FIT multiplier of 1.0 means "the usual outcome", which is a 0.75 success
@@ -1366,15 +1429,11 @@ DIFFICULTY: dict[str, tuple[str, float, bool]] = {
     "frontier": ("xhigh", 1.8, True),
 }
 
-# Effort rungs each CLI actually accepts, weakest first. Kept per-CLI rather
-# than assumed uniform: grok enumerates xhigh, codex does not document it on
-# every version, and kimi has no effort flag at all. A target above a CLI's
-# ceiling clamps to its top rung.
-EFFORT_LADDER: dict[str, list[str]] = {
-    "codex": ["low", "medium", "high"],
-    "grok": ["low", "medium", "high", "xhigh"],
-    "kimi": [],
-}
+# Effort rungs each CLI actually accepts, weakest first, straight from the
+# registry. Kept per-CLI rather than assumed uniform: grok enumerates xhigh,
+# codex does not document it on every version, and kimi has no effort flag at
+# all. A target above a CLI's ceiling clamps to its top rung.
+EFFORT_LADDER: dict[str, list[str]] = REGISTRY.effort_ladders()
 
 
 def _clamp_effort(cli: str, target: str) -> str:
@@ -1394,21 +1453,22 @@ def worker_args(cli: str, difficulty: str, task_size: str) -> list[str]:
     """CLI flags that realize `difficulty` for this worker.
 
     Single source of truth for effort/model selection: the shell dispatcher
-    consumes this verbatim instead of reimplementing the mapping.
+    consumes this verbatim instead of reimplementing the mapping. The flag
+    shapes and the model rules come from the registry, so a new worker gets
+    its effort knob by declaring one, not by adding a branch here.
     """
+    spec = REGISTRY.workers.get(cli)
+    if spec is None:
+        return []
     effort, _, _ = DIFFICULTY.get(difficulty) or DIFFICULTY["routine"]
     rung = _clamp_effort(cli, effort)
-    if cli == "codex":
-        return ["-c", f"model_reasoning_effort={rung}"] if rung else []
-    if cli == "grok":
-        return ["--reasoning-effort", rung] if rung else []
-    if cli == "kimi":
-        # No effort flag; the only lever is a faster model alias.
-        cheap = difficulty == "trivial" or (
-            task_size in ("tiny", "small") and difficulty in ("trivial", "routine")
-        )
-        return ["-m", "kimi-for-coding-highspeed"] if cheap else []
-    return []
+    args: list[str] = []
+    if rung and spec.effort_flags:
+        args.extend(token.replace("{effort}", rung) for token in spec.effort_flags)
+    model = spec.model_for(difficulty, task_size)
+    if model and spec.model_flags:
+        args.extend(token.replace("{model}", model) for token in spec.model_flags)
+    return args
 
 
 def recommend(
@@ -1594,6 +1654,45 @@ def recommend(
             for s in ranked_statuses
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Probes
+#
+# The registry names a probe per worker; this is the table of probes that
+# exist. A registered worker whose probe is not here is reported unavailable
+# with a reason, never handed invented headroom, because a worker nobody can
+# meter is exactly the one you must not route real work to.
+# ---------------------------------------------------------------------------
+
+PROBES = {
+    "check_claude": check_claude,
+    "check_codex": check_codex,
+    "check_grok": check_grok,
+    "check_kimi": check_kimi,
+}
+
+NO_PROBE = "no quota probe"
+
+
+def _probe_for(cli: str):
+    spec = REGISTRY.workers.get(cli)
+    probe = PROBES.get(spec.probe) if spec else None
+    if probe is not None:
+        return probe
+
+    def _missing_probe() -> CliStatus:
+        want = spec.probe if spec else "?"
+        return CliStatus(
+            cli=cli,
+            available=False,
+            eligible=False,
+            score=0.0,
+            skip_reason=NO_PROBE,
+            error="registry names probe %r, which this build does not implement" % want,
+        )
+
+    return _missing_probe
 
 
 def _load_cache() -> Optional[dict]:
@@ -1813,7 +1912,7 @@ def main() -> int:
     ap.add_argument("--recommend", action="store_true", help="print primary worker only")
     ap.add_argument(
         "--cli",
-        choices=["claude", "codex", "grok", "kimi", "all"],
+        choices=["claude"] + list(WORKER_CLIS) + ["all"],
         default="all",
         help="which CLI to check",
     )
@@ -1897,12 +1996,9 @@ def main() -> int:
         )
         return 0
 
-    checkers = {
-        "claude": check_claude,
-        "codex": check_codex,
-        "grok": check_grok,
-        "kimi": check_kimi,
-    }
+    checkers = {"claude": check_claude}
+    for name in WORKER_CLIS:
+        checkers[name] = _probe_for(name)
     names = list(checkers) if args.cli == "all" else [args.cli]
 
     statuses: list[CliStatus] = []

@@ -35,8 +35,24 @@ make_task() {
 }
 
 bash -n "$SSA" || fail "shell syntax"
-python3 -m py_compile "$USAGE" || fail "python syntax"
+python3 -m py_compile "$USAGE" "$ROOT"/scripts/ssa/*.py || fail "python syntax"
 pass "syntax checks"
+
+python3 "$ROOT/scripts/ssa/cli.py" registry-validate >"$TEST_TMP/registry.txt" \
+  || fail "shipped registry validates"
+grep -q 'registry ok' "$TEST_TMP/registry.txt" || fail "registry-validate output"
+python3 "$ROOT/scripts/ssa/cli.py" workers >"$TEST_TMP/workers.txt" \
+  || fail "workers lists"
+for smoke_worker in codex grok kimi; do
+  grep -q "^${smoke_worker}	" "$TEST_TMP/workers.txt" || \
+    fail "workers lists $smoke_worker"
+done
+# Deleting the per-CLI case arms is the point of the registry. If one comes
+# back, worker knowledge has started forking again.
+if grep -q 'case "\$worker" in' "$SSA"; then
+  fail "launcher has no per-CLI case arm"
+fi
+pass "registry is the single source of worker knowledge"
 
 secret_repo="$TEST_TMP/secret-repo"
 secret_task="$TEST_TMP/secret-task"

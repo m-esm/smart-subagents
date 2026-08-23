@@ -80,19 +80,23 @@ class ClaudeParserTests(unittest.TestCase):
         self.assertEqual(st.account, "")
         self.assertEqual(st.plan, "")
 
-    def test_malformed_five_hour_utilization_raises(self):
-        # characterization: current behavior: a non-numeric utilization is
-        # not guarded and crashes the parser with ValueError.
+    def test_malformed_five_hour_utilization_degrades_with_a_warning(self):
+        # Phase 3b: a non-numeric utilization drops that field to None and
+        # records a warning. It never crashes the parser (it used to raise
+        # ValueError, which took the whole preflight down with it).
         fx = load_fixture_json("claude", "malformed_numeric.json")
-        with self.assertRaises(ValueError):
-            self.m.parse_claude_usage(fx["data"], fx["profile"])
+        st = self.m.parse_claude_usage(fx["data"], fx["profile"])
+        self.assertIsNone(by_name(st.windows, "5h_session").used_pct)
+        self.assertTrue(st.extras.get("warnings"))
+        self.assertTrue(any("utilization" in w for w in st.extras["warnings"]))
 
-    def test_malformed_limit_percent_raises(self):
-        # characterization: current behavior: same lack of guarding in the
-        # model-scoped limits[] loop.
+    def test_malformed_limit_percent_degrades_with_a_warning(self):
+        # Same guard in the model-scoped limits[] loop: the bad entry is
+        # dropped and reported, the rest of the payload still parses.
         fx = load_fixture_json("claude", "malformed_limit_percent.json")
-        with self.assertRaises(ValueError):
-            self.m.parse_claude_usage(fx["data"], fx["profile"])
+        st = self.m.parse_claude_usage(fx["data"], fx["profile"])
+        self.assertTrue(st.extras.get("warnings"))
+        self.assertTrue(any("percent" in w for w in st.extras["warnings"]))
 
     def test_st_argument_is_mutated_and_returned(self):
         # The extraction threads an existing CliStatus through so check_claude
@@ -164,22 +168,27 @@ class CodexParserTests(unittest.TestCase):
         self.assertIn("banked reset(s) available but do not auto-redeem", st.skip_reason)
         self.assertAlmostEqual(st.score, 5.0)
 
-    def test_missing_rate_limit_defaults_to_fully_exhausted(self):
-        # characterization: current behavior: no rate_limit block at all
-        # means used_pct stays None, but the scoring step treats a missing
-        # used_pct as used=100.0, i.e. "assume the worst", not "assume ok".
+    def test_missing_rate_limit_is_reported_as_missing_usage_data(self):
+        # Phase 3b: no rate_limit block at all is not "fully spent", it is
+        # "nobody can read this meter". Every provider now answers the same
+        # way: available, not eligible, skip_reason "usage data missing".
         fx = load_fixture_json("codex", "missing_fields.json")
         st = self.m.parse_codex_usage(fx["data"])
         self.assertIsNone(by_name(st.windows, "primary_window").used_pct)
+        self.assertTrue(st.available)
         self.assertFalse(st.eligible)
+        self.assertEqual(st.skip_reason, "usage data missing")
         self.assertAlmostEqual(st.score, 0.0)
 
-    def test_malformed_used_percent_raises(self):
-        # characterization: current behavior: unlike kimi's usage parsing,
-        # codex's used_percent -> float() conversion is not guarded.
+    def test_malformed_used_percent_degrades_with_a_warning(self):
+        # Phase 3b: a junk used_percent drops to None with a warning, then
+        # falls into the same "usage data missing" answer.
         fx = load_fixture_json("codex", "malformed_used_percent.json")
-        with self.assertRaises(ValueError):
-            self.m.parse_codex_usage(fx["data"])
+        st = self.m.parse_codex_usage(fx["data"])
+        self.assertIsNone(by_name(st.windows, "primary_window").used_pct)
+        self.assertTrue(any("used_percent" in w for w in st.extras["warnings"]))
+        self.assertFalse(st.eligible)
+        self.assertEqual(st.skip_reason, "usage data missing")
 
     def test_malformed_window_seconds_is_swallowed(self):
         # characterization: current behavior: limit_window_seconds is
@@ -221,23 +230,26 @@ class GrokParserTests(unittest.TestCase):
         self.assertFalse(st.eligible)
         self.assertEqual(st.skip_reason, "Grok monthly CLI credits exhausted")
 
-    def test_missing_usage_fields_assumes_healthy(self):
-        # characterization: current behavior: when monthlyLimit/used are
-        # both absent, no window is built at all and the CLI is scored a
-        # flat 50 and marked eligible, i.e. "unknown" reads as "assume ok",
-        # the opposite default from codex's missing-rate-limit case.
+    def test_missing_usage_fields_is_reported_as_missing_usage_data(self):
+        # Phase 3b: absent monthlyLimit/used used to read as "assume ok" and
+        # score a flat 50, the opposite of codex's answer to the same silence.
+        # Both now fail closed.
         fx = load_fixture_json("grok", "missing_fields.json")
         st = self.m.parse_grok_usage(fx["billing"], fx["user"])
         self.assertEqual(st.windows, [])
-        self.assertTrue(st.eligible)
-        self.assertAlmostEqual(st.score, 50.0)
+        self.assertTrue(st.available)
+        self.assertFalse(st.eligible)
+        self.assertEqual(st.skip_reason, "usage data missing")
+        self.assertAlmostEqual(st.score, 0.0)
 
-    def test_malformed_numeric_raises(self):
-        # characterization: current behavior: monthlyLimit.val -> float()
-        # is not guarded.
+    def test_malformed_numeric_degrades_with_a_warning(self):
+        # Phase 3b: a junk monthlyLimit.val is dropped and reported instead
+        # of raising ValueError out of the parser.
         fx = load_fixture_json("grok", "malformed_numeric.json")
-        with self.assertRaises(ValueError):
-            self.m.parse_grok_usage(fx["billing"], fx["user"])
+        st = self.m.parse_grok_usage(fx["billing"], fx["user"])
+        self.assertTrue(any("monthlyLimit" in w for w in st.extras["warnings"]))
+        self.assertFalse(st.eligible)
+        self.assertEqual(st.skip_reason, "usage data missing")
 
     def test_has_grok_code_access_false_overrides_healthy_quota(self):
         # characterization: current behavior: hasGrokCodeAccess=false wins
@@ -292,27 +304,29 @@ class KimiParserTests(unittest.TestCase):
         self.assertFalse(st.eligible)
         self.assertEqual(st.skip_reason, "Kimi weekly quota exhausted")
 
-    def test_missing_limit_treated_as_fully_available(self):
-        # characterization: current behavior: a missing usage.limit means
-        # used_pct is never computed (stays None), and the scoring step
-        # defaults the "used" value to 0.0, i.e. "assume fully available".
-        # This is the opposite default from codex's missing-rate-limit case.
+    def test_missing_limit_is_reported_as_missing_usage_data(self):
+        # Phase 3b: a missing usage.limit used to score 100 ("assume fully
+        # available"), the most dangerous of the three old defaults. Now it
+        # fails closed like every other provider.
         fx = load_fixture_json("kimi", "missing_fields.json")
         st = self.m.parse_kimi_usage(fx["data"], fx["me"])
         self.assertIsNone(by_name(st.windows, "weekly_quota").used_pct)
-        self.assertTrue(st.eligible)
-        self.assertAlmostEqual(st.score, 100.0)
+        self.assertTrue(st.available)
+        self.assertFalse(st.eligible)
+        self.assertEqual(st.skip_reason, "usage data missing")
+        self.assertAlmostEqual(st.score, 0.0)
 
-    def test_malformed_numeric_is_swallowed_not_raised(self):
-        # characterization: current behavior: unlike claude/codex/grok,
-        # kimi's usage try/except catches TypeError/ValueError and degrades
-        # to used_pct=None instead of crashing, for both the top-level usage
-        # block and each limits[] entry.
+    def test_malformed_numeric_degrades_with_a_warning(self):
+        # kimi already swallowed junk numbers instead of raising; now it says
+        # so in extras.warnings, and the unreadable weekly meter is treated
+        # as missing rather than as headroom.
         fx = load_fixture_json("kimi", "malformed_numeric.json")
         st = self.m.parse_kimi_usage(fx["data"], fx["me"])
         self.assertIsNone(by_name(st.windows, "weekly_quota").used_pct)
         self.assertIsNone(by_name(st.windows, "throughput_300m").used_pct)
-        self.assertTrue(st.eligible)
+        self.assertTrue(st.extras.get("warnings"))
+        self.assertFalse(st.eligible)
+        self.assertEqual(st.skip_reason, "usage data missing")
 
 
 if __name__ == "__main__":
