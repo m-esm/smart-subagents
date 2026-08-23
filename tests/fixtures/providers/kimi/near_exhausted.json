@@ -1,0 +1,7 @@
+{
+  "data": {
+    "user": {"membership": {"level": "pro"}},
+    "usage": {"limit": 1000, "used": 950, "remaining": 50, "resetTime": "2026-08-30T00:00:00Z"}
+  },
+  "me": null
+}

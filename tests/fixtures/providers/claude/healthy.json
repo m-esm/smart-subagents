@@ -1,0 +1,30 @@
+{
+  "data": {
+    "five_hour": {"utilization": 20.0, "resets_at": "2026-08-24T18:00:00Z"},
+    "seven_day": {"utilization": 30.0, "resets_at": "2026-08-30T00:00:00Z"},
+    "seven_day_opus": {"utilization": 10.0, "resets_at": "2026-08-30T00:00:00Z"},
+    "seven_day_sonnet": {"utilization": 5.0, "resets_at": "2026-08-30T00:00:00Z"},
+    "limits": [
+      {
+        "kind": "weekly",
+        "scope": {"model": {"display_name": "Fable", "id": "fable-1"}},
+        "percent": 40.0,
+        "resets_at": "2026-08-30T00:00:00Z",
+        "is_active": true
+      }
+    ],
+    "extra_usage": {
+      "is_enabled": true,
+      "disabled_reason": null,
+      "used_credits": 0
+    }
+  },
+  "profile": {
+    "account": {"email": "tester@example.invalid"},
+    "organization": {
+      "organization_type": "individual",
+      "subscription_status": "active",
+      "rate_limit_tier": "default_claude_max"
+    }
+  }
+}

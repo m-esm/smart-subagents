@@ -425,6 +425,40 @@ switches models, because it's the only one of the three without an effort flag.
 Cross-CLI handoff always starts from a fresh brief plus the current diff. There's
 no conversation transfer, because none of these CLIs can import another's session.
 
+## Develop
+
+Run the full suite from the repo root:
+
+```console
+$ bash tests/run.sh
+```
+
+That runs `tests/smoke.sh` (shell-level checks against `smart-subagents.sh`)
+and then the Python characterization suite via `unittest discover`. The suite
+is stdlib-only and runs on Python 3.9+:
+
+```console
+$ python3 -m unittest discover -s tests -v
+```
+
+pytest works too if you have it installed, but nothing requires it:
+
+```console
+$ python3 -m pytest -q tests
+```
+
+Everything is hermetic: no network, no real credentials, no worker CLI ever
+actually runs. `tests/fixtures/providers/<cli>/*.json` are synthetic API
+payloads that exercise `parse_claude_usage` / `parse_codex_usage` /
+`parse_grok_usage` / `parse_kimi_usage`, the pure parsing halves of
+`scripts/ai-cli-usage.py`'s `check_*` functions. `tests/fixtures/bin/` holds
+fake `codex`/`grok`/`kimi` binaries that record their own argv and cwd
+instead of doing anything real; `tests/test_shell.py` uses them to assert the
+*exact* argv `smart-subagents.sh dispatch` builds for each worker. That
+argv-for-argv assertion is the contract a new worker adapter (or a runtime
+migration) has to satisfy. If you're changing how a worker gets invoked,
+that's the test to update on purpose, not the one to make pass by accident.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

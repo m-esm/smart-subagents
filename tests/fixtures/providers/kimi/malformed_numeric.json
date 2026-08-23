@@ -1,0 +1,12 @@
+{
+  "data": {
+    "usage": {"limit": "lots", "used": 100, "remaining": "??"},
+    "limits": [
+      {
+        "window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
+        "detail": {"limit": "oops", "remaining": 10, "resetTime": "2026-08-24T20:00:00Z"}
+      }
+    ]
+  },
+  "me": null
+}

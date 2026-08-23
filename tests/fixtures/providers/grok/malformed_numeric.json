@@ -1,0 +1,9 @@
+{
+  "billing": {
+    "config": {
+      "monthlyLimit": {"val": "lots"},
+      "used": {"val": 10}
+    }
+  },
+  "user": {"hasGrokCodeAccess": true}
+}

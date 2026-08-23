@@ -1,0 +1,7 @@
+{
+  "data": {
+    "five_hour": {"utilization": 99.6, "resets_at": "2026-08-24T18:00:00Z"},
+    "seven_day": {"utilization": 60.0, "resets_at": "2026-08-30T00:00:00Z"}
+  },
+  "profile": null
+}

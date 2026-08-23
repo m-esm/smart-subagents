@@ -353,7 +353,22 @@ def check_claude() -> CliStatus:
             "User-Agent": "claude-code/cli",
         },
     )
-    if pcode == 200 and isinstance(profile, dict):
+    profile_dict = profile if (pcode == 200 and isinstance(profile, dict)) else None
+    return parse_claude_usage(data, profile_dict, st)
+
+
+def parse_claude_usage(
+    data: dict, profile: Optional[dict] = None, st: Optional[CliStatus] = None
+) -> CliStatus:
+    """Pure: turn a Claude oauth/usage payload (+ optional profile) into a CliStatus.
+
+    No network, no credentials. `st` lets the caller carry over fields it
+    already knows (plan/extras from the oauth token) before this fills in the
+    rest; a fresh CliStatus is created when not given.
+    """
+    st = st if st is not None else CliStatus(cli="claude", available=True)
+
+    if profile:
         acc = profile.get("account") or {}
         org = profile.get("organization") or {}
         st.account = str(acc.get("email") or "")
@@ -513,6 +528,20 @@ def check_codex() -> CliStatus:
         st.error = f"usage API HTTP {code}: {data}"
         return st
 
+    return parse_codex_usage(data, st)
+
+
+def _codex_window_seconds(block: dict) -> Optional[float]:
+    try:
+        v = float(block.get("limit_window_seconds"))
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def parse_codex_usage(data: dict, st: Optional[CliStatus] = None) -> CliStatus:
+    """Pure: turn a Codex wham/usage payload into a CliStatus. No network."""
+    st = st if st is not None else CliStatus(cli="codex", available=True)
     st.available = True
     st.plan = str(data.get("plan_type") or st.plan)
     st.account = str(data.get("email") or st.account)
@@ -527,12 +556,6 @@ def check_codex() -> CliStatus:
     resets_iso = None
     if reset_at:
         resets_iso = datetime.fromtimestamp(float(reset_at), tz=timezone.utc).isoformat()
-    def _window_seconds(block: dict) -> Optional[float]:
-        try:
-            v = float(block.get("limit_window_seconds"))
-        except (TypeError, ValueError):
-            return None
-        return v if v > 0 else None
 
     w = Window(
         name="primary_window",
@@ -542,7 +565,7 @@ def check_codex() -> CliStatus:
         resets_in_hours=(float(reset_after) / 3600.0) if reset_after is not None else _hours_until(reset_at),
         severity=_severity(used_pct),
         note=f"window={pw.get('limit_window_seconds')}s",
-        period_seconds=_window_seconds(pw),
+        period_seconds=_codex_window_seconds(pw),
     )
     st.windows.append(w)
 
@@ -561,7 +584,7 @@ def check_codex() -> CliStatus:
                     float(reset_after2) / 3600.0 if reset_after2 is not None else None
                 ),
                 severity=_severity(used2),
-                period_seconds=_window_seconds(sw),
+                period_seconds=_codex_window_seconds(sw),
             )
         )
 
@@ -661,6 +684,20 @@ def check_grok() -> CliStatus:
         st.error = f"billing HTTP {bcode}: {billing}"
         return st
 
+    ucode, user = _http_json("https://cli-chat-proxy.grok.com/v1/user", headers)
+    user_dict = user if (ucode == 200 and isinstance(user, dict)) else None
+    return parse_grok_usage(billing, user_dict, st)
+
+
+def parse_grok_usage(
+    billing: dict, user: Optional[dict] = None, st: Optional[CliStatus] = None
+) -> CliStatus:
+    """Pure: turn a Grok CLI billing payload (+ optional /user) into a CliStatus.
+
+    `billing` may nest its fields under "config" or carry them at the root;
+    both shapes are handled the same way. No network.
+    """
+    st = st if st is not None else CliStatus(cli="grok", available=True)
     cfg = billing.get("config") or billing
     limit_v = ((cfg.get("monthlyLimit") or {}).get("val"))
     used_v = ((cfg.get("used") or {}).get("val"))
@@ -704,8 +741,7 @@ def check_grok() -> CliStatus:
         st.score = 50.0
         st.eligible = True
 
-    ucode, user = _http_json("https://cli-chat-proxy.grok.com/v1/user", headers)
-    if ucode == 200 and isinstance(user, dict):
+    if user is not None:
         st.extras["has_grok_code_access"] = user.get("hasGrokCodeAccess")
         if user.get("hasGrokCodeAccess") is False:
             st.eligible = False
@@ -786,6 +822,20 @@ def check_kimi() -> CliStatus:
         st.error = f"usages HTTP {code}: {data}"
         return st
 
+    mcode, me = _http_json("https://api.kimi.com/coding/v1/me", headers)
+    me_dict = me if (mcode == 200 and isinstance(me, dict)) else None
+    return parse_kimi_usage(data, me_dict, st)
+
+
+def parse_kimi_usage(
+    data: dict, me: Optional[dict] = None, st: Optional[CliStatus] = None
+) -> CliStatus:
+    """Pure: turn a Kimi /usages payload (+ optional /me) into a CliStatus.
+
+    Covers the weekly quota window and every throughput/window limit under
+    data["limits"]. No network.
+    """
+    st = st if st is not None else CliStatus(cli="kimi", available=True)
     st.available = True
     user = data.get("user") or {}
     membership = user.get("membership") or {}
@@ -793,8 +843,7 @@ def check_kimi() -> CliStatus:
     st.extras["region"] = user.get("region")
     st.extras["sub_type"] = data.get("subType")
 
-    mcode, me = _http_json("https://api.kimi.com/coding/v1/me", headers)
-    if mcode == 200 and isinstance(me, dict):
+    if me is not None:
         st.account = str(me.get("nickname") or me.get("user_id") or "")
         st.plan = str(me.get("user_level_name") or me.get("user_level") or "")
     else:

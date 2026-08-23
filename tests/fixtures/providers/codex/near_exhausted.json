@@ -1,0 +1,15 @@
+{
+  "data": {
+    "plan_type": "plus",
+    "email": "tester@example.invalid",
+    "rate_limit": {
+      "primary_window": {
+        "used_percent": 95.0,
+        "reset_after_seconds": 600,
+        "limit_window_seconds": 18000
+      }
+    },
+    "credits": {"balance": 5, "has_credits": true},
+    "rate_limit_reset_credits": {"available_count": 0}
+  }
+}
