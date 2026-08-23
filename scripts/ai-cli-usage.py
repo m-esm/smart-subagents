@@ -21,8 +21,10 @@ import argparse
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -557,6 +559,7 @@ def _kimi_refresh_if_needed(cred: dict, path: Path) -> dict:
     if exp > _now() + 30:
         return cred
     # Force CLI refresh with a trivial prompt (updates credentials file).
+    refresh_dir = tempfile.mkdtemp()
     try:
         subprocess.run(
             [
@@ -566,13 +569,15 @@ def _kimi_refresh_if_needed(cred: dict, path: Path) -> dict:
                 "--output-format",
                 "text",
             ],
-            cwd="/tmp",
+            cwd=refresh_dir,
             capture_output=True,
             text=True,
             timeout=90,
         )
     except Exception:
         pass
+    finally:
+        shutil.rmtree(refresh_dir, ignore_errors=True)
     try:
         return json.loads(path.read_text())
     except Exception:
@@ -844,8 +849,8 @@ def recommend(
             adj *= 1.08
         candidates.append((adj, s))
 
-    # If min_score filtered everyone, relax for medium/large so we still route
-    if not candidates:
+    # Low difficulty work may still use the best available eligible worker.
+    if not candidates and difficulty in ("trivial", "routine"):
         for name in WORKER_CLIS:
             s = by.get(name)
             if s and s.available and s.eligible:
@@ -885,7 +890,15 @@ def recommend(
             f"effort={_clamp_effort(primary, effort) or 'n/a'}, floor={min_score:.0f})"
         )
     else:
-        reasons.append("no eligible external worker — all exhausted or unavailable")
+        if difficulty in ("hard", "frontier") and any(
+            s.available and s.eligible for s in by.values() if s.cli in WORKER_CLIS
+        ):
+            reasons.append(
+                f"quota floor {min_score:.0f} not met by any worker for "
+                f"difficulty={difficulty}; not dispatching on fumes"
+            )
+        else:
+            reasons.append("no eligible external worker, all exhausted or unavailable")
     if not local_labor:
         reasons.append(
             "local premium labor discouraged: keep the main session on supervision "
@@ -935,17 +948,70 @@ def _load_cache() -> Optional[dict]:
 
 
 def _save_cache(payload: dict) -> None:
+    tmp_name = ""
     try:
         payload = dict(payload)
         payload["cached_at"] = _now()
         _CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-        tmp = CACHE_PATH.with_suffix(".tmp")
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as fh:
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=str(_CACHE_DIR), prefix="ai-cli-usage.", delete=False
+        ) as fh:
+            tmp_name = fh.name
+            os.chmod(tmp_name, 0o600)
             json.dump(payload, fh, default=str)
-        os.replace(tmp, CACHE_PATH)
+        os.replace(tmp_name, CACHE_PATH)
+        tmp_name = ""
     except Exception:
         pass
+    finally:
+        if tmp_name:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+
+
+def _acquire_refresh_lock() -> bool:
+    """Acquire the cache refresh lock, waiting briefly for another refresher."""
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_dir = _CACHE_DIR / "refresh.lock"
+    try:
+        os.mkdir(lock_dir, 0o700)
+        return True
+    except OSError:
+        deadline = _now() + 10
+        while _now() < deadline:
+            if _load_cache() is not None:
+                return False
+            time.sleep(0.2)
+        return False
+
+
+def _release_refresh_lock() -> None:
+    try:
+        os.rmdir(_CACHE_DIR / "refresh.lock")
+    except OSError:
+        pass
+
+
+def _statuses_from_cache(cached: dict) -> list[CliStatus]:
+    statuses = []
+    for c in cached.get("clis") or []:
+        statuses.append(
+            CliStatus(
+                cli=c["cli"],
+                available=c.get("available", False),
+                plan=c.get("plan") or "",
+                account=c.get("account") or "",
+                windows=[Window(**w) for w in c.get("windows") or []],
+                extras=c.get("extras") or {},
+                error=c.get("error") or "",
+                score=float(c.get("score") or 0),
+                eligible=bool(c.get("eligible")),
+                skip_reason=c.get("skip_reason") or "",
+            )
+        )
+    return statuses
 
 
 def redact_account(account: str) -> str:
@@ -1104,40 +1170,47 @@ def main() -> int:
         cached = _load_cache()
         if cached and cached.get("clis"):
             try:
-                for c in cached["clis"]:
-                    st = CliStatus(
-                        cli=c["cli"],
-                        available=c.get("available", False),
-                        plan=c.get("plan") or "",
-                        account=c.get("account") or "",
-                        windows=[Window(**w) for w in c.get("windows") or []],
-                        extras=c.get("extras") or {},
-                        error=c.get("error") or "",
-                        score=float(c.get("score") or 0),
-                        eligible=bool(c.get("eligible")),
-                        skip_reason=c.get("skip_reason") or "",
-                    )
-                    statuses.append(st)
+                statuses = _statuses_from_cache(cached)
                 from_cache = True
             except Exception:
                 statuses = []
                 from_cache = False
 
     if not statuses:
-        for name in names:
-            try:
-                statuses.append(checkers[name]())
-            except Exception as e:
-                statuses.append(
-                    CliStatus(cli=name, available=False, error=f"checker crashed: {e}")
-                )
+        owns_refresh_lock = False
         if args.cli == "all":
-            _save_cache(
-                {
-                    "clis": [_status_to_dict(s) for s in statuses],  # redacted
-                    "checked_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
+            try:
+                owns_refresh_lock = _acquire_refresh_lock()
+                if not owns_refresh_lock:
+                    cached = _load_cache()
+                    if cached and cached.get("clis"):
+                        statuses = _statuses_from_cache(cached)
+                        from_cache = True
+            except Exception:
+                owns_refresh_lock = False
+        try:
+            if not statuses:
+                for name in names:
+                    try:
+                        statuses.append(checkers[name]())
+                    except Exception as e:
+                        statuses.append(
+                            CliStatus(
+                                cli=name,
+                                available=False,
+                                error=f"checker crashed: {e}",
+                            )
+                        )
+                if args.cli == "all":
+                    _save_cache(
+                        {
+                            "clis": [_status_to_dict(s) for s in statuses],
+                            "checked_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+        finally:
+            if owns_refresh_lock:
+                _release_refresh_lock()
 
     rec = recommend(
         statuses,

@@ -91,7 +91,9 @@ CLI supports:
 | `frontier` | `=high` | `xhigh` | default | 1.8x | **required** |
 
 Harder work gets a higher quota floor on purpose: retries are likelier and each
-turn costs more, so a frontier task won't dispatch to a CLI running on fumes.
+turn costs more. For `hard` and `frontier`, if no worker meets the floor, the
+router returns no primary worker and does not dispatch on fumes. `trivial` and
+`routine` keep the best eligible worker as a fallback when all are below it.
 
 ## Planning is a panel, not a guess
 
@@ -124,14 +126,17 @@ would still charge quota on a dry run. Neither plan alone was right.
 ## Guarantees
 
 **Isolation.** Every write goes to its own worktree on an `ssa/<id>` branch. Your
-checkout is never touched, dirty or not. Kimi has no sandbox at all, so the
-worktree is the only thing between it and your working tree.
+checkout is never touched, dirty or not. Kimi has no sandbox. Write dispatches
+to kimi are blocked by default because a worktree does not contain its access
+to your system. Set `SSA_ALLOW_KIMI_WRITE=1` to accept that risk for one
+dispatch. The task directory records the override timestamp.
 
-**Verification, not trust.** A baseline of your verify commands runs *before*
-dispatch, so pre-existing failures aren't charged to the worker. Afterward the
-supervisor re-runs them itself, diffs against the recorded base SHA, confirms
-changed paths stayed in scope, and rejects on secrets, surprise lockfile bumps,
-binaries, or an empty diff behind a "done" claim.
+**Verification, not trust.** `scan-secrets` checks added lines with built-in
+credential regexes and Shannon entropy detection, and rejects newly added
+`.env` files. It always runs the built-in pass and adds a gitleaks pass when
+gitleaks is installed. `verify-summary` runs this gate and returns nonzero on a
+finding. The supervisor still runs the task's verification commands itself and
+reviews the diff against the recorded base SHA.
 
 **Budgets by failure class**, not a flat retry count:
 
@@ -151,7 +156,7 @@ Python 3.9+, git, bash, and at least one worker CLI you're already logged into:
 |---|---|---|
 | codex | [OpenAI Codex CLI](https://github.com/openai/codex) | `-s workspace-write` |
 | grok | Grok CLI | always `--sandbox workspace` |
-| kimi | Kimi Code | none, worktree only |
+| kimi | Kimi Code | none, write dispatch blocked unless `SSA_ALLOW_KIMI_WRITE=1` |
 
 Nothing here handles authentication. It reads whatever credentials those CLIs
 already stored, to call each provider's own usage endpoint.
