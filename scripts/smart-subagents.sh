@@ -1375,7 +1375,7 @@ cmd_doctor() {
   cache_file="$cache_dir/ai-cli-usage.json"
   if [[ -d "$cache_dir" ]]; then
     perms="$(stat -c '%a' "$cache_dir" 2>/dev/null \
-      || stat -c '%a' "$cache_dir" 2>/dev/null || echo '?')"
+      || stat -f '%OLp' "$cache_dir" 2>/dev/null || echo '?')"
     if [[ "$perms" == "700" ]]; then
       _doc_row ok cache:perms "$cache_dir is 0700"
     else
