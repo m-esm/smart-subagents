@@ -31,7 +31,10 @@ make_task() {
   git -C "$wt" rev-parse HEAD >"$dir/base-sha.txt"
   echo medium >"$dir/size.txt"
   : >"$dir/worker-args.txt"
-  echo "Complete the fixture task." >"$dir/brief.md"
+  echo "Complete the fixture task.
+
+## Structural discovery
+CGC-SKIP: fixture; route=none; evidence=characterization-test" >"$dir/brief.md"
 }
 
 bash -n "$SSA" || fail "shell syntax"
@@ -547,7 +550,10 @@ ssa_ops init --repo "$ops_repo" --size small --difficulty routine --kind impl \
 ops_dir="$(find "$ops_work" -mindepth 1 -maxdepth 1 -type d | head -1)"
 ops_wt="$(cat "$ops_dir/wt.txt")"
 ops_id="$(cat "$ops_dir/task-id.txt")"
-echo "Complete the fixture task." >"$ops_dir/brief.md"
+echo "Complete the fixture task.
+
+## Structural discovery
+CGC-SKIP: fixture; route=none; evidence=characterization-test" >"$ops_dir/brief.md"
 
 ssa_ops ls >"$TEST_TMP/ls.txt" || fail "ls runs"
 grep -q "$ops_id" "$TEST_TMP/ls.txt" || fail "ls lists the task"
@@ -628,7 +634,10 @@ bg_dir=""
 ssa_ops init --repo "$ops_repo" --size small --difficulty routine \
   >/dev/null || fail "background init"
 bg_dir="$(find "$ops_work" -mindepth 1 -maxdepth 1 -type d | head -1)"
-echo "Complete the fixture task." >"$bg_dir/brief.md"
+echo "Complete the fixture task.
+
+## Structural discovery
+CGC-SKIP: fixture; route=none; evidence=characterization-test" >"$bg_dir/brief.md"
 bg_codex="$TEST_TMP/codex-slow.sh"
 cat >"$bg_codex" <<'SH'
 #!/bin/sh

@@ -24,6 +24,14 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 BIN_DIR = FIXTURES_DIR / "bin"
 PROVIDERS_DIR = FIXTURES_DIR / "providers"
 
+# Implement dispatch refuses a one-line brief. Tests that launch a worker
+# must carry this section unless they are asserting the refuse.
+FIXTURE_BRIEF = (
+    "Complete the fixture task.\n\n"
+    "## Structural discovery\n"
+    "CGC-SKIP: fixture; route=none; evidence=characterization-test\n"
+)
+
 
 def load_ssa(name: str):
     """Import ssa.<name> (registry / adapters / state) from scripts/."""

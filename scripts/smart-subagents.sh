@@ -33,6 +33,56 @@ SSA_LEDGER="${SSA_LEDGER:-${SSA_STATE_DIR}/outcomes.jsonl}"
 die() { echo "smart-subagents: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing $1"; }
 
+# Implement briefs must declare how structural discovery happened. Workers
+# execute the brief only, so the supervisor has to carry a pack or a skip.
+# SSA_STRUCTURAL_LEGACY=1 is a temporary rollback, not the default.
+_ssa_require_structural() {
+  local dir="$1" brief="$2"
+  local kind
+  kind="$(tr -d '[:space:]' <"$dir/kind.txt" 2>/dev/null || true)"
+  case "$kind" in
+    plan) echo "none" >"$dir/route.txt"; return 0 ;;
+  esac
+  if [[ "${SSA_STRUCTURAL_LEGACY:-}" == "1" ]]; then
+    echo "legacy" >"$dir/route.txt"
+    echo "dispatch: SSA_STRUCTURAL_LEGACY=1, structural brief gate skipped" >&2
+    return 0
+  fi
+  if ! grep -qE '^## Structural (discovery|context)[[:space:]]*$' "$brief"; then
+    die "dispatch: brief missing ## Structural discovery (CGC: <abs pack> or CGC-SKIP: reason; route=ast-grep|rg|none; evidence=...). Set SSA_STRUCTURAL_LEGACY=1 only to roll back"
+  fi
+  local cgc_line skip_line
+  cgc_line="$(grep -E '^CGC:[[:space:]]+' "$brief" | head -1 || true)"
+  skip_line="$(grep -E '^CGC-SKIP:[[:space:]]+' "$brief" | head -1 || true)"
+  if [[ -n "$cgc_line" && -n "$skip_line" ]]; then
+    die "dispatch: brief has both CGC: and CGC-SKIP:; pick one"
+  fi
+  if [[ -n "$cgc_line" ]]; then
+    local pack
+    pack="$(sed -E 's/^CGC:[[:space:]]+//' <<<"$cgc_line" | tr -d '\r')"
+    [[ "$pack" == /* ]] || die "dispatch: CGC pack must be an absolute path"
+    [[ -f "$pack" ]] || die "dispatch: CGC pack not found: $pack"
+    if grep -q 'NOT IN GRAPH' "$pack" && ! grep -qE '^== .+  .+:[0-9]+' "$pack"; then
+      die "dispatch: CGC pack is a miss stub (NOT IN GRAPH): $pack"
+    fi
+    echo "cgc" >"$dir/route.txt"
+    return 0
+  fi
+  if [[ -n "$skip_line" ]]; then
+    local route
+    route="$(sed -nE 's/.*[[:space:]]route=([a-z-]+).*/\1/p' <<<"$skip_line" | head -1)"
+    case "$route" in
+      ast-grep|rg|none) echo "$route" >"$dir/route.txt" ;;
+      *) die "dispatch: CGC-SKIP must include route=ast-grep|rg|none" ;;
+    esac
+    if ! grep -qE 'evidence=' <<<"$skip_line"; then
+      die "dispatch: CGC-SKIP must include evidence=<artifact or literal>"
+    fi
+    return 0
+  fi
+  die "dispatch: Structural discovery section has neither CGC: nor CGC-SKIP:"
+}
+
 # --- the runtime seam ---------------------------------------------------------
 # One registry entry describes a worker; this script never learns a CLI's name.
 # Everything below goes through scripts/ssa/cli.py.
@@ -462,6 +512,7 @@ cmd_dispatch() {
   [[ -n "$worker" ]] || die "dispatch: no worker"
   local brief="$dir/brief.md"
   [[ -f "$brief" ]] || die "dispatch: missing $brief"
+  _ssa_require_structural "$dir" "$brief"
   local wt
   wt="$(cat "$dir/wt.txt" 2>/dev/null || true)"
   [[ -n "$wt" && -d "$wt" ]] || die "dispatch: missing worktree ($dir/wt.txt)"
@@ -967,6 +1018,8 @@ PY
       echo "  or a domain rules doc), read it first and plan within it."
       echo "- Cite concrete file:line for every claim about existing code."
       echo "- Do not invent files or APIs. If you are unsure something exists, say so."
+      echo "- ast-grep is for syntactic search. The cgc graph does not cover this worktree."
+      echo "- On a structural question, pack from the indexed repo or follow a printed miss fallback. Do not grep-fan-out."
       echo
       echo "## Output"
       echo
@@ -1747,6 +1800,7 @@ record = {
     "retries": int(retries),
     "handoff_to": handoff or None,
     "notes": notes or None,
+    "route": read1("route.txt") or None,
 }
 
 (d / "outcome-record.json").write_text(json.dumps(record, indent=2) + "\n")

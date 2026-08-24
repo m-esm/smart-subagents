@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+Implement dispatch requires a Structural discovery section: `CGC:` pack path
+or `CGC-SKIP` with route and evidence. A NOT IN GRAPH stub is not a pack.
+Ledger records `route`. Rollback: `SSA_STRUCTURAL_LEGACY=1`.
+
 ## 0.3.0
 
 Claude Code is a shipped worker, pinned to Fable.

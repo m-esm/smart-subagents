@@ -245,7 +245,8 @@ changes in [CHANGELOG.md](CHANGELOG.md).
 
 A **brief** is a markdown file the worker reads instead of a chat: goal, absolute workdir, in scope,
 out of scope, constraints, acceptance criteria, and the exact self-verify commands with their
-success signal, templated in [`agents/smart-subagents.md`](agents/smart-subagents.md). The
+success signal, plus **Structural discovery** (`CGC:` pack path or `CGC-SKIP`),
+templated in [`agents/smart-subagents.md`](agents/smart-subagents.md). The
 **supervisor** is whoever minted the task, your session or an agent acting for it, not a daemon.
 
 ```bash

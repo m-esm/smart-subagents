@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from helpers import (  # noqa: E402
     BIN_DIR,
+    FIXTURE_BRIEF,
     make_git_repo,
     read_argv_file,
     run_ssa,
@@ -60,7 +61,7 @@ def make_task_dir(
     difficulty: str = "routine",
     kind: str = "default",
     worker_args=None,
-    brief_text: str = "Complete the fixture task.\n",
+    brief_text: str = "Complete the fixture task.\n\n## Structural discovery\nCGC-SKIP: fixture; route=none; evidence=characterization-test\n",
 ) -> Path:
     """A minimal task dir, built by hand (no cmd_init), matching what
     cmd_dispatch alone requires: wt.txt, base-sha.txt, size.txt,
@@ -185,7 +186,7 @@ class DispatchArgvTests(unittest.TestCase):
     def test_codex_receives_exact_argv_and_brief_on_stdin(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
-            brief_text = "Complete the fixture task.\n"
+            brief_text = "Complete the fixture task.\n\n## Structural discovery\nCGC-SKIP: fixture; route=none; evidence=characterization-test\n"
             task_dir = make_task_dir(
                 te.work_dir,
                 repo,
@@ -240,7 +241,7 @@ class DispatchArgvTests(unittest.TestCase):
     def test_grok_receives_exact_argv(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
-            brief_text = "Complete the fixture task.\n"
+            brief_text = "Complete the fixture task.\n\n## Structural discovery\nCGC-SKIP: fixture; route=none; evidence=characterization-test\n"
             task_dir = make_task_dir(
                 te.work_dir,
                 repo,
@@ -257,7 +258,7 @@ class DispatchArgvTests(unittest.TestCase):
             argv = read_argv_file(recorder / "argv.txt")
             expected = [
                 "-p",
-                brief_text.rstrip("\n"),  # bash `$(cat file)` strips trailing newlines
+                *brief_text.rstrip("\n").split("\n"),
                 "--cwd",
                 str(repo),
                 "--sandbox",
@@ -472,6 +473,92 @@ class RecordTests(unittest.TestCase):
             self.assertTrue(record["repo_hash"])
             self.assertNotIn("repo", record)
             self.assertNotIn("dir", record)
+
+
+class StructuralBriefTests(unittest.TestCase):
+    def test_dispatch_refuses_brief_without_structural_section(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(
+                te.work_dir, repo, brief_text="Complete the fixture task.\n"
+            )
+            env = dict(te.env)
+            env["CODEX_BIN"] = str(BIN_DIR / "fake-codex")
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "codex", env=env
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn("Structural discovery", err)
+
+    def test_dispatch_refuses_missing_pack_file(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(
+                te.work_dir,
+                repo,
+                brief_text=(
+                    "Go.\n\n## Structural discovery\n"
+                    "CGC: /tmp/ssa-missing-pack-does-not-exist.txt\n"
+                ),
+            )
+            env = dict(te.env)
+            env["CODEX_BIN"] = str(BIN_DIR / "fake-codex")
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "codex", env=env
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn("pack not found", err)
+
+    def test_dispatch_refuses_not_in_graph_stub(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            stub = te.root / "pack.txt"
+            stub.write_text("== Foo: NOT IN GRAPH\n")
+            task_dir = make_task_dir(
+                te.work_dir,
+                repo,
+                brief_text=f"Go.\n\n## Structural discovery\nCGC: {stub}\n",
+            )
+            env = dict(te.env)
+            env["CODEX_BIN"] = str(BIN_DIR / "fake-codex")
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "codex", env=env
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn("miss stub", err)
+
+    def test_dispatch_accepts_cgc_pack_and_records_route(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            pack = te.root / "pack.txt"
+            pack.write_text("== Foo  src/foo.py:10-20  [Function]  cx=1  ()\n-- callers: none in graph\n")
+            task_dir = make_task_dir(
+                te.work_dir,
+                repo,
+                brief_text=f"Go.\n\n## Structural discovery\nCGC: {pack}\n",
+            )
+            env = dict(te.env)
+            env["CODEX_BIN"] = str(BIN_DIR / "fake-codex")
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "codex", env=env
+            )
+            self.assertEqual(rc, 0, err)
+            self.assertEqual((task_dir / "route.txt").read_text().strip(), "cgc")
+
+    def test_legacy_override_allows_one_line_brief(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(
+                te.work_dir, repo, brief_text="Complete the fixture task.\n"
+            )
+            env = dict(te.env)
+            env["CODEX_BIN"] = str(BIN_DIR / "fake-codex")
+            env["SSA_STRUCTURAL_LEGACY"] = "1"
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "codex", env=env
+            )
+            self.assertEqual(rc, 0, err)
+            self.assertEqual((task_dir / "route.txt").read_text().strip(), "legacy")
 
 
 if __name__ == "__main__":

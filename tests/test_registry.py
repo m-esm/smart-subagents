@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from helpers import (  # noqa: E402
     BIN_DIR,
+    FIXTURE_BRIEF,
     WORKERS_JSON,
     load_ssa,
     make_git_repo,
@@ -168,7 +169,7 @@ class FourthWorkerTests(unittest.TestCase):
     def test_dispatch_runs_the_fourth_worker_with_the_templated_argv(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
-            brief_text = "Complete the fixture task.\n"
+            brief_text = FIXTURE_BRIEF
             task_dir = make_task_dir(
                 te.work_dir, repo, worker_args=["--think", "high"], brief_text=brief_text
             )
@@ -188,7 +189,7 @@ class FourthWorkerTests(unittest.TestCase):
                     "--dir",
                     str(repo),
                     "--prompt",
-                    brief_text.rstrip("\n"),
+                    *brief_text.rstrip("\n").split("\n"),
                     "--think",
                     "high",
                 ],
