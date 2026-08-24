@@ -5,18 +5,19 @@ lifecycle; it knows nothing about any particular CLI. Everything a CLI-specific
 answer depends on comes out of the registry.
 
 ```mermaid
-flowchart TD
-    SH[smart-subagents.sh<br/>launcher: init, dispatch,<br/>verify, record, ls, cleanup] --> CLI[ssa/cli.py<br/>the seam]
-    CLI --> REG[ssa/registry.py<br/>load and validate workers.json]
-    CLI --> ADAPT[ssa/adapters.py<br/>build_command, parse_session,<br/>classify_failure]
-    CLI --> ST[ssa/state.py<br/>task.json, events.jsonl,<br/>transition table]
-    REG --> WJ[(workers.json)]
-    ADAPT --> WJ
-    USAGE[ai-cli-usage.py<br/>routing] --> REG
-    SH --> USAGE
-    ST --> TD[Task dir artifacts<br/>task.json, events.jsonl,<br/>outcome.json]
+flowchart TB
+    SH[smart-subagents.sh launcher]
+    SH --> CLI[ssa/cli.py seam]
+    SH --> USAGE[ai-cli-usage.py routing]
     SH --> LEDGER[(outcomes.jsonl)]
     USAGE --> LEDGER
+    USAGE --> REG[ssa/registry.py]
+    CLI --> REG
+    CLI --> ADAPT[ssa/adapters.py]
+    CLI --> ST[ssa/state.py]
+    REG --> WJ[(workers.json)]
+    ADAPT --> WJ
+    ST --> TD[task.json / events.jsonl / outcome.json]
 ```
 
 `scripts/ssa/` is the runtime: Python 3.9, stdlib only, no third-party imports.
@@ -75,42 +76,26 @@ The lifecycle is an explicit transition table in
 [`scripts/ssa/state.py`](../scripts/ssa/state.py). Illegal transitions raise.
 
 ```mermaid
-stateDiagram-v2
-    [*] --> minted
-    minted --> preflighted
-    preflighted --> picked
-    picked --> running
-    running --> exited
-    exited --> verdict
-    picked --> verdict
-    state verdict {
-        verified
-        failed
-        inconclusive
-    }
-    verdict --> picked
-    verdict --> reported
-    exited --> picked
-    exited --> reported
-    minted --> aborted
-    preflighted --> aborted
+flowchart TB
+    minted --> preflighted --> picked --> running --> exited --> verdict --> reported
+    picked -->|baseline verify| verdict
+    running --> stalled --> reported
+    running --> aborted --> reported
     picked --> aborted
-    running --> aborted
-    running --> stalled
-    aborted --> reported
-    stalled --> reported
-    reported --> [*]
+    verdict -->|retry| picked
 ```
 
-Three things the grouping hides, and they matter:
+The chart is the happy path plus the three exits you will actually hit.
+`aborted` is also reachable from `minted` and `preflighted`; those edges are
+omitted so the line stays readable. The rest that the picture compresses:
 
 - `picked` can reach a verdict without any worker acting. That edge is the
   **baseline verify**: the supervisor runs the task's own verify commands
   against the untouched tree so pre-existing failures are never charged to the
   worker.
-- The three verdict states can revisit each other and can go back to `picked`.
-  Verify runs again after a retry, and the second answer is allowed to differ
-  from the first.
+- `verdict` is three states (`verified`, `failed`, `inconclusive`). They can
+  revisit each other and can go back to `picked`. Verify runs again after a
+  retry, and the second answer is allowed to differ from the first.
 - `reported` is reachable from `exited`, `aborted` and `stalled`. Bookkeeping is
   not work: an env-blocked or stalled dispatch still owes the ledger a line, and
   losing those lines would quietly bias the learned fit.

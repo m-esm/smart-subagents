@@ -158,18 +158,16 @@ per CLI. A bad streak cannot retire a worker. A corrupt ledger line is skipped
 and counted in `fit_ledger_skipped`, never fatal.
 
 ```mermaid
-flowchart LR
-    DISP[Dispatch a task] --> VERIFY[Verify: pass, fail,<br/>partial, rejected]
-    VERIFY --> REC[record: one line,<br/>no prompt or diff]
+flowchart TB
+    DISP[Dispatch a task] --> VERIFY[Verify]
+    VERIFY --> REC[record one line]
     REC --> LOG[(outcomes.jsonl)]
-    LOG --> DECAY[Decay by age,<br/>30 day half life]
-    DECAY --> POST[Empirical Bayes posterior<br/>per worker, per kind]
-    PRIOR[workers.json fit prior] --> POST
-    POST --> GATE{n_eff over threshold}
-    GATE -->|yes| USE[Posterior ranks<br/>the next hard or frontier pick]
-    GATE -->|no| ADV[Prior still ranks,<br/>posterior shown as advisory]
-    USE --> DISP
-    ADV --> DISP
+    LOG --> DECAY[Decay by age]
+    PRIOR[workers.json fit prior] --> POST[Posterior per worker, kind]
+    DECAY --> POST
+    POST --> GATE{n_eff over threshold?}
+    GATE -->|yes| USE[Posterior ranks next hard pick]
+    GATE -->|no| ADV[Prior ranks, posterior advisory]
 ```
 
 ## Burn rate is advisory

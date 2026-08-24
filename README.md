@@ -108,25 +108,34 @@ that cell has 10 effective observations and clamped to `[0.85, 1.15]`. Usage sna
 early exhaustion, which is advisory too.
 
 ```mermaid
-flowchart TD
-    U[Live usage per CLI] --> EFF[effective_score<br/>ranking headroom]
-    U --> ADM[admission_score<br/>floor capacity]
-    CD[Cooldown bench<br/>rate limit or auth] --> ELIG{Eligible}
-    ELIG -->|no| OUT[Excluded]
-    ELIG -->|yes| FLOOR{admission over floor}
-    ADM --> FLOOR
-    FLOOR -->|yes| SURV[Survivor]
-    FLOOR -->|below floor, easy work| RELAX[Relax floor,<br/>keep best available]
-    FLOOR -->|below floor, hard work| BLOCK[No primary,<br/>refuse to dispatch]
-    SURV --> RANK{Rank basis by difficulty}
-    RELAX --> RANK
-    EFF --> RANK
-    PRIOR[workers.json fit prior] --> POST[Ledger posterior<br/>once samples suffice]
-    POST --> RANK
-    RANK -->|hard, frontier| BYFIT[Sort by fit,<br/>tie break effective]
-    RANK -->|trivial, routine| BYEFF[Sort by effective,<br/>tie break fit]
-    BYFIT --> PICK[primary and fallbacks]
-    BYEFF --> PICK
+flowchart TB
+    subgraph score [Score]
+        U[Live usage per CLI]
+        U --> EFF[effective_score]
+        U --> ADM[admission_score]
+    end
+    subgraph filter [Filter]
+        CD[Cooldown] --> ELIG{Eligible?}
+        ELIG -->|no| OUT[Excluded]
+        ELIG -->|yes| FLOOR{over floor?}
+        ADM --> FLOOR
+        FLOOR -->|yes| SURV[Survivor]
+        FLOOR -->|no, easy| RELAX[Relax floor]
+        FLOOR -->|no, hard| BLOCK[No primary]
+    end
+    subgraph rank [Rank]
+        SURV --> RANK{Difficulty}
+        RELAX --> RANK
+        EFF --> RANK
+        PRIOR[fit prior] --> POST[ledger posterior]
+        POST --> RANK
+        RANK -->|hard / frontier| BYFIT[sort by fit]
+        RANK -->|trivial / routine| BYEFF[sort by effective]
+        BYFIT --> PICK[primary + fallbacks]
+        BYEFF --> PICK
+    end
+    score --> filter
+    filter --> rank
 ```
 
 Formulas, thresholds and the ledger loop: [docs/ROUTING.md](docs/ROUTING.md).

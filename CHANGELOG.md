@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+Docs: rewrite the mermaid charts so they read as stages instead of a knot.
+README routing is Score / Filter / Rank. Architecture lifecycle is the happy
+path. Ledger loop no longer wraps the page.
+
 ## 0.2.0
 
 The redesign, in five phases. 0.1.0 advertised guarantees it did not implement,
