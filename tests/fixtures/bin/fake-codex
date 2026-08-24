@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Fake codex CLI for characterization tests.
+
+Records its own argv and cwd (and, since the real dispatch pipes the brief
+into codex's stdin, the stdin it received) under $HOME/.ssa-test/fake-codex/,
+then emits JSONL that mimics `codex exec --json` output closely enough for
+the smart-subagents.sh session-id scraper to find (or not find) a session id.
+
+Behavior is controlled by an optional JSON file at
+$HOME/.ssa-test-control.json: {"exit_code": int, "session_id": str|null}.
+No control file means exit 0 with a synthetic session id. This file carries
+no real tokens or account data; it only ever holds numbers and test labels.
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+home = Path(os.environ.get("HOME") or ".")
+recorder = home / ".ssa-test" / "fake-codex"
+recorder.mkdir(parents=True, exist_ok=True)
+(recorder / "argv.txt").write_text("\n".join(sys.argv[1:]) + ("\n" if sys.argv[1:] else ""))
+(recorder / "cwd.txt").write_text(os.getcwd() + "\n")
+
+try:
+    stdin_text = sys.stdin.read()
+except Exception:
+    stdin_text = ""
+(recorder / "stdin.txt").write_text(stdin_text)
+
+control_path = home / ".ssa-test-control.json"
+control = {}
+if control_path.exists():
+    try:
+        control = json.loads(control_path.read_text())
+    except Exception:
+        control = {}
+
+exit_code = int(control.get("exit_code", 0))
+session_id = control.get("session_id", "fake-codex-session-000000000001")
+
+# -o PATH writes the last agent message; write something plausible if present.
+args = sys.argv[1:]
+if "-o" in args:
+    out_path = args[args.index("-o") + 1]
+    try:
+        Path(out_path).write_text("ok\n")
+    except Exception:
+        pass
+
+if session_id:
+    print(json.dumps({"type": "session.created", "session_id": session_id}))
+print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}}))
+sys.exit(exit_code)

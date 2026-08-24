@@ -1,0 +1,14 @@
+{
+  "data": {
+    "five_hour": {"utilization": 10.0},
+    "limits": [
+      {
+        "kind": "weekly",
+        "scope": {"model": {"display_name": "Fable"}},
+        "percent": "n/a",
+        "is_active": true
+      }
+    ]
+  },
+  "profile": null
+}

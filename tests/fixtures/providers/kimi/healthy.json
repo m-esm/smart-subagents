@@ -1,0 +1,27 @@
+{
+  "data": {
+    "user": {
+      "membership": {"level": "pro"},
+      "region": "us"
+    },
+    "subType": "monthly",
+    "usage": {
+      "limit": 1000,
+      "used": 100,
+      "remaining": 900,
+      "resetTime": "2026-08-30T00:00:00Z"
+    },
+    "limits": [
+      {
+        "window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
+        "detail": {"limit": 50, "remaining": 40, "resetTime": "2026-08-24T20:00:00Z"}
+      },
+      {
+        "window": {"duration": 7, "timeUnit": "TIME_UNIT_DAY"},
+        "detail": {"limit": 5000, "remaining": 4000, "resetTime": "2026-08-30T00:00:00Z"}
+      }
+    ],
+    "parallel": {"limit": 3}
+  },
+  "me": {"nickname": "tester", "user_level_name": "Pro"}
+}

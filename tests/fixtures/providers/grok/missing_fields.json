@@ -1,0 +1,8 @@
+{
+  "billing": {
+    "config": {
+      "onDemandCap": {"val": 50}
+    }
+  },
+  "user": {"hasGrokCodeAccess": true}
+}

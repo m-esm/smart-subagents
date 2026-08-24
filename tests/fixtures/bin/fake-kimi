@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Fake kimi CLI for characterization tests.
+
+Records its own argv and cwd under $HOME/.ssa-test/fake-kimi/, then emits
+stream-json lines that mimic kimi's `--output-format stream-json`, including
+a `session.resume_hint` line, closely enough for the smart-subagents.sh
+session-id scraper to find (or not find) a session id.
+
+kimi's real dispatch runs this binary under `env -i HOME=... PATH=...
+TMPDIR=... TERM=...`, so only those four env vars survive from the parent
+shell. Recorder-file paths must live under $HOME for exactly that reason;
+this script does not read any other environment variable. Same control-file
+contract as fake-codex: $HOME/.ssa-test-control.json.
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+home = Path(os.environ.get("HOME") or ".")
+recorder = home / ".ssa-test" / "fake-kimi"
+recorder.mkdir(parents=True, exist_ok=True)
+(recorder / "argv.txt").write_text("\n".join(sys.argv[1:]) + ("\n" if sys.argv[1:] else ""))
+(recorder / "cwd.txt").write_text(os.getcwd() + "\n")
+
+control_path = home / ".ssa-test-control.json"
+control = {}
+if control_path.exists():
+    try:
+        control = json.loads(control_path.read_text())
+    except Exception:
+        control = {}
+
+exit_code = int(control.get("exit_code", 0))
+session_id = control.get("session_id", "fake-kimi-session-000000000001")
+
+print(json.dumps({"type": "message_start"}))
+if session_id:
+    print(json.dumps({"type": "session.resume_hint", "session_id": session_id}))
+print(json.dumps({"type": "message_end"}))
+sys.exit(exit_code)
