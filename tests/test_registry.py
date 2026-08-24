@@ -102,7 +102,7 @@ class FourthWorkerTests(unittest.TestCase):
             rc, out, err = run_ssa_cli("workers", env=env)
             self.assertEqual(rc, 0, err)
             names = [line.split("\t")[0] for line in out.strip().splitlines()]
-            self.assertEqual(names, ["codex", "grok", "kimi", "fakecli"])
+            self.assertEqual(names, ["codex", "grok", "kimi", "claude", "fakecli"])
             row = dict(
                 zip(
                     ("name", "display", "sandbox", "write", "probe", "bin", "auth"),

@@ -1,8 +1,8 @@
 # fixtures/bin
 
-Fake `codex` / `grok` / `kimi` binaries used by `tests/test_shell.py` to
-characterize the shell dispatch contract (`scripts/smart-subagents.sh`)
-without ever invoking a real worker CLI or the network.
+Fake `codex` / `grok` / `kimi` / `claude` binaries used by `tests/test_shell.py`
+and `tests/test_claude_worker.py` to characterize the shell dispatch contract
+(`scripts/smart-subagents.sh`) without ever invoking a real worker CLI or the network.
 
 Synthetic, derived from parser expectations on 2026-08-24, provider CLI
 version unknown. Each script records its own argv and cwd under

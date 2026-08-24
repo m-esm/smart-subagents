@@ -169,6 +169,67 @@
         "best_of_n": 0.8,
         "analysis": 0.95
       }
+    },
+    "claude": {
+      "display_name": "Claude Code (Fable)",
+      "binary": {
+        "env": "CLAUDE_BIN",
+        "candidates": ["~/.local/bin/claude"],
+        "path_name": "claude"
+      },
+      "probe": "check_claude",
+      "sandbox": "none",
+      "write_allowed_default": false,
+      "run": { "cwd": "worktree", "env_scrub": false },
+      "prompt": {
+        "implement": {
+          "transport": "file-ref",
+          "template": "Read the file {brief} and complete the task it describes."
+        },
+        "plan": {
+          "transport": "file-ref",
+          "template": "Read {brief} and complete the task it describes."
+        },
+        "resume": {
+          "transport": "file-ref",
+          "template": "Read the file {brief} and complete the task it describes."
+        }
+      },
+      "argv": {
+        "implement": [
+          "-p", "{prompt}", "--output-format", "json",
+          "--permission-mode", "acceptEdits", "--setting-sources", "project",
+          "{effort}", "{model}"
+        ],
+        "plan": [
+          "-p", "{prompt}", "--output-format", "json",
+          "--permission-mode", "plan", "--setting-sources", "project",
+          "{effort}", "{model}"
+        ],
+        "resume": [
+          "-p", "{prompt}", "--resume", "{session_id}", "--output-format", "json",
+          "--permission-mode", "acceptEdits", "--setting-sources", "project",
+          "{effort}", "{model}"
+        ]
+      },
+      "output": { "implement": "none", "plan": "stdout", "resume": "none" },
+      "format": { "implement": "json", "plan": "json", "resume": "json" },
+      "session": { "kind": "json-keys", "keys": ["session_id"] },
+      "effort_ladder": ["low", "medium", "high", "xhigh"],
+      "effort_flags": ["--effort", "{effort}"],
+      "models": {
+        "_note": "This worker is Fable. Every difficulty pins --model fable; effort is the only rung.",
+        "flag": ["--model", "{model}"],
+        "rules": [{ "model": "fable" }]
+      },
+      "fit": {
+        "default": 1.1,
+        "impl": 1.15,
+        "review": 1.15,
+        "debug": 1.12,
+        "analysis": 1.12,
+        "best_of_n": 0.85
+      }
     }
   }
 }

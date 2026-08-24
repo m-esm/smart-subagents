@@ -490,8 +490,10 @@ cmd_dispatch() {
   # Capability, not a name: a worker with no sandbox cannot be trusted with a
   # write dispatch just because a worktree looks like containment.
   if [[ "$_BC_WRITE_OK" != "1" ]]; then
-    [[ "${SSA_ALLOW_KIMI_WRITE:-}" == "1" ]] || \
-      die "dispatch: $worker has no sandbox and write dispatch is blocked; set SSA_ALLOW_KIMI_WRITE=1 to override the risk"
+    if [[ "${SSA_ALLOW_UNSANDBOXED_WRITE:-}" != "1" && "${SSA_ALLOW_KIMI_WRITE:-}" != "1" ]]; then
+      die "dispatch: $worker has no sandbox and write dispatch is blocked; set SSA_ALLOW_UNSANDBOXED_WRITE=1 to override the risk (SSA_ALLOW_KIMI_WRITE=1 still accepted)"
+    fi
+    _utc >"$dir/write-override.txt"
     _utc >"$dir/kimi-override.txt"
     _ssa_event "$dir" --phase write-override --worker "$worker"
   fi
@@ -1934,7 +1936,8 @@ Env:
   SSA_USAGE_PY                    override path to ai-cli-usage.py
   SSA_CLI_PY                      override path to ssa/cli.py
   SSA_PREMIUM_MODELS              model names that gate local labor (default: Fable,Opus)
-  SSA_ALLOW_KIMI_WRITE=1          accept the risk of a write dispatch to kimi
+  SSA_ALLOW_UNSANDBOXED_WRITE=1   accept a write dispatch to a worker with no sandbox
+  SSA_ALLOW_KIMI_WRITE=1          legacy alias for SSA_ALLOW_UNSANDBOXED_WRITE
   SSA_STALL_SECS                  watchdog stall threshold (default 600)
   SSA_DEADLINE_SECS               absolute run deadline (default 0, off)
   SSA_KILL_GRACE_SECS             seconds between TERM and KILL (default 10)

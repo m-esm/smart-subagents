@@ -1008,9 +1008,19 @@ def parse_kimi_usage(
 # Recommendation
 # ---------------------------------------------------------------------------
 
-# Who the workers are is a registry fact. Claude is the supervisor, never a
-# worker pick, so it is not in here.
+# Who the workers are is a registry fact. Claude is also a worker (Fable)
+# when the registry says so; local_labor_ok still meters the same probe.
 WORKER_CLIS = REGISTRY.names
+
+
+def cli_check_names() -> list[str]:
+    """Unique names for `--cli`, supervisor first, then workers, then all."""
+    names = ["claude"]
+    for name in WORKER_CLIS:
+        if name not in names:
+            names.append(name)
+    names.append("all")
+    return names
 
 # Cache holds plan, quota and (unredacted) account identifiers, so it never goes
 # in world-readable /tmp. Honors XDG_CACHE_HOME; created 0700, written 0600.
@@ -1478,7 +1488,7 @@ def recommend(
     prefer: str = "",
     difficulty: str = "routine",
 ) -> dict[str, Any]:
-    """Rank external worker CLIs for labor. Claude is supervisor, not a worker pick."""
+    """Rank registered worker CLIs for labor. Claude can be one of them."""
     by = {s.cli: s for s in statuses}
     if difficulty not in DIFFICULTY:
         difficulty = "routine"
@@ -1912,7 +1922,7 @@ def main() -> int:
     ap.add_argument("--recommend", action="store_true", help="print primary worker only")
     ap.add_argument(
         "--cli",
-        choices=["claude"] + list(WORKER_CLIS) + ["all"],
+        choices=cli_check_names(),
         default="all",
         help="which CLI to check",
     )
@@ -1940,7 +1950,7 @@ def main() -> int:
     ap.add_argument(
         "--prefer",
         default="",
-        help="preferred worker if still eligible (codex|grok|kimi)",
+        help="preferred worker if still eligible",
     )
     ap.add_argument(
         "--fresh",

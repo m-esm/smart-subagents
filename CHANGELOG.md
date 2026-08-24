@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+Claude Code is a shipped worker, pinned to Fable.
+
+- Registry entry `claude`: `claude -p --model fable`, print mode, `--permission-mode acceptEdits` (plan mode for `plan`). Never bypassPermissions.
+- Reuses the existing `check_claude` probe, so Fable weekly and the 5h session meter the worker and `local_labor_ok` together.
+- No sandbox, write-blocked by default. Override is `SSA_ALLOW_UNSANDBOXED_WRITE=1`; `SSA_ALLOW_KIMI_WRITE=1` remains an alias.
+- Fit prior is high for impl/review (1.15) and low for best-of-n (0.85), so hard work can take Fable and fan-out does not.
+
 ## 0.2.1
 
 Docs: rewrite the mermaid charts so they read as stages instead of a knot.

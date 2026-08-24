@@ -8,7 +8,7 @@ Quota-aware subagent routing for [Claude Code](https://claude.com/claude-code). 
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-black.svg)](LICENSE)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-6544e9.svg)](https://docs.claude.com/en/docs/claude-code/plugins)
-[![Workers](https://img.shields.io/badge/workers-codex%20%7C%20grok%20%7C%20kimi-1f6feb.svg)](#prerequisites)
+[![Workers](https://img.shields.io/badge/workers-codex%20%7C%20grok%20%7C%20kimi%20%7C%20claude-1f6feb.svg)](#prerequisites)
 [![Shell + Python](https://img.shields.io/badge/deps-bash%20%2B%20python3-success.svg)](#prerequisites)
 
 </div>
@@ -157,8 +157,9 @@ quota, so a day with one eligible CLI still yields N plans instead of zero.
 ## Guarantees
 
 **Isolation.** Every write goes to its own worktree on an `ssa/<id>` branch, so your checkout is
-never touched, dirty or not. Kimi has no sandbox, so writes to it need `SSA_ALLOW_KIMI_WRITE=1`,
-which the task dir timestamps. Minting is transactional, and retiring is conservative (`cleanup` in
+never touched, dirty or not. Kimi and Claude/Fable have no sandbox, so writes to them need
+`SSA_ALLOW_UNSANDBOXED_WRITE=1` (legacy alias `SSA_ALLOW_KIMI_WRITE=1`), which the task dir timestamps.
+Minting is transactional, and retiring is conservative (`cleanup` in
 [Operate](#operate)).
 
 **Verification, not trust.** Nothing the worker claims is taken on faith: `verify` scores its own
@@ -259,8 +260,8 @@ smart-subagents.sh verify   --dir "$DIR"
 smart-subagents.sh record   --dir "$DIR" --outcome verified-pass --retries 0
 ```
 
-If `init` picked kimi and the task writes files, `dispatch` refuses until you set
-`SSA_ALLOW_KIMI_WRITE=1` on purpose. From Claude Code, handing that brief to the `smart-subagents`
+If `init` picked kimi or claude and the task writes files, `dispatch` refuses until you set
+`SSA_ALLOW_UNSANDBOXED_WRITE=1` on purpose (`SSA_ALLOW_KIMI_WRITE=1` still works). From Claude Code, handing that brief to the `smart-subagents`
 agent runs this loop for you.
 
 ## Configuration
@@ -270,7 +271,8 @@ agent runs this loop for you.
 | `SSA_WORK_DIR` | `$TMPDIR/smart-subagents` | Task scratch root |
 | `SSA_WORKERS_JSON` | `scripts/workers.json` | Alternative worker registry |
 | `SSA_USAGE_PY` / `SSA_CLI_PY` | alongside the script | Paths to `ai-cli-usage.py` and `ssa/cli.py` |
-| `SSA_ALLOW_KIMI_WRITE` | unset | Accept the risk of a write dispatch to a worker with no sandbox |
+| `SSA_ALLOW_UNSANDBOXED_WRITE` | unset | Accept a write dispatch to a worker with no sandbox (claude, kimi) |
+| `SSA_ALLOW_KIMI_WRITE` | unset | Legacy alias for `SSA_ALLOW_UNSANDBOXED_WRITE` |
 | `SSA_PREMIUM_MODELS` | `Fable,Opus` | Claude's usage API reports weekly caps scoped to individual models by display name. These are the ones that flip `local_labor_ok` false near their cap, so the supervisor stops doing labor in-session while cheaper models are still fine. Set it to whatever your plan's premium tier is actually called |
 | `SSA_SHORT_HORIZON_HOURS` | `4` | Reset horizon over which a short window's spent quota stops counting against it |
 | `SSA_FIT_HALFLIFE_DAYS` | `30` | Half-life on ledger evidence feeding the learned fit posterior |
@@ -280,7 +282,7 @@ agent runs this loop for you.
 | `SSA_DEADLINE_SECS` | off | Absolute ceiling on a background run |
 | `SSA_LEDGER` | `$XDG_STATE_HOME/smart-subagents/outcomes.jsonl` | Outcome ledger path |
 | `SSA_NO_QUOTA_SNAPSHOT` | unset | Skip the post-dispatch quota snapshot (offline machines, tests) |
-| `CODEX_BIN` / `GROK_BIN` / `KIMI_BIN` | auto-detected | Override worker binary paths. The variable name per worker comes from its registry entry, so a new worker declares its own |
+| `CODEX_BIN` / `GROK_BIN` / `KIMI_BIN` / `CLAUDE_BIN` | auto-detected | Override worker binary paths. The variable name per worker comes from its registry entry, so a new worker declares its own |
 
 ## Architecture
 
@@ -317,10 +319,11 @@ account identifier.
 - **Cold-start fit is guesswork.** Hand-tuned priors stay in charge until a (worker, kind) cell
   reaches 10 effective observations, which rarely-dispatched kinds may never hit. The reward is a
   proxy: pass plus retry count cannot see a diff that passed the tests and was the wrong design.
-- **Kimi has no sandbox** and is write-blocked by default. A worktree does not contain a worker's
+- **Kimi and Claude/Fable have no sandbox** and are write-blocked by default. A worktree does not contain a worker's
   access to the rest of your system.
-- **Difficulty picks effort, not models.** It selects a model only where the registry carries a rule,
-  today kimi alone: model names are account-scoped and this repo will not invent one.
+- **Difficulty picks effort, not models.** It selects a model only where the registry carries a rule.
+  Claude always pins `--model fable`. Kimi may switch to a faster alias. Codex/Grok model names are
+  account-scoped and this repo will not invent them.
 - **No conversation transfer.** Cross-CLI handoff starts from a fresh brief plus the current diff,
   because no CLI here can import another's session.
 

@@ -57,11 +57,13 @@ $ python3 scripts/ssa/cli.py workers
 codex	OpenAI Codex CLI	os	write	check_codex	/Users/you/.local/bin/codex	/Users/you/.codex/auth.json
 grok	Grok CLI	workspace	write	check_grok	/Users/you/.grok/bin/grok	/Users/you/.grok/auth.json
 kimi	Kimi Code	none	no-write	check_kimi	/Users/you/.kimi-code/bin/kimi	/Users/you/.kimi-code/credentials/kimi-code.json
+claude	Claude Code (Fable)	none	no-write	check_claude	/Users/you/.local/bin/claude	-
 ```
 
 `--json` gives the same rows as objects. `no-write` means exactly what it says:
-kimi has no sandbox, so a write dispatch is refused unless
-`SSA_ALLOW_KIMI_WRITE=1` accepts that risk for one dispatch. `doctor` reports
+kimi and claude have no sandbox, so a write dispatch is refused unless
+`SSA_ALLOW_UNSANDBOXED_WRITE=1` accepts that risk for one dispatch
+(`SSA_ALLOW_KIMI_WRITE=1` is still accepted). `doctor` reports
 the same rows with whether each binary and credential file is actually there.
 
 ## The task record

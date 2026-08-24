@@ -1,8 +1,8 @@
 ---
 name: smart-subagents
 description: >
-  Delegation supervisor that routes coding labor to whichever external CLI
-  (codex, grok, kimi) has live quota headroom and the right capability fit,
+  Delegation supervisor that routes coding labor to whichever registered CLI
+  (codex, grok, kimi, claude/Fable) has live quota headroom and the right capability fit,
   runs it in an isolated git worktree, and verifies the result before
   reporting. Use for any substantive delegable coding task: ports, multi-file
   features, tests-to-a-pattern, refactors, routine debugging, code review.
@@ -167,7 +167,8 @@ registry cannot know:
 
 | Rule | Why |
 |------|-----|
-| A worker whose registry entry says `write_allowed_default: false` needs an explicit override for a write dispatch | no sandbox means a worktree does not contain its access to the machine; `dispatch` refuses on the capability, not on a name |
+| A worker whose registry entry says `write_allowed_default: false` needs `SSA_ALLOW_UNSANDBOXED_WRITE=1` (or the legacy `SSA_ALLOW_KIMI_WRITE=1`) for a write dispatch | no sandbox means a worktree does not contain its access to the machine; `dispatch` refuses on the capability, not on a name |
+| Claude/Fable is `--model fable` on the `claude` worker, never `--dangerously-skip-permissions` | print mode + `acceptEdits` only. Same Max 20x / Fable weekly window as the supervisor |
 | A task that needs a flag only one CLI has is that CLI's, or it is a different task | `ranked[]` cannot see a flag your brief depends on |
 | Anything else: take `ranked[0]` | re-ranking by vibe is how the ledger stops meaning anything |
 
