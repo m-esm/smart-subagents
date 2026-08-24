@@ -6,18 +6,18 @@ answer depends on comes out of the registry.
 
 ```mermaid
 flowchart TB
-    SH[smart-subagents.sh launcher]
-    SH --> CLI[ssa/cli.py seam]
-    SH --> USAGE[ai-cli-usage.py routing]
-    SH --> LEDGER[(outcomes.jsonl)]
+    SH["smart-subagents.sh<br/>owns the lifecycle: init, dispatch, verify, record, cleanup<br/>knows nothing about any particular CLI"]
+    SH --> CLI["ssa/cli.py<br/>the only seam the shell calls"]
+    SH --> USAGE["ai-cli-usage.py<br/>live quota, floor, rank, effort flags"]
+    SH --> LEDGER[("outcomes.jsonl<br/>one thin line per dispatch, no prompt or diff")]
     USAGE --> LEDGER
-    USAGE --> REG[ssa/registry.py]
+    USAGE --> REG["ssa/registry.py<br/>load and reject a bad workers.json"]
     CLI --> REG
-    CLI --> ADAPT[ssa/adapters.py]
-    CLI --> ST[ssa/state.py]
-    REG --> WJ[(workers.json)]
+    CLI --> ADAPT["ssa/adapters.py<br/>build argv, scrape session id, classify failure"]
+    CLI --> ST["ssa/state.py<br/>legal transitions only, atomic task.json"]
+    REG --> WJ[("workers.json<br/>binary, sandbox, effort ladder, fit prior")]
     ADAPT --> WJ
-    ST --> TD[task.json / events.jsonl / outcome.json]
+    ST --> TD["per-task dir<br/>task.json, events.jsonl, outcome.json, worktree"]
 ```
 
 `scripts/ssa/` is the runtime: Python 3.9, stdlib only, no third-party imports.
@@ -77,12 +77,20 @@ The lifecycle is an explicit transition table in
 
 ```mermaid
 flowchart TB
-    minted --> preflighted --> picked --> running --> exited --> verdict --> reported
-    picked -->|baseline verify| verdict
-    running --> stalled --> reported
-    running --> aborted --> reported
+    minted["minted<br/>private dir + isolated ssa/id worktree"]
+    --> preflighted["preflighted<br/>live usage fetched, worker not yet chosen"]
+    --> picked["picked<br/>primary named, baseline verify can run now"]
+    --> running["running<br/>CLI process group in the worktree"]
+    --> exited["exited<br/>worker finished, exit code captured"]
+    --> verdict["verdict<br/>verify: pass, fail, or inconclusive"]
+    --> reported["reported<br/>ledger line written, only terminal state"]
+    picked -->|"no worker yet:<br/>baseline so old failures are not charged to it"| verdict
+    running --> stalled["stalled<br/>watchdog: log and tree went quiet"]
+    stalled --> reported
+    running --> aborted["aborted<br/>stop, secrets, env-blocked, supervisor kill"]
     picked --> aborted
-    verdict -->|retry| picked
+    aborted --> reported
+    verdict -->|"retry still in budget"| picked
 ```
 
 The chart is the happy path plus the three exits you will actually hit.

@@ -109,29 +109,29 @@ early exhaustion, which is advisory too.
 
 ```mermaid
 flowchart TB
-    subgraph score [Score]
-        U[Live usage per CLI]
-        U --> EFF[effective_score]
-        U --> ADM[admission_score]
+    subgraph score [1. Score every logged-in CLI]
+        U["Read live rate-limit windows"]
+        U --> EFF["effective_score<br/>ranking: spent quota near reset is almost free"]
+        U --> ADM["admission_score<br/>floor: how much work this window can still fund"]
     end
-    subgraph filter [Filter]
-        CD[Cooldown] --> ELIG{Eligible?}
-        ELIG -->|no| OUT[Excluded]
-        ELIG -->|yes| FLOOR{over floor?}
+    subgraph filter [2. Filter before anyone is ranked]
+        CD["Cooldown bench<br/>15m after a rate limit, 24h after auth fail"] --> ELIG{"Available,<br/>eligible, not benched?"}
+        ELIG -->|no| OUT["Excluded<br/>never a primary"]
+        ELIG -->|yes| FLOOR{"admission_score<br/>clears size x difficulty floor?"}
         ADM --> FLOOR
-        FLOOR -->|yes| SURV[Survivor]
-        FLOOR -->|no, easy| RELAX[Relax floor]
-        FLOOR -->|no, hard| BLOCK[No primary]
+        FLOOR -->|yes| SURV["Survivor"]
+        FLOOR -->|no, easy work| RELAX["Relax the floor<br/>keep the best of a weak field"]
+        FLOOR -->|no, hard work| BLOCK["No primary<br/>refuse to dispatch on fumes"]
     end
-    subgraph rank [Rank]
-        SURV --> RANK{Difficulty}
+    subgraph rank [3. Rank the survivors]
+        SURV --> RANK{"What is scarce?"}
         RELAX --> RANK
         EFF --> RANK
-        PRIOR[fit prior] --> POST[ledger posterior]
+        PRIOR["workers.json fit prior<br/>cold-start guess per task kind"] --> POST["Ledger posterior<br/>promoted after 10 effective outcomes"]
         POST --> RANK
-        RANK -->|hard / frontier| BYFIT[sort by fit]
-        RANK -->|trivial / routine| BYEFF[sort by effective]
-        BYFIT --> PICK[primary + fallbacks]
+        RANK -->|"hard / frontier:<br/>a cheap fail costs more than the quota it saved"| BYFIT["Sort by fit<br/>tie-break on effective"]
+        RANK -->|"trivial / routine:<br/>that quota is about to evaporate"| BYEFF["Sort by effective<br/>tie-break on fit"]
+        BYFIT --> PICK["primary + fallbacks<br/>plus effort flags for that difficulty"]
         BYEFF --> PICK
     end
     score --> filter

@@ -159,15 +159,15 @@ and counted in `fit_ledger_skipped`, never fatal.
 
 ```mermaid
 flowchart TB
-    DISP[Dispatch a task] --> VERIFY[Verify]
-    VERIFY --> REC[record one line]
-    REC --> LOG[(outcomes.jsonl)]
-    LOG --> DECAY[Decay by age]
-    PRIOR[workers.json fit prior] --> POST[Posterior per worker, kind]
+    DISP["Dispatch a task"] --> VERIFY["Verify against the pre-dispatch baseline<br/>pass / fail / rejected / inconclusive"]
+    VERIFY --> REC["record one thin line<br/>no prompt, no diff, no filenames"]
+    REC --> LOG[("outcomes.jsonl")]
+    LOG --> DECAY["Age-decay the evidence<br/>30-day half-life"]
+    PRIOR["workers.json fit prior<br/>cold start per task kind"] --> POST["Empirical-Bayes posterior<br/>one cell per worker x kind"]
     DECAY --> POST
-    POST --> GATE{n_eff over threshold?}
-    GATE -->|yes| USE[Posterior ranks next hard pick]
-    GATE -->|no| ADV[Prior ranks, posterior advisory]
+    POST --> GATE{"this cell has 10<br/>effective observations?"}
+    GATE -->|yes| USE["Posterior ranks the next<br/>hard or frontier pick"]
+    GATE -->|no| ADV["Prior still ranks<br/>posterior shown as advisory"]
 ```
 
 ## Burn rate is advisory

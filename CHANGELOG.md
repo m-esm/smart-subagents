@@ -3,8 +3,8 @@
 ## 0.2.1
 
 Docs: rewrite the mermaid charts so they read as stages instead of a knot.
-README routing is Score / Filter / Rank. Architecture lifecycle is the happy
-path. Ledger loop no longer wraps the page.
+README routing is Score / Filter / Rank with the ranking rule on the arrows.
+Architecture names what each file owns. Ledger loop states the 10-sample gate.
 
 ## 0.2.0
 
