@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2
+
+Grok usage probe refreshes the x.ai OAuth token before billing calls, and
+retries once on 401. A stale bearer no longer marks a working CLI ineligible.
+`--fresh` no longer serves a cached 401 when the refresh lock is held.
+
 ## 0.3.1
 
 Implement dispatch requires a Structural discovery section: `CGC:` pack path

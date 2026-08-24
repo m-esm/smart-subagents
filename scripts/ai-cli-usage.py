@@ -686,6 +686,130 @@ def parse_codex_usage(data: dict, st: Optional[CliStatus] = None) -> CliStatus:
 # ---------------------------------------------------------------------------
 
 
+def _grok_pick_entry(auth: dict) -> Optional[dict]:
+    for v in auth.values():
+        if isinstance(v, dict) and v.get("key"):
+            return v
+    return None
+
+
+def _grok_access_expired(entry: dict, now: Optional[float] = None, skew: float = 90.0) -> bool:
+    """True when the access token is missing, unparseable, or within skew of expiry."""
+    exp = _parse_iso(str(entry.get("expires_at") or ""))
+    if exp is None:
+        return True
+    return exp <= (now if now is not None else _now()) + skew
+
+
+def _apply_grok_token_response(
+    entry: dict, payload: dict, now: Optional[float] = None
+) -> dict:
+    """Write an OIDC token response onto a grok auth.json entry. No I/O."""
+    access = payload.get("access_token") or ""
+    if not access:
+        raise ValueError("OIDC response missing access_token")
+    entry["key"] = access
+    if payload.get("refresh_token"):
+        entry["refresh_token"] = payload["refresh_token"]
+    expires_in = payload.get("expires_in")
+    if expires_in is not None:
+        ts = (now if now is not None else _now()) + float(expires_in)
+        entry["expires_at"] = datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+    return entry
+
+
+def _grok_persist_auth(path: Path, auth: dict) -> None:
+    raw = (json.dumps(auth, indent=2) + "\n").encode()
+    fd, tmp = tempfile.mkstemp(prefix=".grok-auth.", dir=str(path.parent))
+    try:
+        os.write(fd, raw)
+        os.fchmod(fd, 0o600)
+        os.close(fd)
+        fd = -1
+        os.replace(tmp, path)
+    except Exception:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _grok_oidc_refresh(entry: dict) -> dict:
+    """POST refresh_token to the issuer. Returns the token payload or {}."""
+    refresh = entry.get("refresh_token") or ""
+    client_id = entry.get("oidc_client_id") or ""
+    issuer = (entry.get("oidc_issuer") or "https://auth.x.ai").rstrip("/")
+    if not refresh or not client_id:
+        return {}
+    body = urllib.parse.urlencode(
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+            "client_id": client_id,
+        }
+    ).encode()
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+        "User-Agent": "GrokBuild/cli-usage",
+    }
+    code, data = _http_json(issuer + "/oauth2/token", headers, method="POST", data=body)
+    if code == 200 and isinstance(data, dict) and data.get("access_token"):
+        return data
+    return {}
+
+
+def _grok_cli_nudge() -> None:
+    """Last-resort: let the CLI itself refresh auth.json."""
+    grok = HOME / ".grok" / "bin" / "grok"
+    if not grok.is_file():
+        which = shutil.which("grok")
+        grok = Path(which) if which else grok
+    if not grok.is_file():
+        return
+    scratch = tempfile.mkdtemp()
+    try:
+        subprocess.run(
+            [str(grok), "-p", "Reply with the single word pong.", "--sandbox", "workspace"],
+            cwd=scratch,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except Exception:
+        pass
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _grok_ensure_fresh(auth_path: Path) -> tuple[dict, Optional[dict]]:
+    auth = json.loads(auth_path.read_text())
+    entry = _grok_pick_entry(auth)
+    if not entry:
+        return auth, None
+    if not _grok_access_expired(entry):
+        return auth, entry
+    payload = _grok_oidc_refresh(entry)
+    if payload:
+        _apply_grok_token_response(entry, payload)
+        _grok_persist_auth(auth_path, auth)
+        return auth, entry
+    _grok_cli_nudge()
+    try:
+        auth = json.loads(auth_path.read_text())
+    except Exception:
+        return auth, entry
+    return auth, _grok_pick_entry(auth) or entry
+
+
 def check_grok() -> CliStatus:
     st = CliStatus(cli="grok", available=False)
     auth_path = HOME / ".grok" / "auth.json"
@@ -693,30 +817,42 @@ def check_grok() -> CliStatus:
         st.error = "no ~/.grok/auth.json"
         return st
     try:
-        auth = json.loads(auth_path.read_text())
+        auth, entry = _grok_ensure_fresh(auth_path)
     except Exception as e:
         st.error = f"bad auth.json: {e}"
         return st
-
-    entry = None
-    for v in auth.values():
-        if isinstance(v, dict) and v.get("key"):
-            entry = v
-            break
     if not entry:
         st.error = "no oauth key in auth.json (run `grok login`)"
         return st
 
-    token = entry["key"]
     st.account = str(entry.get("email") or "")
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-        "User-Agent": "GrokBuild/cli-usage",
-    }
 
-    # Subscription
-    scode, subs = _http_json("https://grok.com/rest/subscriptions", headers)
+    def probe(token: str):
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": "GrokBuild/cli-usage",
+        }
+        scode, subs = _http_json("https://grok.com/rest/subscriptions", headers)
+        bcode, billing = _http_json("https://cli-chat-proxy.grok.com/v1/billing", headers)
+        ucode, user = _http_json("https://cli-chat-proxy.grok.com/v1/user", headers)
+        return scode, subs, bcode, billing, ucode, user
+
+    scode, subs, bcode, billing, ucode, user = probe(entry["key"])
+    if 401 in (scode, bcode, ucode):
+        payload = _grok_oidc_refresh(entry)
+        if payload:
+            _apply_grok_token_response(entry, payload)
+            _grok_persist_auth(auth_path, auth)
+        else:
+            _grok_cli_nudge()
+            try:
+                auth = json.loads(auth_path.read_text())
+                entry = _grok_pick_entry(auth) or entry
+            except Exception:
+                pass
+        scode, subs, bcode, billing, ucode, user = probe(entry["key"])
+
     active_tiers = []
     if scode == 200 and isinstance(subs, dict):
         for s in subs.get("subscriptions") or []:
@@ -732,26 +868,27 @@ def check_grok() -> CliStatus:
                     }
     st.plan = ", ".join(active_tiers) if active_tiers else "unknown"
 
-    # Grok Build CLI monthly credits
-    bcode, billing = _http_json("https://cli-chat-proxy.grok.com/v1/billing", headers)
-    if bcode != 200 or not isinstance(billing, dict):
-        # User endpoint still useful
-        ucode, user = _http_json("https://cli-chat-proxy.grok.com/v1/user", headers)
-        if ucode == 200 and isinstance(user, dict):
-            st.available = bool(user.get("hasGrokCodeAccess"))
-            st.account = str(user.get("email") or st.account)
-            st.error = f"billing HTTP {bcode}; hasGrokCodeAccess={user.get('hasGrokCodeAccess')}"
-            st.eligible = st.available
-            st.score = 50.0 if st.available else 0.0
-            if not st.available:
-                st.skip_reason = "no Grok Code access"
-            return st
-        st.error = f"billing HTTP {bcode}: {billing}"
+    if bcode == 200 and isinstance(billing, dict):
+        user_dict = user if (ucode == 200 and isinstance(user, dict)) else None
+        return parse_grok_usage(billing, user_dict, st)
+
+    if ucode == 200 and isinstance(user, dict):
+        st.available = bool(user.get("hasGrokCodeAccess"))
+        st.account = str(user.get("email") or st.account)
+        st.error = f"billing HTTP {bcode}; hasGrokCodeAccess={user.get('hasGrokCodeAccess')}"
+        st.eligible = st.available
+        st.score = 50.0 if st.available else 0.0
+        if not st.available:
+            st.skip_reason = "no Grok Code access"
         return st
 
-    ucode, user = _http_json("https://cli-chat-proxy.grok.com/v1/user", headers)
-    user_dict = user if (ucode == 200 and isinstance(user, dict)) else None
-    return parse_grok_usage(billing, user_dict, st)
+    # Still 401 after refresh: CLI is logged in; meter is unread. Do not
+    # mark the worker ineligible — that was the bug.
+    st.available = True
+    st.eligible = True
+    st.score = 50.0
+    st.error = f"usage unread after refresh (billing HTTP {bcode})"
+    return st
 
 
 def parse_grok_usage(
@@ -2028,7 +2165,7 @@ def main() -> int:
         if args.cli == "all":
             try:
                 owns_refresh_lock = _acquire_refresh_lock()
-                if not owns_refresh_lock:
+                if not owns_refresh_lock and not args.fresh:
                     cached = _load_cache()
                     if cached and cached.get("clis"):
                         statuses = _statuses_from_cache(cached)
