@@ -7,6 +7,7 @@ override is set (same capability gate as kimi, not a kimi-named one).
 """
 
 import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -138,6 +139,8 @@ class ClaudeDispatchTests(unittest.TestCase):
             task_dir = make_task_dir(te.work_dir, repo, worker_args=["--effort", "high", "--model", "fable"])
             env = dict(te.env)
             env["CLAUDE_BIN"] = str(BIN_DIR / "fake-claude")
+            env.pop("SSA_ALLOW_UNSANDBOXED_WRITE", None)
+            env.pop("SSA_ALLOW_KIMI_WRITE", None)
             rc, out, err = run_ssa(
                 "dispatch", "--dir", str(task_dir), "--worker", "claude", env=env
             )
@@ -163,12 +166,21 @@ class ClaudeDispatchTests(unittest.TestCase):
             self.assertEqual(rc, 0, err)
             recorder = te.home / ".ssa-test" / "fake-claude"
             argv = read_argv_file(recorder / "argv.txt")
-            brief_path = task_dir / "brief.md"
+            supervisor_brief = task_dir / "brief.md"
+            launch_brief = repo / ".ssa-brief.md"
+            self.assertTrue(supervisor_brief.is_file())
+            self.assertTrue(launch_brief.is_file())
+            self.assertEqual(launch_brief.read_text(), supervisor_brief.read_text())
+            porcelain = subprocess.check_output(
+                ["git", "-C", str(repo), "status", "--porcelain", "-uall"],
+                text=True,
+            )
+            self.assertNotIn(".ssa-brief.md", porcelain)
             self.assertEqual(
                 argv,
                 [
                     "-p",
-                    "Read the file %s and complete the task it describes." % brief_path,
+                    "Read the file %s and complete the task it describes." % launch_brief,
                     "--output-format",
                     "json",
                     "--permission-mode",
@@ -182,8 +194,15 @@ class ClaudeDispatchTests(unittest.TestCase):
                 ],
             )
             self.assertNotIn("--dangerously-skip-permissions", argv)
+            self.assertNotIn("bypassPermissions", " ".join(argv))
+            self.assertNotIn("--add-dir", argv)
             recorded_cwd = (recorder / "cwd.txt").read_text().strip()
             self.assertEqual(os.path.realpath(recorded_cwd), os.path.realpath(str(repo)))
+            self.assertTrue(
+                os.path.realpath(str(launch_brief)).startswith(
+                    os.path.realpath(str(repo)) + os.sep
+                )
+            )
             self.assertTrue((task_dir / "write-override.txt").exists())
             self.assertEqual((task_dir / "exit-code.txt").read_text().strip(), "0")
             self.assertTrue((task_dir / "session-id.txt").read_text().strip())

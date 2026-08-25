@@ -530,11 +530,13 @@ cmd_dispatch() {
   echo "$worker" >"$dir/worker.txt"
   local log="$dir/stdout.log"
   local sid="" rc=0 failure=""
+  local launch_brief
+  launch_brief="$(_ssa_stage_worktree_brief "$wt" "$brief")"
 
   # Difficulty-derived flags come from the recommender, never re-derived here;
   # the registry decides where in the argv they land.
   _ssa_build "$worker" implement \
-    --worktree "$wt" --brief "$brief" --output "$dir/last-msg.txt" \
+    --worktree "$wt" --brief "$launch_brief" --output "$dir/last-msg.txt" \
     --args-file "$dir/worker-args.txt" \
     || die "dispatch: cannot build a command for worker $worker"
 
@@ -597,6 +599,24 @@ cmd_dispatch() {
     "resume=$resume exit=$rc" \
     "args=${argstr} log=$log"
   return "$rc"
+}
+
+# Copy the supervisor brief into the worktree so a file-ref worker can read
+# it inside the sandbox. $dir/brief.md stays the supervisor artifact; the copy
+# is a launch path only. Exclude it worktree-locally so git diff / scope never
+# see it.
+_ssa_stage_worktree_brief() {
+  local wt="$1" src="$2"
+  local dest="$wt/.ssa-brief.md" git_dir exclude
+  git_dir="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null || true)"
+  [[ -n "$git_dir" ]] || die "dispatch: cannot resolve git dir for $wt"
+  exclude="$git_dir/info/exclude"
+  mkdir -p "$(dirname "$exclude")"
+  if ! grep -qxF '/.ssa-brief.md' "$exclude" 2>/dev/null; then
+    printf '%s\n' '/.ssa-brief.md' >>"$exclude"
+  fi
+  cp "$src" "$dest" || die "dispatch: cannot copy brief into worktree"
+  printf '%s' "$dest"
 }
 
 # --- background dispatch, watchdog, tail, stop --------------------------------
@@ -1633,7 +1653,30 @@ if scope_file.exists():
             scope_ok = False
             out_of_scope.append(path)
 
-if new_failures or scope_ok is False or not secrets_ok:
+log_path = d / "stdout.log"
+log_text = log_path.read_text(errors="replace") if log_path.exists() else ""
+brief_denied = False
+for line in log_text.splitlines():
+    low = line.lower()
+    if "brief.md" not in low:
+        continue
+    if any(
+        needle in low
+        for needle in (
+            "permission denied",
+            "eacces",
+            "operation not permitted",
+            "outside allowed",
+            "outside of the allowed",
+            "not allowed to",
+        )
+    ):
+        brief_denied = True
+        break
+
+if not changed and brief_denied:
+    verdict = "fail"
+elif new_failures or scope_ok is False or not secrets_ok:
     verdict = "fail"
 elif baseline_raw is None and any_failure:
     verdict = "inconclusive"

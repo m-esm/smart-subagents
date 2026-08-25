@@ -285,7 +285,7 @@ class DispatchArgvTests(unittest.TestCase):
 
             recorder = te.home / ".ssa-test" / "fake-kimi"
             argv = read_argv_file(recorder / "argv.txt")
-            brief_path = task_dir / "brief.md"
+            brief_path = repo / ".ssa-brief.md"
             expected = [
                 "-p",
                 f"Read the file {brief_path} and complete the task it describes.",
@@ -315,7 +315,7 @@ class DispatchArgvTests(unittest.TestCase):
             self.assertEqual(rc, 0, err)
             recorder = te.home / ".ssa-test" / "fake-kimi"
             argv = read_argv_file(recorder / "argv.txt")
-            brief_path = task_dir / "brief.md"
+            brief_path = repo / ".ssa-brief.md"
             expected = [
                 "-p",
                 f"Read the file {brief_path} and complete the task it describes.",
@@ -438,6 +438,22 @@ class VerifyTests(unittest.TestCase):
             self.assertEqual(rc, 2, err)
             doc = json.loads((task_dir / "outcome.json").read_text())
             self.assertEqual(doc["verify"]["verdict"], "inconclusive")
+
+    def test_verify_empty_tree_with_brief_permission_denial_is_not_pass(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "verify-cmds.txt").write_text("true\n")
+            (task_dir / "baseline-results.txt").write_text("0\ttrue\n")
+            (task_dir / "stdout.log").write_text(
+                "EACCES: permission denied, open '%s/brief.md'\n" % task_dir
+            )
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertNotEqual(rc, 0, err)
+            doc = json.loads((task_dir / "outcome.json").read_text())
+            self.assertNotEqual(doc["verify"]["verdict"], "pass")
+            self.assertEqual(doc["verify"]["verdict"], "fail")
+            self.assertEqual(doc["verify"]["changed_files"], 0)
 
 
 class RecordTests(unittest.TestCase):
