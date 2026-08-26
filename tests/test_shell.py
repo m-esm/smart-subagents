@@ -161,6 +161,14 @@ class InitTests(unittest.TestCase):
             self.assertEqual((task_dir / "kind.txt").read_text().strip(), "review")
             self.assertEqual((task_dir / "difficulty.txt").read_text().strip(), "hard")
             self.assertEqual((task_dir / "worker.txt").read_text().strip(), "codex")
+            self.assertEqual(
+                (task_dir / "worker-args-codex.txt").read_text().strip(),
+                "-c\nmodel_reasoning_effort=high",
+            )
+            self.assertEqual(
+                (task_dir / "worker-args-grok.txt").read_text().strip(),
+                "--reasoning-effort\nhigh",
+            )
 
             argv = read_argv_file(argv_file)
             self.assertIn("--task-size", argv)
@@ -271,6 +279,74 @@ class DispatchArgvTests(unittest.TestCase):
             self.assertEqual(argv, expected)
             self.assertEqual((task_dir / "exit-code.txt").read_text().strip(), "0")
             self.assertTrue((task_dir / "session-id.txt").read_text().strip())
+
+    def test_dispatch_rebinds_stale_claude_args_when_overriding_to_grok(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            brief_text = "Complete the fixture task.\n\n## Structural discovery\nCGC-SKIP: fixture; route=none; evidence=characterization-test\n"
+            task_dir = make_task_dir(
+                te.work_dir,
+                repo,
+                worker_args=["--effort", "high", "--model", "fable"],
+                brief_text=brief_text,
+            )
+            (task_dir / "worker.txt").write_text("claude\n")
+            (task_dir / "pick.json").write_text(
+                json.dumps(
+                    {
+                        "worker": "claude",
+                        "all_worker_args": {
+                            "claude": ["--effort", "high", "--model", "fable"],
+                            "grok": ["--reasoning-effort", "high"],
+                        },
+                    }
+                )
+            )
+            env = dict(te.env)
+            env["GROK_BIN"] = str(BIN_DIR / "fake-grok")
+
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "grok", env=env
+            )
+            self.assertEqual(rc, 0, err)
+
+            argv = read_argv_file(te.home / ".ssa-test" / "fake-grok" / "argv.txt")
+            self.assertIn("--reasoning-effort", argv)
+            self.assertIn("high", argv)
+            self.assertNotIn("--model", argv)
+            self.assertNotIn("fable", argv)
+            self.assertEqual(
+                (task_dir / "worker-args.txt").read_text().strip(),
+                "--reasoning-effort\nhigh",
+            )
+
+    def test_dispatch_refuses_foreign_flags_when_override_has_no_args_table(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(
+                te.work_dir,
+                repo,
+                worker_args=["--effort", "high", "--model", "fable"],
+            )
+            (task_dir / "pick.json").write_text(
+                json.dumps(
+                    {
+                        "worker": "claude",
+                        "all_worker_args": {
+                            "claude": ["--effort", "high", "--model", "fable"],
+                        },
+                    }
+                )
+            )
+            env = dict(te.env)
+            env["GROK_BIN"] = str(BIN_DIR / "fake-grok")
+
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "grok", env=env
+            )
+            self.assertNotEqual(rc, 0, err)
+            self.assertIn("worker-args", err)
+            self.assertIn("claude", err)
 
     def test_kimi_write_dispatch_receives_exact_argv_and_runs_in_worktree(self):
         with temp_env() as te:
@@ -438,6 +514,24 @@ class VerifyTests(unittest.TestCase):
             self.assertEqual(rc, 2, err)
             doc = json.loads((task_dir / "outcome.json").read_text())
             self.assertEqual(doc["verify"]["verdict"], "inconclusive")
+
+            # mixed pre-existing red + one green: still pass (known test debt).
+            (task_dir / "verify-cmds.txt").write_text("true\nfalse\n")
+            (task_dir / "baseline-results.txt").write_text("0\ttrue\n1\tfalse\n")
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err)
+            doc = json.loads((task_dir / "outcome.json").read_text())
+            self.assertEqual(doc["verify"]["verdict"], "pass")
+            self.assertEqual(doc["verify"]["new_failures"], 0)
+
+            # fully-red matching baseline: inconclusive, not a false pass.
+            (task_dir / "verify-cmds.txt").write_text("false\n")
+            (task_dir / "baseline-results.txt").write_text("1\tfalse\n")
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 2, err)
+            doc = json.loads((task_dir / "outcome.json").read_text())
+            self.assertEqual(doc["verify"]["verdict"], "inconclusive")
+            self.assertEqual(doc["verify"]["new_failures"], 0)
 
     def test_verify_empty_tree_with_brief_permission_denial_is_not_pass(self):
         with temp_env() as te:

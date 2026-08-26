@@ -389,6 +389,13 @@ pick_doc = {
 (d / "worker-args.txt").write_text(
     "\n".join(pick_doc["worker_args"]) + ("\n" if pick_doc["worker_args"] else "")
 )
+# Per-CLI copies so a later --worker override (or worker.txt edit) can rebind
+# without keeping the originally picked CLI's flags (see 1787682071-8525).
+for cli, args in (pick_doc.get("all_worker_args") or {}).items():
+    args = args or []
+    (d / ("worker-args-%s.txt" % cli)).write_text(
+        "\n".join(args) + ("\n" if args else "")
+    )
 (d / "pick.json").write_text(json.dumps(pick_doc, indent=2))
 (d / "worker.txt").write_text(pick + ("\n" if pick else ""))
 print(json.dumps({"task_id": d.name, "dir": str(d), **pick_doc}, indent=2))
@@ -497,6 +504,54 @@ cmd_cooldown() {
   fi
 }
 
+# Rebind worker-args.txt to the worker about to launch. Overriding worker.txt
+# (or passing --worker) after pick used to leave the original CLI's flags in
+# place: grok then got Claude's `--model fable` and died (1787682071-8525).
+_ssa_bind_worker_args() {
+  local dir="$1" worker="$2"
+  local per="$dir/worker-args-$worker.txt"
+  if [[ -f "$per" ]]; then
+    cp "$per" "$dir/worker-args.txt"
+    return 0
+  fi
+  python3 - "$dir" "$worker" <<'PY' || return $?
+import json, sys
+from pathlib import Path
+
+d = Path(sys.argv[1])
+worker = sys.argv[2]
+pick_path = d / "pick.json"
+if not pick_path.exists():
+    sys.exit(0)
+try:
+    pick = json.loads(pick_path.read_text())
+except (OSError, json.JSONDecodeError):
+    sys.exit(0)
+all_args = pick.get("all_worker_args") or {}
+if worker in all_args:
+    args = all_args[worker] or []
+    (d / "worker-args.txt").write_text(
+        "\n".join(args) + ("\n" if args else "")
+    )
+    sys.exit(0)
+current = []
+p = d / "worker-args.txt"
+if p.exists():
+    current = [l for l in p.read_text().splitlines() if l.strip()]
+for cli, args in all_args.items():
+    if cli == worker:
+        continue
+    if args and current == list(args):
+        print(
+            "smart-subagents: dispatch: worker-args.txt is %s's flags, not %s; "
+            "re-run pick --prefer %s" % (cli, worker, worker),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+sys.exit(0)
+PY
+}
+
 cmd_dispatch() {
   local dir="" worker="" background=""
   while [[ $# -gt 0 ]]; do
@@ -516,6 +571,7 @@ cmd_dispatch() {
   local wt
   wt="$(cat "$dir/wt.txt" 2>/dev/null || true)"
   [[ -n "$wt" && -d "$wt" ]] || die "dispatch: missing worktree ($dir/wt.txt)"
+  _ssa_bind_worker_args "$dir" "$worker" || die "dispatch: worker-args do not match $worker"
 
   if [[ -n "$background" ]]; then
     _dispatch_background "$dir" "$worker"
@@ -1674,11 +1730,18 @@ for line in log_text.splitlines():
         brief_denied = True
         break
 
+any_success = any(code == 0 for code, _cmd in results)
 if not changed and brief_denied:
     verdict = "fail"
 elif new_failures or scope_ok is False or not secrets_ok:
     verdict = "fail"
 elif baseline_raw is None and any_failure:
+    verdict = "inconclusive"
+elif any_failure and not any_success:
+    # Matching a fully-red baseline is not a pass. Both gates crashing the
+    # same way as "file missing" at baseline stamped verified on a false
+    # pass (1787693142-19048). A mixed suite with pre-existing red tests
+    # can still pass when at least one command is green.
     verdict = "inconclusive"
 else:
     verdict = "pass"

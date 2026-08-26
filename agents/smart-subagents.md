@@ -155,10 +155,7 @@ Do not re-derive the ranking. If you disagree with the order, say why in
 re-run. Hand-overriding the router silently is how the ledger stops meaning
 anything.
 
-`init` also writes `$DIR/worker-args.txt` (the difficulty-derived effort flags
-for the chosen CLI) and `dispatch` applies them. **Never hand-pick `-m` or a
-reasoning-effort flag yourself**, that mapping lives in one place so it stays
-consistent. Change the difficulty and re-run `pick` instead.
+`init` writes `$DIR/worker-args.txt` for the chosen CLI and `$DIR/worker-args-<cli>.txt` for every eligible CLI. `dispatch` rebinds `worker-args.txt` from those copies (or from `pick.json` `all_worker_args`) to the worker it is about to launch. Editing `worker.txt` or passing `--worker` without that rebind is how grok inherited Claude's `--model fable`. **Never hand-pick `-m` or a reasoning-effort flag yourself**; change the difficulty and re-run `pick` instead.
 
 Capability fit is not yours to hand-maintain. Per-worker priors live in
 `scripts/workers.json` and are already folded into `ranked[]` as `fit`, learned
@@ -367,9 +364,9 @@ exit code against `$DIR/baseline-results.txt`, checks the changed paths against
 
 | Verdict | Means | Exit |
 |---------|-------|------|
-| `pass` | no new failure, scope clean, no secrets | 0 |
+| `pass` | no new failure, at least one command green, scope clean, no secrets | 0 |
 | `fail` | a command regressed, or scope/secret gate tripped | 1 |
-| `inconclusive` | a command failed and there is no baseline to compare to | 2 |
+| `inconclusive` | a command failed with no baseline, or every command failed (a fully-red matching baseline is not a pass) | 2 |
 
 `inconclusive` is never reportable as success. Either record the baseline and
 re-run, or report `partial` with the reason.
