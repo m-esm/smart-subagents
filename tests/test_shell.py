@@ -533,6 +533,34 @@ class VerifyTests(unittest.TestCase):
             self.assertEqual(doc["verify"]["verdict"], "inconclusive")
             self.assertEqual(doc["verify"]["new_failures"], 0)
 
+    def test_verify_directory_prefix_scope_matches_descendants(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "scope.txt").write_text("src/projects/litter/\n")
+            nested = repo / "src" / "projects" / "litter" / "cover.py"
+            nested.parent.mkdir(parents=True)
+            nested.write_text("x\n")
+            subprocess.run(["git", "add", "src/projects/litter/cover.py"], cwd=repo, check=True)
+            (task_dir / "verify-cmds.txt").write_text("true\n")
+            (task_dir / "baseline-results.txt").write_text("0\ttrue\n")
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err)
+            doc = json.loads((task_dir / "outcome.json").read_text())
+            self.assertIs(doc["verify"]["scope_ok"], True)
+            self.assertEqual(doc["verify"]["verdict"], "pass")
+            self.assertGreater(doc["verify"]["changed_files"], 0)
+
+            outside = repo / "src" / "projects" / "other" / "yaw.py"
+            outside.parent.mkdir(parents=True)
+            outside.write_text("y\n")
+            subprocess.run(["git", "add", "src/projects/other/yaw.py"], cwd=repo, check=True)
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 1, err)
+            doc = json.loads((task_dir / "outcome.json").read_text())
+            self.assertIs(doc["verify"]["scope_ok"], False)
+            self.assertEqual(doc["verify"]["verdict"], "fail")
+
     def test_verify_empty_tree_with_brief_permission_denial_is_not_pass(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
@@ -556,6 +584,9 @@ class RecordTests(unittest.TestCase):
             repo = make_git_repo(te.root / "repo")
             task_dir = make_task_dir(te.work_dir, repo)
             (task_dir / "exit-code.txt").write_text("0\n")
+            (task_dir / "outcome.json").write_text(
+                json.dumps({"verify": {"verdict": "pass"}}) + "\n"
+            )
 
             rc, out, err = run_ssa(
                 "record",
@@ -583,6 +614,67 @@ class RecordTests(unittest.TestCase):
             self.assertTrue(record["repo_hash"])
             self.assertNotIn("repo", record)
             self.assertNotIn("dir", record)
+
+    def test_record_refuses_verified_pass_when_verdict_fail(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "exit-code.txt").write_text("0\n")
+            (task_dir / "outcome.json").write_text(
+                json.dumps({"verify": {"verdict": "fail"}}) + "\n"
+            )
+            rc, out, err = run_ssa(
+                "record",
+                "--dir",
+                str(task_dir),
+                "--outcome",
+                "verified-pass",
+                env=te.env,
+            )
+            self.assertEqual(rc, 1, err)
+            self.assertIn("fail", err)
+            self.assertFalse((task_dir / "outcome-record.json").exists())
+            ledger_path = te.state_dir / "outcomes.jsonl"
+            self.assertFalse(ledger_path.exists())
+
+            rc, out, err = run_ssa(
+                "record",
+                "--dir",
+                str(task_dir),
+                "--outcome",
+                "partial",
+                env=te.env,
+            )
+            self.assertEqual(rc, 0, err)
+
+    def test_record_refuses_verified_pass_without_outcome_json(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "exit-code.txt").write_text("0\n")
+            rc, out, err = run_ssa(
+                "record",
+                "--dir",
+                str(task_dir),
+                "--outcome",
+                "verified-pass",
+                env=te.env,
+            )
+            self.assertEqual(rc, 1, err)
+            self.assertIn("missing", err)
+            self.assertFalse((task_dir / "outcome-record.json").exists())
+            ledger_path = te.state_dir / "outcomes.jsonl"
+            self.assertFalse(ledger_path.exists())
+
+            rc, out, err = run_ssa(
+                "record",
+                "--dir",
+                str(task_dir),
+                "--outcome",
+                "partial",
+                env=te.env,
+            )
+            self.assertEqual(rc, 0, err)
 
 
 class StructuralBriefTests(unittest.TestCase):

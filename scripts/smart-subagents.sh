@@ -1701,11 +1701,19 @@ changed = []
 if changed_path.exists():
     blob = changed_path.read_bytes().decode("utf-8", "replace")
     changed = [p for p in blob.split("\0") if p]
+def glob_matches(path, g):
+    # Trailing slash is a directory prefix, not an fnmatch glob.
+    # fnmatch("src/projects/litter/cover.py", "src/projects/litter/") is
+    # false; descendants of that dir must still be in scope.
+    if g.endswith("/"):
+        return path == g.rstrip("/") or path.startswith(g)
+    return fnmatch.fnmatch(path, g)
+
 if scope_file.exists():
     globs = [g.strip() for g in scope_file.read_text().splitlines() if g.strip()]
     scope_ok = True
     for path in changed:
-        if not any(fnmatch.fnmatch(path, g) for g in globs):
+        if not any(glob_matches(path, g) for g in globs):
             scope_ok = False
             out_of_scope.append(path)
 
@@ -1856,12 +1864,22 @@ if stat.exists():
         deletions = int(m.group(1)) if m else 0
 
 verified = None
+verdict_label = "missing"
 oc = d / "outcome.json"
 if oc.exists():
     try:
-        verified = (json.loads(oc.read_text()).get("verify") or {}).get("verdict") == "pass"
+        verdict_label = (json.loads(oc.read_text()).get("verify") or {}).get("verdict")
+        if not verdict_label:
+            verdict_label = "missing"
+        verified = verdict_label == "pass"
     except Exception:
         verified = None
+        verdict_label = "missing"
+
+if outcome == "verified-pass" and verified is not True:
+    print("record: verified-pass requires verify.verdict=pass (got %s)" % verdict_label,
+          file=sys.stderr)
+    sys.exit(1)
 
 def quota(name):
     p = d / name

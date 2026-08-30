@@ -273,6 +273,9 @@ class FourthWorkerTests(unittest.TestCase):
             task_dir = make_task_dir(te.work_dir, repo)
             (task_dir / "worker.txt").write_text("fakecli\n")
             (task_dir / "exit-code.txt").write_text("0\n")
+            (task_dir / "outcome.json").write_text(
+                json.dumps({"verify": {"verdict": "pass"}}) + "\n"
+            )
             env = registry_env(te)
 
             rc, out, err = run_ssa(
