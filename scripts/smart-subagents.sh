@@ -33,6 +33,67 @@ SSA_LEDGER="${SSA_LEDGER:-${SSA_STATE_DIR}/outcomes.jsonl}"
 die() { echo "smart-subagents: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing $1"; }
 
+# Some clones never return from `git status --porcelain -uall` (untracked
+# explosion) or return a list so large the command is unusable. Probe with a
+# timeout and an untracked cap, then refuse rather than hang. `status -uno`
+# is fine on those trees.
+# SSA_GIT_STATUS_TIMEOUT seconds, default 5.
+# SSA_GIT_STATUS_UALL_MAX untracked porcelain lines, default 1000.
+_ssa_git_status_porcelain_uall() {
+  local repo="$1" dest="${2:-}" who="${3:-smart-subagents}"
+  local secs="${SSA_GIT_STATUS_TIMEOUT:-5}"
+  local max_u="${SSA_GIT_STATUS_UALL_MAX:-1000}"
+  need python3
+  python3 - "$repo" "$dest" "$secs" "$who" "$max_u" <<'PY'
+import subprocess
+import sys
+
+repo, dest, secs_s, who, max_s = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+try:
+    secs = float(secs_s)
+except ValueError:
+    secs = 5.0
+try:
+    max_u = int(float(max_s))
+except ValueError:
+    max_u = 1000
+inside = subprocess.run(
+    ["git", "-C", repo, "rev-parse", "--is-inside-work-tree"],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+if inside.returncode != 0:
+    sys.exit(0)
+try:
+    ran = subprocess.run(
+        ["git", "-C", repo, "status", "--porcelain", "-uall"],
+        capture_output=True,
+        text=True,
+        timeout=secs,
+    )
+except subprocess.TimeoutExpired:
+    sys.stderr.write(
+        "smart-subagents: %s: git status -uall timed out after %ss in %s "
+        "(this clone hangs on -uall; refuse rather than hang)\n"
+        % (who, int(secs) if secs == int(secs) else secs, repo)
+    )
+    sys.exit(1)
+text = ran.stdout or ""
+untracked = sum(1 for line in text.splitlines() if line.startswith("??"))
+if max_u >= 0 and untracked > max_u:
+    sys.stderr.write(
+        "smart-subagents: %s: git status -uall is unusable in %s "
+        "(%s untracked; this clone hangs on -uall; refuse rather than hang)\n"
+        % (who, repo, untracked)
+    )
+    sys.exit(1)
+if dest:
+    with open(dest, "w") as out:
+        out.write(text)
+sys.exit(0)
+PY
+}
+
 # Implement briefs must declare how structural discovery happened. Workers
 # execute the brief only, so the supervisor has to carry a pack or a skip.
 # SSA_STRUCTURAL_LEGACY=1 is a temporary rollback, not the default.
@@ -306,12 +367,18 @@ cmd_init() {
   need git
   need python3
 
-  local task_id dir
+  local task_id dir status_tmp
+  status_tmp="$(mktemp "${TMPDIR:-/tmp}/ssa-repo-status.XXXXXX")"
+  if ! _ssa_git_status_porcelain_uall "$repo" "$status_tmp" "init"; then
+    rm -f "$status_tmp"
+    exit 1
+  fi
   task_id="$(date +%s)-$$"
   mkdir -p "$SSA_WORK_DIR"
   chmod 700 "$SSA_WORK_DIR" 2>/dev/null || true
   dir="${SSA_WORK_DIR}/${task_id}"
   mkdir -m 700 -p "$dir"
+  mv "$status_tmp" "$dir/repo-status.txt"
 
   echo "$task_id" >"$dir/task-id.txt"
   echo "$repo" >"$dir/repo.txt"
@@ -320,7 +387,6 @@ cmd_init() {
   echo "$kind" >"$dir/kind.txt"
   git -C "$repo" rev-parse HEAD >"$dir/base-sha.txt"
   git -C "$repo" rev-parse --abbrev-ref HEAD >"$dir/repo-branch.txt"
-  git -C "$repo" status --porcelain -uall >"$dir/repo-status.txt" || true
 
   _ssa_state "$dir" minted
   _ssa_event "$dir" --phase minted
@@ -508,6 +574,11 @@ cmd_dispatch() {
     esac
   done
   [[ -n "$dir" && -d "$dir" ]] || die "dispatch: --dir required"
+  local src_repo
+  src_repo="$(tr -d '\r\n' <"$dir/repo.txt" 2>/dev/null || true)"
+  if [[ -n "$src_repo" && -d "$src_repo" ]]; then
+    _ssa_git_status_porcelain_uall "$src_repo" "" "dispatch"
+  fi
   worker="${worker:-$(cat "$dir/worker.txt" 2>/dev/null || true)}"
   [[ -n "$worker" ]] || die "dispatch: no worker"
   local brief="$dir/brief.md"
