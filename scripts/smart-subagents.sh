@@ -701,9 +701,19 @@ _kill_group() {
   kill -KILL "-${pgid}" 2>/dev/null || kill -KILL "$pgid" 2>/dev/null || true
 }
 
+_watchdog_should_exit() {
+  # cmd_dispatch writes exit-code.txt when the worker returns. After that the
+  # run is finished even if the bg-run wrapper is still alive (it waits on
+  # this watchdog). Stalling then is 1788154673-70654: reported -> stalled.
+  local dir="$1"
+  [[ -f "$dir/exit-code.txt" || -f "$dir/stopped.txt" ]]
+}
+
 _watchdog() {
   # Stall detection is two signals, not one: a worker that is thinking still
   # writes to the log, and a worker that is editing still moves the tree.
+  # TERM is ignored because the watchdog shares the worker process group;
+  # cmd_bg_run reaps it with KILL after dispatch. Do not trap KILL.
   local dir="$1" leader="$2" pgid="$3"
   local interval="${SSA_WATCHDOG_INTERVAL_SECS:-30}"
   local stall="${SSA_STALL_SECS:-600}"
@@ -715,6 +725,7 @@ _watchdog() {
   while _pid_alive "$leader"; do
     sleep "$interval"
     _pid_alive "$leader" || break
+    if _watchdog_should_exit "$dir"; then exit 0; fi
     sz="$(wc -c <"$dir/stdout.log" 2>/dev/null | tr -d ' ' || true)"
     [[ -n "$sz" ]] || sz=0
     fp=""
@@ -733,8 +744,9 @@ _watchdog() {
       if (( now - started >= deadline )); then reason="deadline"; break; fi
     fi
   done
-  [[ -n "$reason" ]] || return 0
-  _pid_alive "$leader" || return 0
+  [[ -n "$reason" ]] || exit 0
+  _pid_alive "$leader" || exit 0
+  if _watchdog_should_exit "$dir"; then exit 0; fi
   {
     echo "$(_utc) $reason after ${idle}s idle (stall=${stall}s deadline=${deadline}s)"
   } >>"$dir/stalled.txt"
@@ -798,7 +810,10 @@ cmd_bg_run() {
   _watchdog "$dir" "$$" "$pgid" &
   wd=$!
   cmd_dispatch --dir "$dir" --worker "$worker" || rc=$?
-  kill "$wd" 2>/dev/null || true
+  # The watchdog traps TERM (same process group as the worker). TERM therefore
+  # never reaps it, and wait deadlocks until the stall timer fires on an
+  # already-exited task. KILL is the only signal it cannot ignore.
+  kill -KILL "$wd" 2>/dev/null || true
   wait "$wd" 2>/dev/null || true
   return "$rc"
 }

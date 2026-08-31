@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -576,6 +577,46 @@ class VerifyTests(unittest.TestCase):
             self.assertNotEqual(doc["verify"]["verdict"], "pass")
             self.assertEqual(doc["verify"]["verdict"], "fail")
             self.assertEqual(doc["verify"]["changed_files"], 0)
+
+
+class WatchdogTests(unittest.TestCase):
+    def test_background_dispatch_does_not_stall_after_worker_exits(self):
+        # 1788154673-70654: grok exited, supervisor recorded, then the
+        # watchdog (TERM ignored, leader=bg-run wrapper) stamped stalled
+        # and attempted reported -> stalled.
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            env = dict(te.env)
+            env["CODEX_BIN"] = str(BIN_DIR / "fake-codex")
+            env["SSA_STALL_SECS"] = "2"
+            env["SSA_WATCHDOG_INTERVAL_SECS"] = "1"
+            rc, out, err = run_ssa(
+                "dispatch",
+                "--dir",
+                str(task_dir),
+                "--worker",
+                "codex",
+                "--background",
+                env=env,
+            )
+            self.assertEqual(rc, 0, err + out)
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                if (task_dir / "exit-code.txt").exists():
+                    break
+                time.sleep(0.1)
+            else:
+                self.fail("background worker never wrote exit-code.txt\n" + err + out)
+            time.sleep(3.5)
+            bg = ""
+            if (task_dir / "bg.log").exists():
+                bg = (task_dir / "bg.log").read_text()
+            self.assertFalse(
+                (task_dir / "stalled.txt").exists(),
+                "watchdog stalled a finished dispatch:\n" + bg,
+            )
+            self.assertNotIn("illegal transition", bg)
 
 
 class RecordTests(unittest.TestCase):
