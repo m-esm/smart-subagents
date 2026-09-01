@@ -26,6 +26,7 @@ SANDBOXES = ("os", "workspace", "none")
 TRANSPORTS = ("stdin", "arg", "file-ref")
 SESSION_KINDS = ("jsonl-keys", "json-keys", "jsonl-event")
 FINAL_KINDS = ("generic", "json-key", "jsonl-event")
+FORMATS = ("jsonl", "json", "text")
 OUTPUT_MODES = ("arg", "stdout", "none")
 CWD_MODES = ("inherit", "worktree")
 
@@ -219,9 +220,21 @@ class WorkerSpec:
                     where, "output.%s is \"arg\" but argv.%s never uses {output}" % (mode, mode)
                 )
 
-        self.format: Dict[str, str] = {
-            str(k): str(v) for k, v in (block.get("format") or {}).items()
-        }
+        # How this worker's log reads per mode. A typo here silently picks the
+        # wrong digest path, so an unknown mode or value is a load error.
+        fmt_block = block.get("format") or {}
+        if not isinstance(fmt_block, dict):
+            raise _fail(where, "format is not an object")
+        self.format: Dict[str, str] = {}
+        for mode, value in fmt_block.items():
+            if mode not in MODES:
+                raise _fail(where, "format names unknown mode %r" % mode)
+            if value not in FORMATS:
+                raise _fail(
+                    where,
+                    "format.%s %r not one of %s" % (mode, value, ", ".join(FORMATS)),
+                )
+            self.format[str(mode)] = str(value)
 
         session = _require(where, block, "session", (dict,))
         kind = str(session.get("kind") or "")
@@ -244,19 +257,12 @@ class WorkerSpec:
 
         # Where the worker's last agent message lives in its log. Optional:
         # "generic" scans for assistant text; the two named kinds are exact.
-        final = block.get("final") or {}
-        if not isinstance(final, dict):
-            raise _fail(where, "final is not an object")
-        fkind = str(final.get("kind") or "generic")
-        if fkind not in FINAL_KINDS:
-            raise _fail(where, "final.kind %r not one of %s" % (fkind, ", ".join(FINAL_KINDS)))
-        fkeys = [str(k) for k in (final.get("keys") or [])]
-        fmatch = final.get("match") or {}
-        if not isinstance(fmatch, dict):
-            raise _fail(where, "final.match is not an object")
-        if fkind != "generic" and not fkeys:
-            raise _fail(where, "final.kind %r declares no keys" % fkind)
-        self.final = {"kind": fkind, "keys": fkeys, "match": dict(fmatch)}
+        self.final = self._locator(where, block, "final", default_kind="generic")
+
+        # Where a terminal error lands, when the worker has one. Optional and
+        # validated exactly like `final`: a run that ended on turn.failed must
+        # not report the last successful message as its outcome.
+        self.error = self._locator(where, block, "error", default_kind="")
 
         self.effort_ladder = [str(r) for r in (block.get("effort_ladder") or [])]
         self.effort_flags = [str(t) for t in (block.get("effort_flags") or [])]
@@ -297,6 +303,27 @@ class WorkerSpec:
                 self.fit[str(kind_name)] = float(value)
             except (TypeError, ValueError):
                 raise _fail(where, "fit.%s is not a number" % kind_name)
+
+    @staticmethod
+    def _locator(where: str, block: dict, field: str, default_kind: str):
+        """Validate a `final`/`error` rule. Returns None when absent and optional."""
+        rule = block.get(field) or {}
+        if not isinstance(rule, dict):
+            raise _fail(where, "%s is not an object" % field)
+        if not rule and not default_kind:
+            return None
+        kind = str(rule.get("kind") or default_kind)
+        if kind not in FINAL_KINDS:
+            raise _fail(
+                where, "%s.kind %r not one of %s" % (field, kind, ", ".join(FINAL_KINDS))
+            )
+        keys = [str(k) for k in (rule.get("keys") or [])]
+        match = rule.get("match") or {}
+        if not isinstance(match, dict):
+            raise _fail(where, "%s.match is not an object" % field)
+        if kind != "generic" and not keys:
+            raise _fail(where, "%s.kind %r declares no keys" % (field, kind))
+        return {"kind": kind, "keys": keys, "match": dict(match)}
 
     # -- lookups ------------------------------------------------------------
 

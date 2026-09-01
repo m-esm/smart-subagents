@@ -471,7 +471,10 @@ module.annotate_forecasts(statuses, now=now)
 assert statuses[0].windows[0].forecast_exhausts_in_hours == hours
 rec = module.recommend(statuses, task_size="medium", difficulty="routine")
 assert any("at current burn" in r for r in rec["reasons"]), rec["reasons"]
-assert rec["local_labor_ok"] is True
+# No claude status in this fleet, so local labor is withheld: an unread
+# claude meter is never a licence to burn premium quota locally.
+assert rec["local_labor_ok"] is False
+assert any("not probed" in r for r in rec["reasons"]), rec["reasons"]
 PY
 pass "burn forecast stays advisory"
 

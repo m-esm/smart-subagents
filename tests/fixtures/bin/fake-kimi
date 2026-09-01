@@ -34,9 +34,38 @@ if control_path.exists():
 exit_code = int(control.get("exit_code", 0))
 session_id = control.get("session_id", "fake-kimi-session-000000000001")
 
+# Real `kimi --output-format stream-json` shape, measured 2026-09-01: an
+# assistant line whose content is a plain string (tool_calls alongside it),
+# a tool line per result, and the session.resume_hint meta line LAST. That
+# ordering is why a generic "last agent text" scan returned the resume hint.
 print(json.dumps({"type": "message_start"}))
+print(
+    json.dumps(
+        {
+            "role": "assistant",
+            "content": "Reading the brief.",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": '{"path": "BRIEF.md"}'},
+                }
+            ],
+        }
+    )
+)
+print(json.dumps({"role": "tool", "tool_call_id": "call_0", "content": "brief contents"}))
+print(json.dumps({"role": "assistant", "content": "fake-kimi final: ok"}))
 if session_id:
-    print(json.dumps({"type": "session.resume_hint", "session_id": session_id}))
-print(json.dumps({"role": "assistant", "content": [{"type": "text", "text": "fake-kimi final: ok"}]}))
-print(json.dumps({"type": "message_end"}))
+    print(
+        json.dumps(
+            {
+                "role": "meta",
+                "type": "session.resume_hint",
+                "session_id": session_id,
+                "command": "kimi -r %s" % session_id,
+                "content": "To resume this session: kimi -r %s" % session_id,
+            }
+        )
+    )
 sys.exit(exit_code)

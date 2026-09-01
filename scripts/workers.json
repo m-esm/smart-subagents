@@ -45,6 +45,12 @@
         "match": { "type": "item.completed", "item.type": "agent_message" },
         "keys": ["item.text"]
       },
+      "error": {
+        "kind": "jsonl-event",
+        "match": { "type": "turn.failed" },
+        "keys": ["error.message"],
+        "_note": "The real quota message: {\"type\":\"turn.failed\",\"error\":{\"message\":\"You have hit your usage limit. ...\"}}. Nothing else in the log says the run failed."
+      },
       "effort_ladder": ["low", "medium", "high"],
       "effort_flags": ["-c", "model_reasoning_effort={effort}"],
       "models": {
@@ -73,10 +79,20 @@
       "sandbox": "workspace",
       "write_allowed_default": true,
       "run": { "cwd": "inherit", "env_scrub": false },
+      "_prompt_note": "file-ref, not arg: the whole brief in argv is readable by every local user through ps. The shell stages it in the worktree as BRIEF.md.",
       "prompt": {
-        "implement": { "transport": "arg" },
-        "plan": { "transport": "arg" },
-        "resume": { "transport": "arg" }
+        "implement": {
+          "transport": "file-ref",
+          "template": "Read the file {brief} and complete the task it describes."
+        },
+        "plan": {
+          "transport": "file-ref",
+          "template": "Read the file {brief} and complete the task it describes."
+        },
+        "resume": {
+          "transport": "file-ref",
+          "template": "Read the file {brief} and complete the task it describes."
+        }
       },
       "argv": {
         "implement": [
@@ -97,6 +113,11 @@
       "format": { "implement": "jsonl", "plan": "text", "resume": "jsonl" },
       "session": { "kind": "jsonl-keys", "keys": ["sessionId", "session_id"] },
       "final": { "kind": "jsonl-event", "match": { "type": "result" }, "keys": ["result"] },
+      "error": {
+        "kind": "jsonl-event",
+        "match": { "type": "result", "is_error": true },
+        "keys": ["result", "error"]
+      },
       "effort_ladder": ["low", "medium", "high", "xhigh"],
       "effort_flags": ["--reasoning-effort", "{effort}"],
       "models": {
@@ -154,7 +175,12 @@
         "event": "session.resume_hint",
         "keys": ["session_id"]
       },
-      "final": { "kind": "generic" },
+      "final": {
+        "kind": "jsonl-event",
+        "match": { "role": "assistant" },
+        "keys": ["content"],
+        "_note": "kimi emits the session.resume_hint meta line LAST, so a generic scan returned the resume hint as the worker final word."
+      },
       "effort_ladder": [],
       "effort_flags": [],
       "models": {
@@ -188,7 +214,8 @@
       "probe": "check_claude",
       "sandbox": "none",
       "write_allowed_default": false,
-      "run": { "cwd": "worktree", "env_scrub": false },
+      "_run_note": "env_scrub: the worker keeps HOME, PATH, TMPDIR and TERM only. claude reads its credentials from the keychain and ~/.claude, so HOME is all it needs in -p mode.",
+      "run": { "cwd": "worktree", "env_scrub": true },
       "prompt": {
         "implement": {
           "transport": "file-ref",
@@ -203,20 +230,21 @@
           "template": "Read the file {brief} and complete the task it describes."
         }
       },
+      "_argv_note": "No --setting-sources project: it loads the TARGET repo .claude/settings.json, whose hooks then run unsandboxed on this machine. A worker must not execute configuration it was sent to inspect.",
       "argv": {
         "implement": [
           "-p", "{prompt}", "--output-format", "json",
-          "--permission-mode", "acceptEdits", "--setting-sources", "project",
+          "--permission-mode", "acceptEdits",
           "{effort}", "{model}"
         ],
         "plan": [
           "-p", "{prompt}", "--output-format", "json",
-          "--permission-mode", "plan", "--setting-sources", "project",
+          "--permission-mode", "plan",
           "{effort}", "{model}"
         ],
         "resume": [
           "-p", "{prompt}", "--resume", "{session_id}", "--output-format", "json",
-          "--permission-mode", "acceptEdits", "--setting-sources", "project",
+          "--permission-mode", "acceptEdits",
           "{effort}", "{model}"
         ]
       },
@@ -224,6 +252,11 @@
       "format": { "implement": "json", "plan": "json", "resume": "json" },
       "session": { "kind": "json-keys", "keys": ["session_id"] },
       "final": { "kind": "json-key", "keys": ["result"] },
+      "error": {
+        "kind": "json-key",
+        "keys": ["error", "result"],
+        "_note": "Only read when the result object says is_error, or its subtype names an error."
+      },
       "effort_ladder": ["low", "medium", "high", "xhigh"],
       "effort_flags": ["--effort", "{effort}"],
       "models": {

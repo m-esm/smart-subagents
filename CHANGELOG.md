@@ -16,6 +16,48 @@ Worker logs no longer leak into the supervisor context. Measured on
 - Grok drops `--include-partial-messages`: per-token deltas were 43% of the
   log and the watchdog only needs per-turn growth.
 
+Routing, classification and digest fixes from the 2026-09-01 audit:
+
+- Grok billing with `monthlyLimit.val = 0` and `used.val = 0` is an unreadable
+  meter, not 100% headroom. It scored grok at full capacity and sent 85 of 106
+  dispatches there. Same zero guard kimi already had.
+- A failed usage probe names itself: `skip_reason` becomes "usage probe
+  rate-limited" (429), "usage probe unauthorized" (401/403) or "usage probe
+  failed (HTTP n)", so `recommend` says why a CLI dropped out.
+- `local_labor_ok` fails closed. An empty claude `extras` (probe errored, or
+  claude was never probed) read as permission; it now needs an available
+  claude status that actually says `local_labor: true`, with a reason on the
+  recommendation when it does not.
+- Failure classification reads error envelopes, not the raw tail. A bare `429`
+  matched UUID segments and grep hits like `test_lattices.py:429:`, and a bare
+  `401` matched agent prose: 14 of 60 real logs misclassified, benching a
+  healthy CLI for 15 min or 24 h. Both numbers now need a status word in
+  front. Codex's real quota event (`turn.failed` with "You've hit your usage
+  limit") and kimi's `resource_exhausted` frame are recognized at last.
+- A stale `refresh.lock` left by SIGKILL (one was 8 days old) is broken after
+  one cache TTL instead of costing every cold-cache caller a 10 s wait.
+- Optional per-worker `error` rule in `workers.json`, validated like `final`.
+  A run that ended on `turn.failed` or an error result reports
+  `[run failed: ...]` instead of the last successful message, and the digest
+  carries a `terminal` field.
+- Digests keep the last 3 non-JSON lines as `stderr`: a crash whose stack
+  trace went to the merged fd used to digest to nothing.
+- Kimi's `final` rule targets its assistant lines. Its `session.resume_hint`
+  meta line comes last, so the final message was the resume hint. Digests also
+  summarize kimi's `tool_calls` and tool results.
+- Session scraping and final messages share one JSON ladder: one trailing
+  stderr line after claude's object no longer loses the session id, and a
+  pretty-printed object still yields a final message.
+- `format` values in the registry are validated (`jsonl`, `json`, `text`).
+- Security: claude drops `--setting-sources project` (it loaded the target
+  repo's `.claude/settings.json`, whose hooks then ran unsandboxed on this
+  machine) and runs with `env_scrub`, keeping HOME, PATH, TMPDIR and TERM,
+  which is all `claude -p` needs to find its own credentials.
+- Security: grok takes the brief by file reference like kimi and claude. The
+  whole brief in argv was readable by every local user through `ps`.
+- New `tests/test_docs_tables.py` gates the hand-written difficulty and
+  quota-floor tables in the docs against `DIFFICULTY` / `BASE_FLOOR`.
+
 ## 0.3.2
 
 Grok usage probe refreshes the x.ai OAuth token before billing calls, and
