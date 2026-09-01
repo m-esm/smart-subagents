@@ -40,6 +40,11 @@
         "keys": ["session_id", "sessionId", "thread", "thread_id"],
         "_note": "A bare top-level \"id\" is NOT a session id: codex emits one on ordinary stream items, and accepting it produced unresumable garbage."
       },
+      "final": {
+        "kind": "jsonl-event",
+        "match": { "type": "item.completed", "item.type": "agent_message" },
+        "keys": ["item.text"]
+      },
       "effort_ladder": ["low", "medium", "high"],
       "effort_flags": ["-c", "model_reasoning_effort={effort}"],
       "models": {
@@ -76,8 +81,7 @@
       "argv": {
         "implement": [
           "-p", "{prompt}", "--cwd", "{worktree}", "--sandbox", "workspace",
-          "{effort}", "{model}", "--output-format", "streaming-messages-json",
-          "--include-partial-messages"
+          "{effort}", "{model}", "--output-format", "streaming-messages-json"
         ],
         "plan": [
           "-p", "{prompt}", "--cwd", "{worktree}", "--sandbox", "workspace",
@@ -86,13 +90,13 @@
         "resume": [
           "--resume", "{session_id}", "-p", "{prompt}", "--cwd", "{worktree}",
           "--sandbox", "workspace", "{effort}", "{model}",
-          "--output-format", "streaming-messages-json",
-          "--include-partial-messages"
+          "--output-format", "streaming-messages-json"
         ]
       },
       "output": { "implement": "none", "plan": "stdout", "resume": "none" },
       "format": { "implement": "jsonl", "plan": "text", "resume": "jsonl" },
       "session": { "kind": "jsonl-keys", "keys": ["sessionId", "session_id"] },
+      "final": { "kind": "jsonl-event", "match": { "type": "result" }, "keys": ["result"] },
       "effort_ladder": ["low", "medium", "high", "xhigh"],
       "effort_flags": ["--reasoning-effort", "{effort}"],
       "models": {
@@ -150,6 +154,7 @@
         "event": "session.resume_hint",
         "keys": ["session_id"]
       },
+      "final": { "kind": "generic" },
       "effort_ladder": [],
       "effort_flags": [],
       "models": {
@@ -218,6 +223,7 @@
       "output": { "implement": "none", "plan": "stdout", "resume": "none" },
       "format": { "implement": "json", "plan": "json", "resume": "json" },
       "session": { "kind": "json-keys", "keys": ["session_id"] },
+      "final": { "kind": "json-key", "keys": ["result"] },
       "effort_ladder": ["low", "medium", "high", "xhigh"],
       "effort_flags": ["--effort", "{effort}"],
       "models": {

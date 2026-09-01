@@ -14,6 +14,7 @@ flowchart TB
     USAGE --> REG["ssa/registry.py<br/>load and reject a bad workers.json"]
     CLI --> REG
     CLI --> ADAPT["ssa/adapters.py<br/>build argv, scrape session id, classify failure"]
+    CLI --> DIGEST["ssa/digest.py<br/>bounded log views: final message, digest, tail filter"]
     CLI --> ST["ssa/state.py<br/>legal transitions only, atomic task.json"]
     REG --> WJ[("workers.json<br/>binary, sandbox, effort ladder, fit prior")]
     ADAPT --> WJ

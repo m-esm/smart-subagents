@@ -23,9 +23,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from helpers import (  # noqa: E402
     BIN_DIR,
     FIXTURE_BRIEF,
+    SSA_SH,
     make_git_repo,
     read_argv_file,
     run_ssa,
+    run_ssa_cli_stdin,
     temp_env,
 )
 
@@ -276,11 +278,17 @@ class DispatchArgvTests(unittest.TestCase):
                 "high",
                 "--output-format",
                 "streaming-messages-json",
-                "--include-partial-messages",
             ]
             self.assertEqual(argv, expected)
             self.assertEqual((task_dir / "exit-code.txt").read_text().strip(), "0")
             self.assertTrue((task_dir / "session-id.txt").read_text().strip())
+            # grok has no -o flag: dispatch fills last-msg.txt from the log.
+            self.assertEqual(
+                (task_dir / "last-msg.txt").read_text().strip(), "fake-grok final: ok"
+            )
+            # The dispatch report itself stays small and carries the final text.
+            self.assertLess(len(out), 2500, out)
+            self.assertIn("fake-grok final: ok", out)
 
     def test_dispatch_rebinds_stale_claude_args_when_overriding_to_grok(self):
         with temp_env() as te:
@@ -572,6 +580,69 @@ class WatchdogTests(unittest.TestCase):
                 "watchdog stalled a finished dispatch:\n" + bg,
             )
             self.assertNotIn("illegal transition", bg)
+
+
+class LogDigestTests(unittest.TestCase):
+    """stdout.log is for the disk. Measured 2026-09-01: grok implement logs run
+    1-3 MB with single NDJSON lines up to 186 KB. `status` used to `tail -n3`
+    those raw lines straight into the supervisor context."""
+
+    def _task_with_big_log(self, te, worker="grok"):
+        repo = make_git_repo(te.root / "repo")
+        task_dir = make_task_dir(te.work_dir, repo)
+        (task_dir / "worker.txt").write_text(worker + "\n")
+        (task_dir / "exit-code.txt").write_text("0\n")
+        big = "y" * 200_000
+        lines = [
+            json.dumps({"type": "system", "subtype": "init", "session_id": "s" * 36}),
+            json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": big, "signature": big},
+                {"type": "tool_use", "name": "read_file", "input": {"target_file": "a.py"}},
+            ]}}),
+            json.dumps({"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "content": big},
+            ]}}),
+            json.dumps({"type": "stream_event", "event": {"type": "content_block_delta", "delta": big}}),
+            json.dumps({"type": "result", "subtype": "success", "num_turns": 3,
+                        "result": "FINAL-MARKER " + "z" * 5000}),
+        ]
+        (task_dir / "stdout.log").write_text("\n".join(lines) + "\n")
+        return task_dir
+
+    def test_status_output_is_bounded_regardless_of_log_line_size(self):
+        with temp_env() as te:
+            task_dir = self._task_with_big_log(te)
+            rc, out, err = run_ssa("status", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err)
+            self.assertLess(len(out), 4000, "status leaked raw log lines: %d bytes" % len(out))
+            self.assertIn("FINAL-MARKER", out)
+            self.assertIn("tool read_file", out)
+            self.assertNotIn("y" * 500, out)
+
+    def test_tail_is_filtered_by_default_and_raw_on_request(self):
+        with temp_env() as te:
+            task_dir = self._task_with_big_log(te)
+            # tail -f never exits on its own; feed the filter directly instead
+            # and prove the shell wires the same seam.
+            rc, out, err = run_ssa_cli_stdin(
+                (task_dir / "stdout.log").read_text(), "tail-filter", env=te.env
+            )
+            self.assertEqual(rc, 0, err)
+            self.assertLess(len(out), 1200, out)
+            self.assertIn("tool read_file", out)
+            self.assertIn("tool_result 200000 bytes", out)
+            self.assertIn("result success turns=3", out)
+            sh = SSA_SH.read_text()
+            self.assertIn('tail -n "$lines" -f "$dir/stdout.log" | _ssa tail-filter', sh)
+            self.assertIn("--raw", sh)
+
+    def test_status_on_unregistered_worker_still_clips(self):
+        with temp_env() as te:
+            task_dir = self._task_with_big_log(te, worker="nosuchcli")
+            rc, out, err = run_ssa("status", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err)
+            self.assertLess(len(out), 4000, out)
+            self.assertIn("unregistered worker", out)
 
 
 class RecordTests(unittest.TestCase):

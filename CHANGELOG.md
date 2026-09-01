@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.3
+
+Worker logs no longer leak into the supervisor context. Measured on
+2026-09-01: grok implement runs left 1-3 MB of NDJSON with single lines up to
+186 KB, and `status` piped the last three raw lines into every poll.
+
+- New `ssa/digest.py` plus CLI `digest`, `final-message`, `tail-filter`: a
+  byte-capped view of any worker log (event counts, last events clipped, final
+  message clipped), shaped by a per-worker `final` rule in `workers.json`.
+- `status` prints that digest instead of raw lines (3 MB log: 2.4 KB output).
+- `tail --dir` streams one short line per event; `--raw` is the old firehose.
+- `dispatch` writes `last-msg.txt` for every worker (grok, kimi and claude have
+  no `-o` flag) and ends with a clipped final message.
+- Grok drops `--include-partial-messages`: per-token deltas were 43% of the
+  log and the watchdog only needs per-turn growth.
+
 ## 0.3.2
 
 Grok usage probe refreshes the x.ai OAuth token before billing calls, and
