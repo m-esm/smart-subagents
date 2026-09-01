@@ -135,7 +135,7 @@ make_repo "$init_repo"
 SSA_WORK_DIR="$init_work" SSA_USAGE_PY="$usage_stub" \
   SSA_STUB_ARGV="$init_argv" "$SSA" init --repo "$init_repo" \
   --kind review --difficulty hard >/dev/null
-init_dir="$(find "$init_work" -mindepth 1 -maxdepth 1 -type d | head -1)"
+init_dir="$(find "$init_work" -mindepth 1 -maxdepth 1 -type d -not -name wt | head -1)"
 [[ "$(cat "$init_dir/kind.txt")" == "review" ]] || fail "init kind file"
 grep -qx -- '--task-kind' "$init_argv" || fail "init task kind flag"
 grep -qx -- 'review' "$init_argv" || fail "init task kind value"
@@ -534,7 +534,7 @@ SSA_WORK_DIR="$plan_work" SSA_USAGE_PY="$usage_stub" \
 grep -qx -- '-c' "$plan_codex_argv" || fail "plan effort option"
 grep -qx -- 'model_reasoning_effort=high' "$plan_codex_argv" || \
   fail "plan effort value"
-plan_dir="$(find "$plan_work" -mindepth 1 -maxdepth 1 -type d | head -1)"
+plan_dir="$(find "$plan_work" -mindepth 1 -maxdepth 1 -type d -not -name wt | head -1)"
 [[ "$(cat "$plan_dir/kind.txt")" == "review" ]] || fail "plan kind file"
 grep -qx -- '--task-kind' "$plan_usage_argv" || fail "plan task kind flag"
 pass "plan applies worker args and kind"
@@ -550,7 +550,7 @@ ssa_ops() {
 }
 ssa_ops init --repo "$ops_repo" --size small --difficulty routine --kind impl \
   >/dev/null || fail "ops init"
-ops_dir="$(find "$ops_work" -mindepth 1 -maxdepth 1 -type d | head -1)"
+ops_dir="$(find "$ops_work" -mindepth 1 -maxdepth 1 -type d -not -name wt | head -1)"
 ops_wt="$(cat "$ops_dir/wt.txt")"
 ops_id="$(cat "$ops_dir/task-id.txt")"
 echo "Complete the fixture task.
@@ -636,7 +636,7 @@ pass "cleanup refuses dirty then removes clean"
 bg_dir=""
 ssa_ops init --repo "$ops_repo" --size small --difficulty routine \
   >/dev/null || fail "background init"
-bg_dir="$(find "$ops_work" -mindepth 1 -maxdepth 1 -type d | head -1)"
+bg_dir="$(find "$ops_work" -mindepth 1 -maxdepth 1 -type d -not -name wt | head -1)"
 echo "Complete the fixture task.
 
 ## Structural discovery

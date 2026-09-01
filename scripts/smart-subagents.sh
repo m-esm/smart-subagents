@@ -134,7 +134,7 @@ _ssa_clip_file() {
 _ssa_require_structural() {
   local dir="$1" brief="$2"
   local kind
-  kind="$(tr -d '[:space:]' <"$dir/kind.txt" 2>/dev/null || true)"
+  kind="$(tr -d '[:space:]' 2>/dev/null <"$dir/kind.txt" || true)"
   case "$kind" in
     plan) echo "none" >"$dir/route.txt"; return 0 ;;
   esac
@@ -722,7 +722,7 @@ cmd_dispatch() {
   done
   [[ -n "$dir" && -d "$dir" ]] || die "dispatch: --dir required"
   local src_repo
-  src_repo="$(tr -d '\r\n' <"$dir/repo.txt" 2>/dev/null || true)"
+  src_repo="$(tr -d '\r\n' 2>/dev/null <"$dir/repo.txt" || true)"
   if [[ -n "$src_repo" && -d "$src_repo" ]]; then
     _ssa_git_status_porcelain_uall "$src_repo" "" "dispatch"
   fi
@@ -860,7 +860,7 @@ cmd_dispatch() {
   echo "smart-subagents: worker=$worker session=${sid:-unavailable}" \
     "resume=$resume exit=$rc" \
     "args=${argstr} log=$log"
-  echo "  last-msg: $dir/last-msg.txt ($(wc -c <"$dir/last-msg.txt" 2>/dev/null | tr -d ' ' || echo 0) bytes)"
+  echo "  last-msg: $dir/last-msg.txt ($(wc -c 2>/dev/null <"$dir/last-msg.txt" | tr -d ' ' || echo 0) bytes)"
   _ssa_log_digest "$dir" "$worker" "$log" 3 400 | sed 's/^/  /'
   return "$rc"
 }
@@ -979,7 +979,7 @@ _watchdog() {
     sleep "$interval"
     _pid_alive "$leader" || break
     if _watchdog_should_exit "$dir"; then exit 0; fi
-    sz="$(wc -c <"$dir/stdout.log" 2>/dev/null | tr -d ' ' || true)"
+    sz="$(wc -c 2>/dev/null <"$dir/stdout.log" | tr -d ' ' || true)"
     [[ -n "$sz" ]] || sz=0
     fp=""
     if [[ -n "$wt" && -d "$wt" ]]; then
