@@ -25,6 +25,7 @@ MODES = ("implement", "plan", "resume")
 SANDBOXES = ("os", "workspace", "none")
 TRANSPORTS = ("stdin", "arg", "file-ref")
 SESSION_KINDS = ("jsonl-keys", "json-keys", "jsonl-event")
+FINAL_KINDS = ("generic", "json-key", "jsonl-event")
 OUTPUT_MODES = ("arg", "stdout", "none")
 CWD_MODES = ("inherit", "worktree")
 
@@ -240,6 +241,22 @@ class WorkerSpec:
         }
         if kind == "jsonl-event" and not self.session["event"]:
             raise _fail(where, "session.kind is jsonl-event but no event is named")
+
+        # Where the worker's last agent message lives in its log. Optional:
+        # "generic" scans for assistant text; the two named kinds are exact.
+        final = block.get("final") or {}
+        if not isinstance(final, dict):
+            raise _fail(where, "final is not an object")
+        fkind = str(final.get("kind") or "generic")
+        if fkind not in FINAL_KINDS:
+            raise _fail(where, "final.kind %r not one of %s" % (fkind, ", ".join(FINAL_KINDS)))
+        fkeys = [str(k) for k in (final.get("keys") or [])]
+        fmatch = final.get("match") or {}
+        if not isinstance(fmatch, dict):
+            raise _fail(where, "final.match is not an object")
+        if fkind != "generic" and not fkeys:
+            raise _fail(where, "final.kind %r declares no keys" % fkind)
+        self.final = {"kind": fkind, "keys": fkeys, "match": dict(fmatch)}
 
         self.effort_ladder = [str(r) for r in (block.get("effort_ladder") or [])]
         self.effort_flags = [str(t) for t in (block.get("effort_flags") or [])]

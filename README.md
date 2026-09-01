@@ -186,8 +186,8 @@ it checks offline whether a dispatch could run at all here.
 | `doctor [--json]` | offline health check: git, python3, worker binaries, credential files (existence only), cache perms, work dir, orphans, stale worktrees. Nonzero only when a dispatch could not run |
 | `pick --size SIZE [--difficulty L] [--kind K]` | print the primary worker name on stdout, the full recommendation JSON on stderr |
 | `ls` | one line per task and planning panel: age, repo, worker, size/difficulty/kind, inferred phase, recorded state, diff size |
-| `status --dir DIR` | one task in full: base sha, branch, exit code, session or `resume=unavailable`, worker pid state, recorded state and event count, verify verdict, last log lines |
-| `tail --dir DIR` | follow the worker's `stdout.log` |
+| `status --dir DIR` | one task in full: base sha, branch, exit code, session or `resume=unavailable`, worker pid state, recorded state and event count, verify verdict, and a bounded log digest (counts, last few events clipped, final message clipped). Never raw log lines |
+| `tail --dir DIR [--raw]` | follow the worker's `stdout.log` as one short line per event; `--raw` is the unfiltered NDJSON firehose (100 KB lines), redirect it to a file |
 | `stop --dir DIR` | TERM then KILL the worker's process group, refusing when the pid now belongs to someone else |
 | `verify --dir DIR` | run the verify commands against the baseline, check scope and secrets, write `outcome.json`; exit 0 pass, 1 fail, 2 inconclusive |
 | `verify-summary --dir DIR` | compact git state for the supervisor: stat and name-status only |

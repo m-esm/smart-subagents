@@ -55,6 +55,19 @@ def run_ssa_cli(*args: str, env: Optional[dict] = None, timeout: int = 60):
     return proc.returncode, proc.stdout, proc.stderr
 
 
+def run_ssa_cli_stdin(text: str, *args: str, env: Optional[dict] = None, timeout: int = 60):
+    """Run scripts/ssa/cli.py with stdin. Returns (returncode, stdout, stderr)."""
+    proc = subprocess.run(
+        [sys.executable, str(SSA_CLI_PY), *args],
+        env=env if env is not None else dict(os.environ),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        input=text,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
 def load_usage_module():
     """Import scripts/ai-cli-usage.py under a normal module name.
 

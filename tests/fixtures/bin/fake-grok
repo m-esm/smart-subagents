@@ -29,8 +29,21 @@ if control_path.exists():
 exit_code = int(control.get("exit_code", 0))
 session_id = control.get("session_id", "fake-grok-session-000000000001")
 
-payload = {"response": "ok"}
+# Same shape as the real CLI (2026-09-01): an init line carrying the session
+# id, one full assistant message, then a result line whose `result` field is
+# the final agent text. No -o flag exists, so last-msg.txt must come from here.
+init = {"type": "system", "subtype": "init"}
 if session_id:
-    payload["sessionId"] = session_id
-print(json.dumps(payload))
+    init["session_id"] = session_id
+print(json.dumps(init))
+print(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+    {"type": "thinking", "thinking": "plan"},
+    {"type": "text", "text": "working"},
+    {"type": "tool_use", "name": "read_file", "input": {"target_file": "README.md"}},
+]}}))
+print(json.dumps({"type": "user", "message": {"role": "user", "content": [
+    {"type": "tool_result", "content": "x" * 64},
+]}}))
+print(json.dumps({"type": "result", "subtype": "success", "num_turns": 2,
+                  "result": "fake-grok final: ok"}))
 sys.exit(exit_code)

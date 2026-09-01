@@ -469,6 +469,7 @@ class AdapterUnitTests(unittest.TestCase):
     def setUpClass(cls):
         cls.adapters = load_ssa("adapters")
         cls.registry = load_ssa("registry")
+        cls.digest = load_ssa("digest")
 
     def _reg(self, te):
         path = write_registry(te.root / "workers.json", with_fake=True)
@@ -572,6 +573,75 @@ class AdapterUnitTests(unittest.TestCase):
                 self.adapters.parse_session("grok", str(log), reg=reg),
                 sid,
             )
+
+    def test_final_message_per_worker_shape(self):
+        with temp_env() as te:
+            reg = self._reg(te)
+            cases = {
+                "codex": "\n".join([
+                    json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "first"}}),
+                    json.dumps({"type": "item.completed", "item": {"type": "command_execution", "command": "ls"}}),
+                    json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "codex final"}}),
+                ]),
+                "grok": "\n".join([
+                    json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "mid"}]}}),
+                    json.dumps({"type": "result", "subtype": "success", "result": "grok final"}),
+                ]),
+                "claude": json.dumps({"type": "result", "subtype": "success", "session_id": "x" * 12, "result": "claude final"}),
+                "kimi": "\n".join([
+                    json.dumps({"type": "session.resume_hint", "session_id": "k" * 12}),
+                    json.dumps({"role": "assistant", "content": [{"type": "text", "text": "kimi final"}]}),
+                ]),
+            }
+            for worker, text in cases.items():
+                with self.subTest(worker=worker):
+                    log = te.root / (worker + ".log")
+                    log.write_text(text + "\n")
+                    self.assertEqual(
+                        self.digest.final_message(worker, str(log), reg=reg),
+                        worker + " final",
+                    )
+
+    def test_final_message_falls_back_to_last_assistant_text_without_result(self):
+        # A stalled or killed grok run has assistant lines but no result line.
+        with temp_env() as te:
+            reg = self._reg(te)
+            log = te.root / "grok.log"
+            log.write_text(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "partial progress"}]}}) + "\n")
+            self.assertEqual(self.digest.final_message("grok", str(log), reg=reg), "partial progress")
+            log.write_text("")
+            self.assertEqual(self.digest.final_message("grok", str(log), reg=reg), "")
+
+    def test_digest_is_bounded_and_skips_stream_noise(self):
+        with temp_env() as te:
+            reg = self._reg(te)
+            log = te.root / "grok.log"
+            big = "q" * 150_000
+            lines = [json.dumps({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"text": big}}})] * 50
+            lines.append(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": big},
+                {"type": "tool_use", "name": "bash", "input": {"command": "pytest -q " + "a" * 400}},
+            ]}}))
+            lines.append(json.dumps({"type": "result", "subtype": "success", "result": "r" * 5000}))
+            log.write_text("\n".join(lines) + "\n")
+            doc = self.digest.digest("grok", str(log), reg=reg)
+            text = self.digest.render(doc)
+            self.assertLess(len(text), 2000, text)
+            self.assertTrue(doc["final_truncated"])
+            self.assertEqual(doc["counts"], {"assistant": 0, "tool": 1, "tool_result": 0, "error": 0})
+            self.assertEqual(len(doc["recent"]), 2)
+            self.assertTrue(doc["recent"][0].startswith("tool bash pytest -q"))
+            self.assertLessEqual(len(doc["recent"][0]), self.digest.DEFAULT_EVENT_CHARS)
+            self.assertNotIn("q" * 200, text)
+
+    def test_registry_rejects_a_bad_final_rule(self):
+        with temp_env() as te:
+            def mutate(doc):
+                doc["workers"]["grok"]["final"] = {"kind": "jsonl-event"}
+            bad = write_registry(te.root / "bad.json", mutate=mutate)
+            with self.assertRaises(self.registry.RegistryError):
+                self.registry.load(str(bad), cache=False)
 
     def test_capabilities_come_from_the_registry(self):
         with temp_env() as te:

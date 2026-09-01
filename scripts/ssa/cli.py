@@ -21,17 +21,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 if __package__ in (None, ""):  # invoked as a path, not as -m ssa.cli
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from ssa import adapters, registry as registry_mod, state  # type: ignore
+    from ssa import adapters, digest as digest_mod, registry as registry_mod, state  # type: ignore
     from ssa.registry import RegistryError  # type: ignore
     from ssa.adapters import AdapterError  # type: ignore
     from ssa.state import StateError  # type: ignore
 else:
-    from . import adapters, registry as registry_mod, state
+    from . import adapters, digest as digest_mod, registry as registry_mod, state
     from .registry import RegistryError
     from .adapters import AdapterError
     from .state import StateError
@@ -135,6 +136,46 @@ def cmd_parse_session(args) -> int:
     return 0
 
 
+def cmd_final_message(args) -> int:
+    reg = _reg(args)
+    text = digest_mod.final_message(args.worker, args.log, reg=reg, mode=args.mode)
+    if text:
+        print(text)
+    return 0
+
+
+def cmd_digest(args) -> int:
+    reg = _reg(args)
+    doc = digest_mod.digest(
+        args.worker, args.log, reg=reg, mode=args.mode,
+        max_events=args.max_events, event_chars=args.event_chars,
+        final_chars=args.final_chars,
+    )
+    if args.json:
+        print(json.dumps(doc, indent=2))
+    else:
+        print(digest_mod.render(doc))
+    return 0
+
+
+def cmd_tail_filter(args) -> int:
+    """stdin: raw worker log lines. stdout: one short line per event."""
+    out = sys.stdout
+    try:
+        for line in sys.stdin:
+            summary = digest_mod.summarize_line(line, args.event_chars)
+            if summary:
+                out.write(summary + "\n")
+                out.flush()
+    except BrokenPipeError:
+        # The reader (head, a closed terminal) went away; that is not an error.
+        try:
+            sys.stdout = open(os.devnull, "w")
+        except OSError:
+            pass
+    return 0
+
+
 def cmd_classify(args) -> int:
     result = adapters.classify_log(args.exit_code, args.log)
     print(result or "")
@@ -233,6 +274,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--worker", required=True)
     p.add_argument("--log", required=True)
     p.set_defaults(func=cmd_parse_session)
+
+    p = sub.add_parser("final-message", help="the worker's last agent message from its log")
+    p.add_argument("--worker", required=True)
+    p.add_argument("--log", required=True)
+    p.add_argument("--mode", default="implement", choices=list(registry_mod.MODES))
+    p.set_defaults(func=cmd_final_message)
+
+    p = sub.add_parser("digest", help="bounded summary of a worker log (never the raw lines)")
+    p.add_argument("--worker", required=True)
+    p.add_argument("--log", required=True)
+    p.add_argument("--mode", default="implement", choices=list(registry_mod.MODES))
+    p.add_argument("--max-events", type=int, default=digest_mod.DEFAULT_MAX_EVENTS)
+    p.add_argument("--event-chars", type=int, default=digest_mod.DEFAULT_EVENT_CHARS)
+    p.add_argument("--final-chars", type=int, default=digest_mod.DEFAULT_FINAL_CHARS)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_digest)
+
+    p = sub.add_parser("tail-filter", help="stdin raw log lines -> one short line per event")
+    p.add_argument("--event-chars", type=int, default=digest_mod.DEFAULT_EVENT_CHARS)
+    p.set_defaults(func=cmd_tail_filter)
 
     p = sub.add_parser("classify", help="classify a failed run from its log tail")
     p.add_argument("--exit", dest="exit_code", type=int, required=True)

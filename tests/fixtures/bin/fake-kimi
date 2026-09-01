@@ -37,5 +37,6 @@ session_id = control.get("session_id", "fake-kimi-session-000000000001")
 print(json.dumps({"type": "message_start"}))
 if session_id:
     print(json.dumps({"type": "session.resume_hint", "session_id": session_id}))
+print(json.dumps({"role": "assistant", "content": [{"type": "text", "text": "fake-kimi final: ok"}]}))
 print(json.dumps({"type": "message_end"}))
 sys.exit(exit_code)

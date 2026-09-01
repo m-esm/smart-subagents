@@ -717,6 +717,10 @@ cmd_dispatch() {
     [[ -s "$dir/quota-after.json" ]] || rm -f "$dir/quota-after.json"
   fi
 
+  # Every worker leaves a compact final message, whether or not its CLI has an
+  # output flag: the supervisor reads last-msg.txt, never stdout.log.
+  _ssa_write_last_msg "$dir" "$worker" "$log"
+
   local resume="unavailable" argstr="defaults"
   [[ -n "$sid" ]] && resume="available"
   if [[ -s "$dir/worker-args.txt" ]]; then
@@ -725,7 +729,40 @@ cmd_dispatch() {
   echo "smart-subagents: worker=$worker session=${sid:-unavailable}" \
     "resume=$resume exit=$rc" \
     "args=${argstr} log=$log"
+  echo "  last-msg: $dir/last-msg.txt ($(wc -c <"$dir/last-msg.txt" 2>/dev/null | tr -d ' ' || echo 0) bytes)"
+  _ssa_log_digest "$dir" "$worker" "$log" 3 400 | sed 's/^/  /'
   return "$rc"
+}
+
+# _ssa_write_last_msg DIR WORKER LOG: fill last-msg.txt from the log when the
+# worker CLI did not write it itself (grok, kimi and claude have no -o flag).
+_ssa_write_last_msg() {
+  local dir="$1" worker="$2" log="$3" tmp
+  [[ -s "$dir/last-msg.txt" ]] && return 0
+  [[ -f "$log" ]] || return 0
+  tmp="$(mktemp "${TMPDIR:-/tmp}/ssa-lastmsg.XXXXXX")"
+  if _ssa final-message --worker "$worker" --log "$log" >"$tmp" 2>/dev/null \
+      && [[ -s "$tmp" ]]; then
+    mv "$tmp" "$dir/last-msg.txt"
+  else
+    rm -f "$tmp"
+  fi
+}
+
+# _ssa_log_digest DIR WORKER LOG [MAX_EVENTS] [FINAL_CHARS]: a bounded view of
+# the log. Never prints raw lines: one NDJSON line can be 100 KB+ and every
+# byte printed here lands in the supervisor's context.
+_ssa_log_digest() {
+  local dir="$1" worker="$2" log="$3" events="${4:-6}" final="${5:-800}"
+  [[ -f "$log" ]] || { echo "log: (none yet)"; return 0; }
+  if [[ -n "$worker" && "$worker" != "-" ]] \
+      && _ssa digest --worker "$worker" --log "$log" \
+        --max-events "$events" --final-chars "$final" 2>/dev/null; then
+    return 0
+  fi
+  # No registry entry for this worker: still never more than a few hundred bytes.
+  echo "log: $(wc -c <"$log" | tr -d ' ') bytes, $(wc -l <"$log" | tr -d ' ') lines (unregistered worker, raw tail clipped)"
+  tail -n "$events" "$log" | cut -c1-200 | sed 's/^/  | /'
 }
 
 # Copy the supervisor brief into the worktree so a file-ref worker can read
@@ -857,8 +894,8 @@ _dispatch_background() {
   done
   [[ -n "$pid" ]] || die "dispatch: background worker did not start (see $dir/bg.log)"
   echo "smart-subagents: background worker=$worker pid=$pid dir=$dir"
-  echo "  tail:   bash \"$SSA_SELF\" tail --dir \"$dir\""
-  echo "  status: bash \"$SSA_SELF\" status --dir \"$dir\""
+  echo "  status: bash \"$SSA_SELF\" status --dir \"$dir\"   # bounded digest, poll this"
+  echo "  tail:   bash \"$SSA_SELF\" tail --dir \"$dir\"     # one line per event (--raw for the firehose)"
   echo "  stop:   bash \"$SSA_SELF\" stop --dir \"$dir\""
 }
 
@@ -891,16 +928,24 @@ cmd_bg_run() {
 }
 
 cmd_tail() {
-  local dir=""
+  # Follows the log as one short line per event (tool calls, result sizes,
+  # assistant text clipped). --raw is the unfiltered firehose: a streaming
+  # worker emits 100 KB lines, so only use it when redirecting to a file.
+  local dir="" raw="" lines=20
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dir) dir="${2:-}"; shift 2 ;;
+      --raw) raw=1; shift ;;
+      -n|--lines) lines="${2:-20}"; shift 2 ;;
       *) die "tail: unknown arg $1" ;;
     esac
   done
   [[ -n "$dir" && -d "$dir" ]] || die "tail: --dir required"
   [[ -f "$dir/stdout.log" ]] || die "tail: no stdout.log yet in $dir"
-  exec tail -f "$dir/stdout.log"
+  if [[ -n "$raw" ]]; then
+    exec tail -n "$lines" -f "$dir/stdout.log"
+  fi
+  tail -n "$lines" -f "$dir/stdout.log" | _ssa tail-filter
 }
 
 cmd_stop() {
@@ -1049,10 +1094,11 @@ PY
     echo "recorded  : no (bash \"$SSA_SELF\" record --dir \"$dir\" --outcome ...)"
   fi
   if [[ -f "$dir/stdout.log" ]]; then
-    echo "log tail  :"
-    tail -n3 "$dir/stdout.log" | sed 's/^/  | /'
+    echo "log digest:"
+    _ssa_log_digest "$dir" "$(_read1 "$dir/worker.txt" '-')" "$dir/stdout.log" 4 600 \
+      | sed 's/^/  /'
   else
-    echo "log tail  : (no stdout.log)"
+    echo "log digest: (no stdout.log)"
   fi
 }
 

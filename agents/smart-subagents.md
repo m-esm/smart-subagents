@@ -63,8 +63,9 @@ DIR="${SSA_WORK_DIR:-${TMPDIR:-/tmp}/smart-subagents}/$TASK_ID"
 mkdir -m 700 -p "$DIR"   # briefs and worker logs stay private
 ```
 
-Artifacts under `$DIR/`: `brief.md`, `usage.json`, `pick.json`, `stdout.log`,
-`last-msg.txt`, `session-id.txt`, `worker.txt`, `exit-code.txt`,
+Artifacts under `$DIR/`: `brief.md`, `usage.json`, `pick.json`, `stdout.log`
+(disk only, see Phase 4), `last-msg.txt` (the worker's final message, every
+worker), `session-id.txt`, `worker.txt`, `exit-code.txt`,
 `verify-cmds.txt`, `baseline.log`, `baseline-results.txt`, `scope.txt`,
 `verify-final.log`, `outcome.json`, `outcome-record.json`, `diff-stat.txt`,
 `report.md`. Background runs add `worker.pid`, `worker.pgid`,
@@ -319,8 +320,8 @@ brief instead.
 ```bash
 bash "$SSA" dispatch --dir "$DIR" --worker "$(cat "$DIR/worker.txt")" --background
 bash "$SSA" ls                      # every task on this machine, one line each
-bash "$SSA" status --dir "$DIR"     # state, phase, pid, exit code, last log lines
-bash "$SSA" tail --dir "$DIR"       # follow stdout.log
+bash "$SSA" status --dir "$DIR"     # state, phase, pid, exit code, bounded log digest
+bash "$SSA" tail --dir "$DIR"       # one short line per event; --raw is the firehose
 bash "$SSA" stop --dir "$DIR"       # TERM then KILL the worker's process group
 ```
 
@@ -331,10 +332,18 @@ watchdog. The watchdog samples the log size and a worktree fingerprint every
 (`SSA_STALL_SECS`), writing `$DIR/stalled.txt`. `SSA_DEADLINE_SECS` adds a hard
 ceiling; it is off by default.
 
-Poll with `status`, never by re-reading the log. Do not pull multi-MB logs into
-context: `status` already shows the tail and the recorded state, and
-`tail`/`rg` cover the rest. `$DIR/events.jsonl` is the ordered history when you
-need to explain what happened rather than what is happening.
+Poll with `status`, never by re-reading the log. `stdout.log` is for the disk:
+a streaming worker leaves 1-3 MB of NDJSON with single lines over 100 KB (a
+full assistant message with its thinking block; a tool result carrying a whole
+file), so `cat`, `tail -n`, `Read` or `rg` on it push hundreds of KB into this
+context per look. `status` renders a bounded digest instead (event counts, the
+last few events clipped, the final message clipped), `tail` streams one short
+line per event, and the worker's final message is always in `$DIR/last-msg.txt`
+after dispatch, for every worker. Need a specific detail from the log? Ask for
+it narrowly: `python3 "$SSA_ROOT/scripts/ssa/cli.py" digest --worker W --log
+"$DIR/stdout.log" --max-events 30 --final-chars 4000`, or `jq -c` a single
+field, never the lines themselves. `$DIR/events.jsonl` is the ordered history
+when you need to explain what happened rather than what is happening.
 
 **Effort and model inside a CLI** are derived from difficulty, not chosen by
 hand. The recommender writes `$DIR/worker-args.txt`, the registry decides which
