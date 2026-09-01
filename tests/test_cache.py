@@ -125,6 +125,40 @@ class RefreshLockTests(CacheTestCase):
         # No lock dir exists; releasing must not raise.
         self.m._release_refresh_lock()
 
+    def test_stale_lock_from_a_killed_refresher_is_broken_immediately(self):
+        # A SIGKILLed refresher leaves refresh.lock behind forever. One on
+        # this machine was 8 days old, so every cold-cache caller paid a flat
+        # 10 s wait. Older than one TTL means nobody owns it.
+        import os
+        import time as _time
+
+        # Real clock here: without the fix this waits out the full 10 s poll
+        # and returns False, which is exactly the cost being removed.
+        self.m._now = _time.time
+        lock = self.m._CACHE_DIR / "refresh.lock"
+        lock.mkdir(parents=True)
+        old = _time.time() - self.m.CACHE_TTL_SEC - 60
+        os.utime(str(lock), (old, old))
+
+        started = _time.time()
+        self.assertTrue(self.m._acquire_refresh_lock())
+        self.assertLess(_time.time() - started, 1.0)
+        self.assertTrue(lock.is_dir())
+
+    def test_a_lock_younger_than_the_ttl_is_still_respected(self):
+        import os
+
+        lock = self.m._CACHE_DIR / "refresh.lock"
+        lock.mkdir(parents=True)
+        recent = self.fixed_now - 1.0
+        os.utime(str(lock), (recent, recent))
+        # A fresh cache lets the waiter give up at once; without it the wait
+        # loop runs against a frozen clock.
+        self._write_cache(self.fixed_now - 1.0)
+        self.assertFalse(self.m._acquire_refresh_lock())
+        # The live lock was neither removed nor re-taken.
+        self.assertAlmostEqual(os.path.getmtime(str(lock)), recent, places=3)
+
     def test_second_acquire_returns_false_once_a_fresh_cache_appears(self):
         self.assertTrue(self.m._acquire_refresh_lock())
         # Simulate the first refresher finishing and publishing a fresh cache

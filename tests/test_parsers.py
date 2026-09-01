@@ -242,6 +242,26 @@ class GrokParserTests(unittest.TestCase):
         self.assertEqual(st.skip_reason, "usage data missing")
         self.assertAlmostEqual(st.score, 0.0)
 
+    def test_zero_monthly_limit_is_missing_usage_not_full_headroom(self):
+        # The live account returns monthlyLimit.val=0 and used.val=0. The old
+        # guard computed used_pct=0.0 from that and scored grok at 100%
+        # headroom, which sent 85 of 106 dispatches to it. A zero limit is an
+        # unreadable meter, so it answers like every other provider's silence.
+        fx = load_fixture_json("grok", "zero_limit.json")
+        st = self.m.parse_grok_usage(fx["billing"], fx["user"])
+        self.assertEqual(st.windows, [])
+        self.assertTrue(st.available)
+        self.assertFalse(st.eligible)
+        self.assertEqual(st.skip_reason, "usage data missing")
+        self.assertAlmostEqual(st.score, 0.0)
+
+    def test_zero_limit_grok_is_not_recommended(self):
+        fx = load_fixture_json("grok", "zero_limit.json")
+        st = self.m.parse_grok_usage(fx["billing"], fx["user"])
+        rec = self.m.recommend([st], task_size="medium", difficulty="routine")
+        self.assertIsNone(rec["primary_worker"])
+        self.assertNotIn("grok", [r["cli"] for r in rec["ranked"]])
+
     def test_malformed_numeric_degrades_with_a_warning(self):
         # Phase 3b: a junk monthlyLimit.val is dropped and reported instead
         # of raising ValueError out of the parser.
@@ -327,6 +347,46 @@ class KimiParserTests(unittest.TestCase):
         self.assertTrue(st.extras.get("warnings"))
         self.assertFalse(st.eligible)
         self.assertEqual(st.skip_reason, "usage data missing")
+
+
+class ProbeFailureTests(unittest.TestCase):
+    """A failed usage probe must name itself in the recommendation."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load_usage_module()
+
+    def test_kimi_usage_probe_429_sets_a_skip_reason(self):
+        import json
+        import tempfile
+        import time
+
+        m = self.m
+        with tempfile.TemporaryDirectory(prefix="ssa-kimi-probe-") as tmp:
+            home = Path(tmp)
+            cred = home / ".kimi-code" / "credentials"
+            cred.mkdir(parents=True)
+            (cred / "kimi-code.json").write_text(
+                json.dumps({"access_token": "t" * 20, "expires_at": time.time() + 3600})
+            )
+            orig_home, orig_http = m.HOME, m._http_json
+            m.HOME = home
+            m._http_json = lambda url, headers=None, **kw: (
+                429,
+                {"error": "resource_exhausted"},
+            )
+            try:
+                st = m.check_kimi()
+            finally:
+                m.HOME, m._http_json = orig_home, orig_http
+        self.assertEqual(st.skip_reason, "usage probe rate-limited")
+        self.assertIn("429", st.error)
+
+    def test_probe_failure_reason_reaches_the_recommendation(self):
+        st = self.m.CliStatus(cli="kimi", available=False)
+        self.m._probe_failed(st, 429, {"error": "resource_exhausted"})
+        rec = self.m.recommend([st], task_size="medium", difficulty="routine")
+        self.assertIn("kimi: usage probe rate-limited", rec["reasons"])
 
 
 if __name__ == "__main__":

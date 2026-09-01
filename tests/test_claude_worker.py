@@ -39,7 +39,9 @@ class ShippedClaudeRegistryTests(unittest.TestCase):
         self.assertEqual(spec.sandbox, "none")
         self.assertFalse(spec.write_allowed_default)
         self.assertEqual(spec.cwd_mode, "worktree")
-        self.assertFalse(spec.env_scrub)
+        # Scrubbed: the worker keeps HOME, PATH, TMPDIR and TERM only, which
+        # is everything `claude -p` needs to find its own credentials.
+        self.assertTrue(spec.env_scrub)
         self.assertEqual(spec.binary_env, "CLAUDE_BIN")
 
     def test_every_difficulty_pins_model_fable(self):
@@ -186,14 +188,15 @@ class ClaudeDispatchTests(unittest.TestCase):
                     "json",
                     "--permission-mode",
                     "acceptEdits",
-                    "--setting-sources",
-                    "project",
                     "--effort",
                     "high",
                     "--model",
                     "fable",
                 ],
             )
+            # --setting-sources project would load the TARGET repo's
+            # .claude/settings.json and run its hooks unsandboxed.
+            self.assertNotIn("--setting-sources", argv)
             self.assertNotIn("--dangerously-skip-permissions", argv)
             self.assertNotIn("bypassPermissions", " ".join(argv))
             self.assertNotIn("--add-dir", argv)

@@ -17,9 +17,14 @@ turns one NDJSON line into a short line for a live tail.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 from . import registry as registry_mod
+from .jsonutil import (
+    iter_json_lines as _iter_json_lines,
+    load_whole_json as _load_whole_json,
+    non_json_lines as _non_json_lines,
+)
 
 DEFAULT_EVENT_CHARS = 160
 DEFAULT_FINAL_CHARS = 800
@@ -52,37 +57,6 @@ def _matches(obj: dict, match: Dict[str, Any]) -> bool:
     return all(_get_path(obj, k) == v for k, v in match.items())
 
 
-def _iter_json_lines(text: str) -> Iterable[dict]:
-    for line in text.splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            obj = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(obj, dict):
-            yield obj
-
-
-def _load_whole_json(text: str) -> Optional[dict]:
-    stripped = text.strip()
-    candidates = [stripped]
-    if "{" in stripped:
-        candidates.append(stripped[stripped.rfind("{"):])
-        candidates.append(stripped[stripped.find("{"):])
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            obj = json.loads(candidate)
-        except ValueError:
-            continue
-        if isinstance(obj, dict):
-            return obj
-    return None
-
-
 def _content_text(content: Any) -> str:
     """Concatenate text blocks of a Claude-style content list (or a string)."""
     if isinstance(content, str):
@@ -111,7 +85,11 @@ def _generic_text(obj: dict) -> str:
         text = _content_text(obj.get("content"))
         if text:
             return text
-    if obj.get("role") in ("user", "tool"):
+    # kimi ends every run with {"role":"meta","type":"session.resume_hint",
+    # "content":"To resume this session: kimi -r <id>"}. That is transport
+    # bookkeeping, and returning it as the final message told the supervisor
+    # the worker's last word was a resume hint.
+    if obj.get("role") in ("user", "tool", "meta"):
         return ""
     for key in GENERIC_TEXT_KEYS:
         value = obj.get(key)
@@ -137,56 +115,115 @@ def _read(log_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def final_message_from_text(text: str, fmt: str, rule: Optional[dict]) -> str:
-    """The worker's last agent message, "" when the log has none.
+def _rule_value(obj: dict, keys: List[str]) -> str:
+    for key in keys:
+        value = _get_path(obj, key)
+        if isinstance(value, str) and value.strip():
+            return value
+        if isinstance(value, dict):
+            inner = value.get("message")
+            if isinstance(inner, str) and inner.strip():
+                return inner
+    return ""
 
-    `rule` is the registry `final` block: {"kind": "json-key"|"jsonl-event"|
-    "generic", "keys": [...], "match": {path: value}}. The generic scan is
-    always the fallback so a worker without a rule still yields something.
+
+def _error_applies(obj: dict, kind: str) -> bool:
+    """A json-key error rule only fires on an object that says it failed.
+
+    claude's single result object always carries an "error"-ish shape; only
+    is_error / an error subtype distinguishes the run that actually failed.
+    """
+    if kind != "json-key":
+        return True
+    if obj.get("is_error") is True:
+        return True
+    return "error" in str(obj.get("subtype") or "")
+
+
+def _scan(text: str, fmt: str, rule: Optional[dict], is_error_rule: bool = False):
+    """(text, line index) for the last hit of one registry rule.
+
+    The index is the ordinal of the JSON line it came from, so a caller can
+    ask whether the error happened after the last agent message or before it.
     """
     rule = rule or {}
     kind = str(rule.get("kind") or "generic")
     keys = [str(k) for k in (rule.get("keys") or [])]
     match = rule.get("match") or {}
-    found = ""
+    if not keys and kind != "generic":
+        return "", -1
     if fmt == "json" or kind == "json-key":
-        obj = _load_whole_json(text)
-        if obj is not None:
-            for key in keys:
-                value = _get_path(obj, key)
-                if isinstance(value, str) and value.strip():
-                    found = value
-                    break
-            if not found:
+        obj = _load_whole_json(text, keys or None)
+        if obj is not None and _error_applies(obj, kind):
+            found = _rule_value(obj, keys)
+            if not found and not is_error_rule:
                 found = _generic_text(obj)
-        if found:
-            return found.strip()
+            if found:
+                return found.strip(), 0
     if kind == "jsonl-event":
-        for obj in _iter_json_lines(text):
+        found, index = "", -1
+        for i, obj in enumerate(_iter_json_lines(text)):
             if match and not _matches(obj, match):
                 continue
-            for key in keys:
-                value = _get_path(obj, key)
-                if isinstance(value, str) and value.strip():
-                    found = value
-                    break
+            value = _rule_value(obj, keys)
+            if value:
+                found, index = value, i
         if found:
-            return found.strip()
-    for obj in _iter_json_lines(text):
-        value = _generic_text(obj)
-        if value.strip():
-            found = value
-    if found:
-        return found.strip()
-    if fmt == "text":
-        return text.strip()
-    return ""
+            return found.strip(), index
+    return "", -1
+
+
+def error_message_from_text(text: str, fmt: str, rule: Optional[dict]):
+    """(message, line index) of the run's terminal error, ("", -1) when none."""
+    if not rule:
+        return "", -1
+    return _scan(text, fmt, rule, is_error_rule=True)
+
+
+def final_message_from_text(
+    text: str, fmt: str, rule: Optional[dict], error_rule: Optional[dict] = None
+) -> str:
+    """The worker's last agent message, "" when the log has none.
+
+    `rule` is the registry `final` block: {"kind": "json-key"|"jsonl-event"|
+    "generic", "keys": [...], "match": {path: value}}. The generic scan is
+    always the fallback so a worker without a rule still yields something.
+    When `error_rule` matches an event that came after the last agent message,
+    the run ended on that error and the message says so first: a stale success
+    line from before the failure reads as a completed task.
+    """
+    found, index = _scan(text, fmt, rule)
+    if not found:
+        for i, obj in enumerate(_iter_json_lines(text)):
+            value = _generic_text(obj)
+            if value.strip():
+                found, index = value, i
+    if not found and fmt != "text":
+        # A CLI that reverted to pretty-printed JSON has no parseable lines
+        # at all, so the per-line scan above sees nothing.
+        obj = _load_whole_json(text)
+        if obj is not None:
+            value = _generic_text(obj)
+            if value.strip():
+                found, index = value, 0
+    if not found and fmt == "text":
+        found, index = text.strip(), 0
+    err, err_index = error_message_from_text(text, fmt, error_rule)
+    if err and err_index >= index:
+        prefix = "[run failed: %s]" % " ".join(err.split())
+        tail = found.strip()
+        # The error rule and the final rule often read the same object (a
+        # result line that is both). Do not print it twice.
+        if not tail or tail == err.strip():
+            return prefix
+        return prefix + "\n\n" + tail
+    return found.strip()
 
 
 def final_message(worker: str, log_path: str, reg=None, mode: str = "implement") -> str:
     spec = _spec(worker, reg)
     fmt = spec.format.get(mode, "text")
-    return final_message_from_text(_read(log_path), fmt, spec.final)
+    return final_message_from_text(_read(log_path), fmt, spec.final, spec.error)
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +247,42 @@ def _tool_use_line(block: dict, limit: int) -> str:
     return _clip("tool %s %s" % (name, detail), limit)
 
 
+def _role_line(obj: dict, limit: int) -> Optional[str]:
+    """kimi's stream-json shape: bare role objects, no "type" field.
+
+    {"role":"assistant","content":"<text>","tool_calls":[...]},
+    {"role":"tool","tool_call_id":..,"content":..}, and a trailing
+    {"role":"meta",...} the supervisor does not need to see.
+    """
+    role = str(obj.get("role") or "")
+    if role == "assistant":
+        content = obj.get("content")
+        text = content if isinstance(content, str) else _content_text(content)
+        out = []
+        if text.strip():
+            out.append(_clip("assistant: %s" % text, limit))
+        for call in obj.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+            name = str(fn.get("name") or call.get("name") or "tool")
+            detail = fn.get("arguments") or call.get("arguments") or ""
+            if not isinstance(detail, str):
+                detail = json.dumps(detail, ensure_ascii=False)
+            out.append(_clip("tool %s %s" % (name, detail), limit))
+        return "\n".join(out) if out else None
+    if role == "tool":
+        body = obj.get("content")
+        if isinstance(body, str):
+            size = len(body)
+        elif body is None:
+            size = 0
+        else:
+            size = len(json.dumps(body, ensure_ascii=False))
+        return "tool_result %d bytes" % size
+    return None
+
+
 def summarize_obj(obj: dict, limit: int = DEFAULT_EVENT_CHARS) -> Optional[str]:
     """One short line for one NDJSON object, or None when it is noise.
 
@@ -219,6 +292,8 @@ def summarize_obj(obj: dict, limit: int = DEFAULT_EVENT_CHARS) -> Optional[str]:
     t = str(obj.get("type") or "")
     if t == "stream_event" or t.startswith("message_") or t.startswith("content_block"):
         return None
+    if not t and obj.get("role"):
+        return _role_line(obj, limit)
     if t in ("assistant", "user"):
         msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
         content = msg.get("content")
@@ -316,6 +391,29 @@ def summarize_line(line: str, limit: int = DEFAULT_EVENT_CHARS) -> Optional[str]
 # ---------------------------------------------------------------------------
 
 
+def _terminal_of(obj: dict) -> str:
+    """How the run ended, per this object. "" when it is not a terminal event."""
+    t = str(obj.get("type") or "")
+    if t == "result":
+        sub = str(obj.get("subtype") or "")
+        if not sub:
+            sub = "error" if obj.get("is_error") else "success"
+        return "result:%s" % sub
+    if t in ("turn.failed", "turn.completed", "error"):
+        return t
+    if t.startswith("item.") and isinstance(obj.get("item"), dict):
+        if str(obj["item"].get("type") or "") == "error":
+            return "item.error"
+    return ""
+
+
+def _is_error_terminal(term: str) -> bool:
+    if term in ("turn.failed", "error", "item.error"):
+        return True
+    # subtypes are free text: "error", "error_during_execution", ...
+    return term.startswith("result:") and "error" in term
+
+
 def digest_text(
     text: str,
     fmt: str,
@@ -323,6 +421,7 @@ def digest_text(
     max_events: int = DEFAULT_MAX_EVENTS,
     event_chars: int = DEFAULT_EVENT_CHARS,
     final_chars: int = DEFAULT_FINAL_CHARS,
+    error_rule: Optional[dict] = None,
 ) -> Dict[str, Any]:
     lines = text.splitlines()
     doc: Dict[str, Any] = {
@@ -332,12 +431,28 @@ def digest_text(
         "max_line": max((len(l) for l in lines), default=0),
         "counts": {"assistant": 0, "tool": 0, "tool_result": 0, "error": 0},
         "recent": [],
+        "terminal": "",
+        "stderr": [],
         "final": "",
         "final_truncated": False,
     }
+    if fmt != "text":
+        # 2>&1 merges the crash into the log: a node stack trace, a missing
+        # binary, a resolver error. Dropping every non-JSON line meant a run
+        # that never started digested to nothing at all.
+        doc["stderr"] = [
+            _clip(line, event_chars) for line in _non_json_lines(text)[-3:]
+        ]
     if fmt == "jsonl":
         summaries: List[str] = []
         for obj in _iter_json_lines(text):
+            term = _terminal_of(obj)
+            if term:
+                doc["terminal"] = term
+                # summarize_obj already emits an "error:" line for the typed
+                # error events, so only a failed result needs counting here.
+                if term.startswith("result:") and _is_error_terminal(term):
+                    doc["counts"]["error"] += 1
             summary = summarize_obj(obj, event_chars)
             if not summary:
                 continue
@@ -354,10 +469,15 @@ def digest_text(
         doc["recent"] = summaries[-max_events:] if max_events > 0 else []
     elif fmt == "json":
         doc["recent"] = []
+        obj = _load_whole_json(text)
+        if obj is not None:
+            doc["terminal"] = _terminal_of(obj)
+            if _is_error_terminal(doc["terminal"]):
+                doc["counts"]["error"] += 1
     else:
         tail = [l for l in lines if l.strip()][-max_events:] if max_events > 0 else []
         doc["recent"] = [_clip(l, event_chars) for l in tail]
-    final = final_message_from_text(text, fmt, rule)
+    final = final_message_from_text(text, fmt, rule, error_rule)
     if final_chars > 0 and len(final) > final_chars:
         doc["final"] = final[:final_chars].rstrip() + "…"
         doc["final_truncated"] = True
@@ -377,7 +497,10 @@ def digest(
 ) -> Dict[str, Any]:
     spec = _spec(worker, reg)
     fmt = spec.format.get(mode, "text")
-    doc = digest_text(_read(log_path), fmt, spec.final, max_events, event_chars, final_chars)
+    doc = digest_text(
+        _read(log_path), fmt, spec.final, max_events, event_chars, final_chars,
+        error_rule=spec.error,
+    )
     doc["worker"] = worker
     doc["log"] = log_path
     return doc
@@ -385,16 +508,24 @@ def digest(
 
 def render(doc: Dict[str, Any]) -> str:
     c = doc.get("counts") or {}
-    out = [
+    head = (
         "log: %s bytes, %s lines (longest %s), assistant=%s tool=%s tool_result=%s error=%s"
         % (doc.get("bytes"), doc.get("lines"), doc.get("max_line"),
            c.get("assistant", 0), c.get("tool", 0), c.get("tool_result", 0),
            c.get("error", 0))
-    ]
+    )
+    terminal = doc.get("terminal") or ""
+    if terminal:
+        head += ", terminal=%s" % terminal
+    out = [head]
     recent = doc.get("recent") or []
     if recent:
         out.append("recent:")
         out.extend("  | " + line for line in recent)
+    stderr = doc.get("stderr") or []
+    if stderr:
+        out.append("stderr:")
+        out.extend("  | " + line for line in stderr)
     final = doc.get("final") or ""
     if final:
         label = "final (truncated)" if doc.get("final_truncated") else "final"

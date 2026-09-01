@@ -179,6 +179,22 @@ def _mark_missing_usage(st: "CliStatus") -> None:
     st.score = 0.0
 
 
+def _probe_failed(st: "CliStatus", code: Any, detail: Any = None) -> None:
+    """The CLI's own usage probe failed. Say so where recommend() reads it.
+
+    st.error alone is invisible in the recommendation: reasons[] only lists
+    skip_reason, so a 429 on the meter looked like the worker vanished for no
+    stated cause.
+    """
+    if code == 429:
+        st.skip_reason = "usage probe rate-limited"
+    elif code in (401, 403):
+        st.skip_reason = "usage probe unauthorized"
+    else:
+        st.skip_reason = f"usage probe failed (HTTP {code})"
+    st.error = f"usage API HTTP {code}: {detail}"
+
+
 def _env_float(name: str, default: float) -> float:
     try:
         v = float(os.environ.get(name) or default)
@@ -395,7 +411,7 @@ def check_claude() -> CliStatus:
         },
     )
     if code != 200 or not isinstance(data, dict):
-        st.error = f"usage API HTTP {code}: {data}"
+        _probe_failed(st, code, data)
         return st
 
     # profile for email/plan
@@ -588,7 +604,7 @@ def check_codex() -> CliStatus:
         },
     )
     if code != 200 or not isinstance(data, dict):
-        st.error = f"usage API HTTP {code}: {data}"
+        _probe_failed(st, code, data)
         return st
 
     return parse_codex_usage(data, st)
@@ -910,7 +926,10 @@ def parse_grok_usage(
     st.available = True
     limit_f = _num(st, limit_v, "monthlyLimit.val")
     used_f = _num(st, used_v, "used.val")
-    if limit_f is not None and used_f is not None:
+    # A zero monthlyLimit is not "nothing spent, everything free". It is a
+    # meter nobody can read: 0/0 scored as 100% headroom and sent 85 of 106
+    # dispatches to grok. Same guard as kimi's weekly window.
+    if limit_f and used_f is not None and limit_f > 0:
         rem = max(0.0, limit_f - used_f)
         used_pct = (used_f / limit_f * 100.0) if limit_f > 0 else 0.0
         start_ts, end_ts = _parse_iso(str(period_start or "")), _parse_iso(
@@ -1021,7 +1040,7 @@ def check_kimi() -> CliStatus:
         code, data = _http_json("https://api.kimi.com/coding/v1/usages", headers)
 
     if code != 200 or not isinstance(data, dict):
-        st.error = f"usages HTTP {code}: {data}"
+        _probe_failed(st, code, data)
         return st
 
     mcode, me = _http_json("https://api.kimi.com/coding/v1/me", headers)
@@ -1568,6 +1587,11 @@ def annotate_forecasts(statuses: list, now: Optional[float] = None) -> None:
 # buffer is small and hard; a 40-file mechanical rename is large and trivial.
 # ---------------------------------------------------------------------------
 
+# Quota-floor base by task size: how much admissible headroom a worker needs
+# before it may take work of that surface area. Multiplied by the difficulty
+# floor multiplier below, capped at 90.
+BASE_FLOOR: dict[str, int] = {"tiny": 5, "small": 15, "medium": 25, "large": 40}
+
 # difficulty -> (target reasoning effort, quota-floor multiplier, cross-review)
 DIFFICULTY: dict[str, tuple[str, float, bool]] = {
     "trivial": ("low", 0.6, False),
@@ -1631,7 +1655,7 @@ def recommend(
         difficulty = "routine"
     effort, floor_mult, cross_review = DIFFICULTY[difficulty]
     # Harder work needs more headroom: retries are likelier and cost more per turn.
-    base_floor = {"tiny": 5, "small": 15, "medium": 25, "large": 40}.get(task_size, 25)
+    base_floor = BASE_FLOOR.get(task_size, BASE_FLOOR["medium"])
     min_score = min(90.0, base_floor * floor_mult)
     now = _now()
 
@@ -1697,9 +1721,21 @@ def recommend(
     ranked_statuses = sorted(survivors, key=_keys, reverse=True)
 
     claude = by.get("claude")
-    local_labor = True
-    if claude and claude.extras.get("local_labor") is False:
-        local_labor = False
+    # Fail closed. An empty extras dict (the claude probe errored, or claude
+    # was never probed at all because --cli named one worker) used to read as
+    # "not False", so an unreadable meter licensed premium local labor.
+    local_labor = bool(
+        claude is not None
+        and claude.available
+        and claude.extras.get("local_labor") is True
+    )
+    local_labor_reason = ""
+    if claude is None:
+        local_labor_reason = (
+            "claude was not probed: local labor withheld until its meter is read"
+        )
+    elif not local_labor:
+        local_labor_reason = "claude usage unreadable: local labor withheld"
     if claude and any(
         _is_premium_window(w.name) and (w.used_pct or 0) >= 90 for w in claude.windows
     ):
@@ -1743,6 +1779,8 @@ def recommend(
         else:
             reasons.append("no eligible external worker, all exhausted or unavailable")
     if not local_labor:
+        if local_labor_reason:
+            reasons.append(local_labor_reason)
         reasons.append(
             "local premium labor discouraged: keep the main session on supervision "
             "only; prefer a cheap in-session model or an external CLI worker"
@@ -1878,14 +1916,38 @@ def _save_cache(payload: dict) -> None:
                 pass
 
 
+def _refresh_lock_is_stale(lock_dir: Path) -> bool:
+    """True when the lock is older than one cache TTL, so nobody owns it."""
+    try:
+        age = _now() - os.path.getmtime(str(lock_dir))
+    except OSError:
+        return False
+    return age > CACHE_TTL_SEC
+
+
 def _acquire_refresh_lock() -> bool:
-    """Acquire the cache refresh lock, waiting briefly for another refresher."""
+    """Acquire the cache refresh lock, waiting briefly for another refresher.
+
+    A mkdir lock left behind by SIGKILL never expires on its own: one on this
+    machine was 8 days old and cost every cold-cache caller a flat 10 s wait.
+    A lock older than the cache TTL cannot belong to a live refresher (that
+    refresher would have published a cache and released long before), so it is
+    breakable exactly once per attempt.
+    """
     _CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock_dir = _CACHE_DIR / "refresh.lock"
     try:
         os.mkdir(lock_dir, 0o700)
         return True
     except OSError:
+        if _refresh_lock_is_stale(lock_dir):
+            try:
+                os.rmdir(lock_dir)
+                os.mkdir(lock_dir, 0o700)
+                return True
+            except OSError:
+                # Another caller broke or re-took it first; fall through.
+                pass
         deadline = _now() + 10
         while _now() < deadline:
             if _load_cache() is not None:
