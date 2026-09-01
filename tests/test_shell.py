@@ -361,7 +361,7 @@ class DispatchArgvTests(unittest.TestCase):
 
             recorder = te.home / ".ssa-test" / "fake-kimi"
             argv = read_argv_file(recorder / "argv.txt")
-            brief_path = repo / ".ssa-brief.md"
+            brief_path = repo / "BRIEF.md"
             expected = [
                 "-p",
                 f"Read the file {brief_path} and complete the task it describes.",
@@ -391,7 +391,7 @@ class DispatchArgvTests(unittest.TestCase):
             self.assertEqual(rc, 0, err)
             recorder = te.home / ".ssa-test" / "fake-kimi"
             argv = read_argv_file(recorder / "argv.txt")
-            brief_path = repo / ".ssa-brief.md"
+            brief_path = repo / "BRIEF.md"
             expected = [
                 "-p",
                 f"Read the file {brief_path} and complete the task it describes.",

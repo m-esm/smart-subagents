@@ -167,7 +167,7 @@ class ClaudeDispatchTests(unittest.TestCase):
             recorder = te.home / ".ssa-test" / "fake-claude"
             argv = read_argv_file(recorder / "argv.txt")
             supervisor_brief = task_dir / "brief.md"
-            launch_brief = repo / ".ssa-brief.md"
+            launch_brief = repo / "BRIEF.md"
             self.assertTrue(supervisor_brief.is_file())
             self.assertTrue(launch_brief.is_file())
             self.assertEqual(launch_brief.read_text(), supervisor_brief.read_text())
@@ -175,7 +175,7 @@ class ClaudeDispatchTests(unittest.TestCase):
                 ["git", "-C", str(repo), "status", "--porcelain", "-uall"],
                 text=True,
             )
-            self.assertNotIn(".ssa-brief.md", porcelain)
+            self.assertNotIn("BRIEF.md", porcelain)
             self.assertEqual(
                 argv,
                 [

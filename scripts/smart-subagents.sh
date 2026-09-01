@@ -734,13 +734,13 @@ cmd_dispatch() {
 # see it.
 _ssa_stage_worktree_brief() {
   local wt="$1" src="$2"
-  local dest="$wt/.ssa-brief.md" git_dir exclude
+  local dest="$wt/BRIEF.md" git_dir exclude
   git_dir="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null || true)"
   [[ -n "$git_dir" ]] || die "dispatch: cannot resolve git dir for $wt"
   exclude="$git_dir/info/exclude"
   mkdir -p "$(dirname "$exclude")"
-  if ! grep -qxF '/.ssa-brief.md' "$exclude" 2>/dev/null; then
-    printf '%s\n' '/.ssa-brief.md' >>"$exclude"
+  if ! grep -qxF '/BRIEF.md' "$exclude" 2>/dev/null; then
+    printf '%s\n' '/BRIEF.md' >>"$exclude"
   fi
   cp "$src" "$dest" || die "dispatch: cannot copy brief into worktree"
   printf '%s' "$dest"
