@@ -290,7 +290,7 @@ class DispatchArgvTests(unittest.TestCase):
             argv = read_argv_file(recorder / "argv.txt")
             expected = [
                 "-p",
-                *brief_text.rstrip("\n").split("\n"),
+                f"Read the file {repo / 'BRIEF.md'} and complete the task it describes.",
                 "--cwd",
                 str(repo),
                 "--sandbox",

@@ -1,20 +1,10 @@
 # Changelog
 
-## 0.3.3
+## 0.3.4
 
-Worker logs no longer leak into the supervisor context. Measured on
-2026-09-01: grok implement runs left 1-3 MB of NDJSON with single lines up to
-186 KB, and `status` piped the last three raw lines into every poll.
+Five-lens audit of SSA (context bounds, process lifecycle, log parsing,
+routing, security and docs), every finding reproduced before it was fixed.
 
-- New `ssa/digest.py` plus CLI `digest`, `final-message`, `tail-filter`: a
-  byte-capped view of any worker log (event counts, last events clipped, final
-  message clipped), shaped by a per-worker `final` rule in `workers.json`.
-- `status` prints that digest instead of raw lines (3 MB log: 2.4 KB output).
-- `tail --dir` streams one short line per event; `--raw` is the old firehose.
-- `dispatch` writes `last-msg.txt` for every worker (grok, kimi and claude have
-  no `-o` flag) and ends with a clipped final message.
-- Grok drops `--include-partial-messages`: per-token deltas were 43% of the
-  log and the watchdog only needs per-turn growth.
 - Output every command prints is bounded: `verify-summary` clips each section
   to 200 lines and spills the rest to `verify-summary-full.txt` (measured 203
   KB before), `ls` shows the 20 most recent plus everything in flight (`--all`,
@@ -93,6 +83,22 @@ Routing, classification and digest fixes from the 2026-09-01 audit:
   whole brief in argv was readable by every local user through `ps`.
 - New `tests/test_docs_tables.py` gates the hand-written difficulty and
   quota-floor tables in the docs against `DIFFICULTY` / `BASE_FLOOR`.
+
+## 0.3.3
+
+Worker logs no longer leak into the supervisor context. Measured on
+2026-09-01: grok implement runs left 1-3 MB of NDJSON with single lines up to
+186 KB, and `status` piped the last three raw lines into every poll.
+
+- New `ssa/digest.py` plus CLI `digest`, `final-message`, `tail-filter`: a
+  byte-capped view of any worker log (event counts, last events clipped, final
+  message clipped), shaped by a per-worker `final` rule in `workers.json`.
+- `status` prints that digest instead of raw lines (3 MB log: 2.4 KB output).
+- `tail --dir` streams one short line per event; `--raw` is the old firehose.
+- `dispatch` writes `last-msg.txt` for every worker (grok, kimi and claude have
+  no `-o` flag) and ends with a clipped final message.
+- Grok drops `--include-partial-messages`: per-token deltas were 43% of the
+  log and the watchdog only needs per-turn growth.
 
 ## 0.3.2
 
