@@ -76,7 +76,8 @@
       "argv": {
         "implement": [
           "-p", "{prompt}", "--cwd", "{worktree}", "--sandbox", "workspace",
-          "{effort}", "{model}", "--output-format", "json"
+          "{effort}", "{model}", "--output-format", "streaming-messages-json",
+          "--include-partial-messages"
         ],
         "plan": [
           "-p", "{prompt}", "--cwd", "{worktree}", "--sandbox", "workspace",
@@ -84,12 +85,14 @@
         ],
         "resume": [
           "--resume", "{session_id}", "-p", "{prompt}", "--cwd", "{worktree}",
-          "--sandbox", "workspace", "{effort}", "{model}"
+          "--sandbox", "workspace", "{effort}", "{model}",
+          "--output-format", "streaming-messages-json",
+          "--include-partial-messages"
         ]
       },
       "output": { "implement": "none", "plan": "stdout", "resume": "none" },
-      "format": { "implement": "json", "plan": "text", "resume": "json" },
-      "session": { "kind": "json-keys", "keys": ["sessionId", "session_id"] },
+      "format": { "implement": "jsonl", "plan": "text", "resume": "jsonl" },
+      "session": { "kind": "jsonl-keys", "keys": ["sessionId", "session_id"] },
       "effort_ladder": ["low", "medium", "high", "xhigh"],
       "effort_flags": ["--reasoning-effort", "{effort}"],
       "models": {

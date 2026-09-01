@@ -2,8 +2,8 @@
 """Fake grok CLI for characterization tests.
 
 Records its own argv and cwd under $HOME/.ssa-test/fake-grok/, then emits a
-single JSON object that mimics `grok --output-format json` closely enough for
-the smart-subagents.sh session-id scraper to find (or not find) `sessionId`.
+JSON line that mimics `grok --output-format streaming-messages-json` closely
+enough for the session-id scraper to find (or not find) `sessionId`.
 
 Same control-file contract as fake-codex: $HOME/.ssa-test-control.json.
 """

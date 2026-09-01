@@ -554,6 +554,25 @@ class AdapterUnitTests(unittest.TestCase):
                 "th_0123456789abcdef",
             )
 
+    def test_grok_session_scrape_reads_ndjson_session_id(self):
+        # 1788214389-66121: --output-format json buffers the whole turn, so the
+        # watchdog sees a 0-byte log for 600s. streaming-messages-json is NDJSON
+        # with session_id on the init line.
+        with temp_env() as te:
+            reg = self._reg(te)
+            log = te.root / "grok.log"
+            sid = "01a05d64-aeb8-78d2-9d8b-7029a1f44f6f"
+            log.write_text(
+                json.dumps({"type": "system", "subtype": "init", "session_id": sid})
+                + "\n"
+                + json.dumps({"type": "stream_event", "session_id": sid})
+                + "\n"
+            )
+            self.assertEqual(
+                self.adapters.parse_session("grok", str(log), reg=reg),
+                sid,
+            )
+
     def test_capabilities_come_from_the_registry(self):
         with temp_env() as te:
             reg = self._reg(te)
