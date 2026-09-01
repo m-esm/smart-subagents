@@ -8,3 +8,7 @@ cover the two billing shapes the real API is known to return (fields at the
 root vs. nested under `"config"`). No real token, email, or account id
 appears anywhere; `tester@example.invalid` is a placeholder address on a
 reserved-for-documentation domain (RFC 2606).
+
+`zero_limit.json` is the shape the live account actually returns
+(`monthlyLimit.val = 0`, `used.val = 0`): a meter that reports nothing, not a
+month with everything still to spend. It must read as "usage data missing".

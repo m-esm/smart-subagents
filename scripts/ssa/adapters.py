@@ -8,18 +8,34 @@ ever started from this module, and no argv is ever handed to a shell.
 
 from __future__ import annotations
 
-import json
 import re
 import os
 from typing import Any, Dict, List, Optional
 
 from . import registry as registry_mod
+from .jsonutil import iter_json_lines as _iter_json_lines, load_whole_json
 
-RATE_LIMIT_RE = re.compile(r"rate.?limit|429|too many requests|quota exceeded")
+# A bare 429 or 401 matches a UUID segment, a grep hit like
+# "tests/test_lattices.py:429:", an HTTP status quoted in agent prose, or the
+# words "invalid token" inside source the worker was reading. Measured on 60
+# real logs, 14 misclassified on any nonzero exit, benching a healthy CLI for
+# 15 min or 24 h. Both numbers now need a status-ish word in front of them.
+RATE_LIMIT_RE = re.compile(
+    r"usage limit|resource_exhausted|rate.?limit|too many requests"
+    r"|quota exceeded|insufficient_quota|overloaded"
+    r"|(?:status|code|http|error)\D{0,6}429\b"
+)
 AUTH_RE = re.compile(
-    r"unauthori[sz]ed|401|invalid.*(token|credential)|please (log ?in|sign ?in)"
+    r"unauthori[sz]ed|(?:status|code|http|error)\D{0,6}401\b"
+    r"|invalid[ _-](token|credential)|please (log ?in|sign ?in)"
+    r"|token (has )?expired"
 )
 FAILURE_CLASSES = ("rate-limit", "auth", "unknown")
+
+# Where a worker puts the text of a terminal error. Only these strings are
+# classified: a tool_result full of a repo's own source is not evidence about
+# the CLI's account.
+_ERROR_TYPES = ("error", "turn.failed")
 
 
 class AdapterError(Exception):
@@ -192,19 +208,6 @@ def _last_str(obj: dict, keys: List[str], current: str) -> str:
     return out
 
 
-def _iter_json_lines(text: str):
-    for line in text.splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            obj = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(obj, dict):
-            yield obj
-
-
 def parse_session(worker: str, log_path: str, reg=None) -> str:
     """Scrape a resumable session id out of a worker log. "" when there is none."""
     spec = _spec(worker, reg)
@@ -232,22 +235,15 @@ def parse_session(worker: str, log_path: str, reg=None) -> str:
             sid = _last_str(obj, keys, sid)
         return sid
     if kind == "json-keys":
-        stripped = text.strip()
-        candidates = [stripped]
-        if "{" in stripped:
-            candidates.append(stripped[stripped.rfind("{"):])
-        for candidate in candidates:
-            if not candidate:
-                continue
-            try:
-                obj = json.loads(candidate)
-            except ValueError:
-                continue
-            if isinstance(obj, dict):
-                for key in keys:
-                    value = obj.get(key)
-                    if isinstance(value, str) and value:
-                        sid = value
+        # One trailing stderr line after the object defeated every rung of
+        # the old two-candidate ladder, so a perfectly resumable claude run
+        # reported no session id while its final message read fine.
+        obj = load_whole_json(text, keys)
+        if obj is not None:
+            for key in keys:
+                value = obj.get(key)
+                if isinstance(value, str) and value:
+                    sid = value
         return sid
     return ""
 
@@ -278,13 +274,68 @@ def classify_failure(exit_code: int, log_tail: str) -> Optional[str]:
     return "unknown"
 
 
+def _error_text(obj: dict) -> str:
+    """The error message an object carries, "" when it carries none.
+
+    Only terminal error envelopes count. Everything else in a worker log is
+    the repo's own content passing through: a tool_result holding a grep hit
+    on "test_lattices.py:429:", an assistant paragraph quoting an HTTP status,
+    a UUID with "429c" in it. None of that says anything about the account.
+    """
+    t = str(obj.get("type") or "")
+    err = obj.get("error")
+
+    def _msg(value) -> str:
+        if isinstance(value, dict):
+            return str(value.get("message") or "")
+        return str(value or "")
+
+    if t in _ERROR_TYPES:
+        return (
+            _msg(obj.get("message"))
+            or _msg(err)
+            or str(obj.get("content") or "")
+        )
+    if t == "result":
+        subtype = str(obj.get("subtype") or "")
+        if obj.get("is_error") is True or "error" in subtype:
+            result = obj.get("result")
+            return (result if isinstance(result, str) else "") or _msg(err)
+        return ""
+    if t.startswith("item."):
+        item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+        if str(item.get("type") or "") == "error":
+            return str(item.get("message") or "")
+        return ""
+    # kimi's stream-json has no "type" on most lines; its meta frames do, and
+    # only the ones that name an error are evidence (session.resume_hint is
+    # a meta frame too, and it is not a failure).
+    if "error" in t:
+        return _msg(obj.get("message")) or _msg(err) or str(obj.get("content") or "")
+    return ""
+
+
+def error_strings(text: str) -> List[str]:
+    """Every terminal error message in a log, in order."""
+    return [msg for obj in _iter_json_lines(text) if (msg := _error_text(obj))]
+
+
 def classify_log(exit_code: int, log_path: str, lines: int = 40) -> Optional[str]:
-    tail = ""
+    """Classify a run from its log: error envelopes first, raw tail only if none.
+
+    A structured log is read structurally. Falling back to the raw tail for a
+    JSON log is what let a grep hit set a 24 h cooldown on a healthy worker.
+    """
+    text = ""
     try:
         with open(log_path, "r", errors="replace") as fh:
-            tail = "\n".join(fh.read().splitlines()[-lines:])
+            text = fh.read()
     except OSError:
-        tail = ""
+        text = ""
+    has_json = any(True for _ in _iter_json_lines(text))
+    if has_json:
+        return classify_failure(exit_code, "\n".join(error_strings(text)))
+    tail = "\n".join(text.splitlines()[-lines:])
     return classify_failure(exit_code, tail)
 
 

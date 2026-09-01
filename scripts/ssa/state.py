@@ -42,15 +42,22 @@ TRANSITIONS: Dict[str, List[str]] = {
     # "reported" is bookkeeping, not work, so it is reachable from any end of
     # a run: an env-blocked or stalled dispatch still owes the ledger a line,
     # and losing those lines would quietly bias the learned fit.
-    "exited": ["verified", "failed", "inconclusive", "picked", "reported"],
+    # "running" is the re-dispatch edge: the same task dir runs a second time
+    # after a failed or empty first attempt, and the record has to follow it.
+    "exited": ["verified", "failed", "inconclusive", "picked", "running",
+                "aborted", "reported"],
     # A verdict can be revisited: verify runs again after a retry, and the
     # second answer is allowed to differ from the first.
     "verified": ["reported", "picked", "failed", "inconclusive"],
     "failed": ["reported", "picked", "verified", "inconclusive"],
     "inconclusive": ["reported", "picked", "verified", "failed"],
     "reported": [],
-    "aborted": ["reported"],
-    "stalled": ["reported"],
+    # A killed or stalled run still exits: the watchdog stamps the state, then
+    # dispatch writes the exit code and the diff for the same attempt. Both can
+    # also be retried, which goes back through "picked" (task 1788291814-77216
+    # sat at "running" forever because neither edge existed).
+    "aborted": ["reported", "picked", "exited"],
+    "stalled": ["reported", "picked", "running", "exited"],
 }
 STATES = tuple(TRANSITIONS)
 TERMINAL = tuple(s for s, nxt in TRANSITIONS.items() if not nxt)
@@ -231,8 +238,16 @@ def _refresh(task_dir: str, doc: dict) -> None:
         doc["worker"] = worker
 
 
-def transition(task_dir: str, to: str, **fields: Any) -> dict:
-    """Move the task to `to`, or raise. Records an attempt on the way."""
+def transition(task_dir: str, to: str, force: bool = False, **fields: Any) -> dict:
+    """Move the task to `to`, or raise. Records an attempt on the way.
+
+    `force` records an edge the table refuses and stamps `"desync": true` on
+    the record. It exists so a task whose real state has drifted from the
+    record (a killed watchdog, a hand-run retry) ends up with a record that
+    says what happened and admits the table was bypassed, rather than a record
+    frozen at a state the task left hours ago. An unknown state name is still
+    refused: force bypasses the edge, never the vocabulary.
+    """
     if to not in TRANSITIONS:
         raise StateError(
             "unknown state %r; known: %s" % (to, ", ".join(sorted(TRANSITIONS)))
@@ -244,10 +259,15 @@ def transition(task_dir: str, to: str, **fields: Any) -> dict:
         if current not in TRANSITIONS:
             raise StateError("task %s is in unknown state %r" % (task_dir, current))
         if to != current and to not in TRANSITIONS[current]:
-            raise StateError(
-                "illegal transition %s -> %s (legal from %s: %s)"
-                % (current, to, current, ", ".join(TRANSITIONS[current]) or "nothing")
-            )
+            if not force:
+                raise StateError(
+                    "illegal transition %s -> %s (legal from %s: %s)"
+                    % (current, to, current, ", ".join(TRANSITIONS[current]) or "nothing")
+                )
+            doc["desync"] = True
+            desyncs = list(doc.get("desyncs") or [])
+            desyncs.append({"from": current, "to": to, "at": _utc()})
+            doc["desyncs"] = desyncs[-20:]
         _refresh(task_dir, doc)
         changed = to != current
         doc["state"] = to

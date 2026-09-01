@@ -336,6 +336,39 @@ class RegistryValidationTests(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertIn("schema_version", err)
 
+    def test_unknown_format_value_is_rejected(self):
+        with temp_env() as te:
+            rc, out, err = self._validate(
+                te,
+                lambda doc: doc["workers"]["fakecli"]["format"].__setitem__(
+                    "implement", "ndjson"
+                ),
+            )
+            self.assertEqual(rc, 1, out)
+            self.assertIn("format.implement", err)
+
+    def test_unknown_format_mode_is_rejected(self):
+        with temp_env() as te:
+            rc, out, err = self._validate(
+                te,
+                lambda doc: doc["workers"]["fakecli"]["format"].__setitem__(
+                    "verify", "json"
+                ),
+            )
+            self.assertEqual(rc, 1, out)
+            self.assertIn("format names unknown mode", err)
+
+    def test_bad_error_rule_is_rejected_like_a_bad_final_rule(self):
+        with temp_env() as te:
+            rc, out, err = self._validate(
+                te,
+                lambda doc: doc["workers"]["fakecli"].__setitem__(
+                    "error", {"kind": "jsonl-event"}
+                ),
+            )
+            self.assertEqual(rc, 1, out)
+            self.assertIn("error.kind", err)
+
     def test_stdin_transport_may_not_also_pass_the_prompt_as_an_argument(self):
         with temp_env() as te:
             def mutate(doc):
@@ -588,9 +621,16 @@ class AdapterUnitTests(unittest.TestCase):
                     json.dumps({"type": "result", "subtype": "success", "result": "grok final"}),
                 ]),
                 "claude": json.dumps({"type": "result", "subtype": "success", "session_id": "x" * 12, "result": "claude final"}),
+                # Real kimi order: assistant content is a plain string and the
+                # session.resume_hint meta line comes LAST.
                 "kimi": "\n".join([
-                    json.dumps({"type": "session.resume_hint", "session_id": "k" * 12}),
-                    json.dumps({"role": "assistant", "content": [{"type": "text", "text": "kimi final"}]}),
+                    json.dumps({"role": "assistant", "content": "mid",
+                                "tool_calls": [{"function": {"name": "read_file"}}]}),
+                    json.dumps({"role": "tool", "tool_call_id": "c0", "content": "bytes"}),
+                    json.dumps({"role": "assistant", "content": "kimi final"}),
+                    json.dumps({"role": "meta", "type": "session.resume_hint",
+                                "session_id": "k" * 12, "command": "kimi -r " + "k" * 12,
+                                "content": "To resume this session: kimi -r " + "k" * 12}),
                 ]),
             }
             for worker, text in cases.items():
@@ -634,6 +674,206 @@ class AdapterUnitTests(unittest.TestCase):
             self.assertTrue(doc["recent"][0].startswith("tool bash pytest -q"))
             self.assertLessEqual(len(doc["recent"][0]), self.digest.DEFAULT_EVENT_CHARS)
             self.assertNotIn("q" * 200, text)
+
+    # -- failure classification ------------------------------------------
+
+    def _classify(self, te, text, exit_code):
+        log = te.root / "run.log"
+        log.write_text(text)
+        return self.adapters.classify_log(exit_code, str(log))
+
+    def test_codex_turn_failed_quota_message_is_a_rate_limit(self):
+        # The real event. It matched nothing before, so the one genuine limit
+        # event in 60 logs never set a cooldown.
+        with temp_env() as te:
+            line = json.dumps(
+                {
+                    "type": "turn.failed",
+                    "error": {
+                        "message": (
+                            "You've hit your usage limit. Try again later or "
+                            "upgrade your plan."
+                        )
+                    },
+                }
+            )
+            self.assertEqual(self._classify(te, line + "\n", 1), "rate-limit")
+
+    def test_incidental_429_and_401_in_a_json_log_stay_unknown(self):
+        # A UUID segment, a grep hit and an assistant paragraph quoting a
+        # status code. None of it is evidence about the account, and a wrong
+        # class benches a healthy CLI for 15 min or 24 h.
+        with temp_env() as te:
+            text = "\n".join([
+                json.dumps({"type": "assistant", "uuid": "780f1ea4-e7a1-429c-b1f6-0000",
+                            "message": {"role": "assistant", "content": [
+                                {"type": "text", "text": "checking the suite"}]}}),
+                json.dumps({"type": "user", "message": {"role": "user", "content": [
+                    {"type": "tool_result",
+                     "content": "tests/test_lattices.py:429: assert x == y"}]}}),
+                json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+                    {"type": "text",
+                     "text": "LLM proxy is a loopback stub: 401 without task token"}]}}),
+            ])
+            self.assertEqual(self._classify(te, text + "\n", 137), "unknown")
+
+    def test_raw_non_json_log_still_classifies_on_its_tail(self):
+        with temp_env() as te:
+            self.assertEqual(
+                self._classify(te, "HTTP 429 Too Many Requests\n", 1), "rate-limit"
+            )
+
+    def test_grok_error_result_classifies_as_a_rate_limit(self):
+        with temp_env() as te:
+            text = "\n".join([
+                json.dumps({"type": "assistant", "message": {"role": "assistant",
+                            "content": [{"type": "text", "text": "working"}]}}),
+                json.dumps({"type": "result", "subtype": "error", "is_error": True,
+                            "result": "rate limit exceeded"}),
+            ])
+            self.assertEqual(self._classify(te, text + "\n", 1), "rate-limit")
+
+    def test_kimi_resource_exhausted_error_frame_classifies(self):
+        with temp_env() as te:
+            text = "\n".join([
+                json.dumps({"role": "assistant", "content": "starting"}),
+                json.dumps({"role": "meta", "type": "error",
+                            "content": "resource_exhausted"}),
+            ])
+            self.assertEqual(self._classify(te, text + "\n", 1), "rate-limit")
+
+    # -- terminal errors, stderr, whole-file JSON -------------------------
+
+    def test_codex_turn_failed_replaces_a_stale_success_final(self):
+        with temp_env() as te:
+            reg = self._reg(te)
+            log = te.root / "codex.log"
+            log.write_text("\n".join([
+                json.dumps({"type": "item.completed",
+                            "item": {"type": "agent_message", "text": "all tests pass"}}),
+                json.dumps({"type": "turn.failed",
+                            "error": {"message": "You've hit your usage limit."}}),
+            ]) + "\n")
+            final = self.digest.final_message("codex", str(log), reg=reg)
+            self.assertTrue(
+                final.startswith("[run failed: You've hit your usage limit"), final
+            )
+            self.assertIn("all tests pass", final)
+            doc = self.digest.digest("codex", str(log), reg=reg)
+            self.assertEqual(doc["terminal"], "turn.failed")
+
+    def test_grok_error_result_reports_the_failure_as_the_final(self):
+        with temp_env() as te:
+            reg = self._reg(te)
+            log = te.root / "grok.log"
+            log.write_text("\n".join([
+                json.dumps({"type": "assistant", "message": {"role": "assistant",
+                            "content": [{"type": "text", "text": "half done"}]}}),
+                json.dumps({"type": "result", "subtype": "error_during_execution",
+                            "is_error": True, "result": "rate limit exceeded"}),
+            ]) + "\n")
+            final = self.digest.final_message("grok", str(log), reg=reg)
+            self.assertTrue(final.startswith("[run failed: rate limit exceeded"), final)
+            doc = self.digest.digest("grok", str(log), reg=reg)
+            self.assertEqual(doc["terminal"], "result:error_during_execution")
+            self.assertEqual(doc["counts"]["error"], 1)
+
+    def test_a_successful_result_is_not_reported_as_a_failure(self):
+        with temp_env() as te:
+            reg = self._reg(te)
+            log = te.root / "grok.log"
+            log.write_text(json.dumps(
+                {"type": "result", "subtype": "success", "result": "done"}) + "\n")
+            self.assertEqual(self.digest.final_message("grok", str(log), reg=reg), "done")
+            self.assertEqual(
+                self.digest.digest("grok", str(log), reg=reg)["terminal"],
+                "result:success",
+            )
+
+    def test_claude_error_result_is_flagged_only_when_is_error(self):
+        with temp_env() as te:
+            reg = self._reg(te)
+            log = te.root / "claude.log"
+            log.write_text(json.dumps({
+                "type": "result", "subtype": "error_during_execution", "is_error": True,
+                "session_id": "s" * 12, "result": "context window exceeded"}) + "\n")
+            final = self.digest.final_message("claude", str(log), reg=reg)
+            self.assertTrue(final.startswith("[run failed: context window exceeded"), final)
+
+            log.write_text(json.dumps({
+                "type": "result", "subtype": "success", "is_error": False,
+                "session_id": "s" * 12, "result": "claude final"}) + "\n")
+            self.assertEqual(
+                self.digest.final_message("claude", str(log), reg=reg), "claude final"
+            )
+
+    def test_a_crash_on_stderr_survives_the_jsonl_digest(self):
+        with temp_env() as te:
+            reg = self._reg(te)
+            log = te.root / "grok.log"
+            log.write_text(
+                "node:internal/errors\n"
+                "Error: connect ECONNREFUSED 127.0.0.1:443\n"
+                "    at TCPConnectWrap.afterConnect\n"
+            )
+            doc = self.digest.digest("grok", str(log), reg=reg)
+            self.assertEqual(len(doc["stderr"]), 3)
+            self.assertIn("ECONNREFUSED", " ".join(doc["stderr"]))
+            rendered = self.digest.render(doc)
+            self.assertIn("stderr:", rendered)
+            self.assertIn("ECONNREFUSED", rendered)
+
+    def test_claude_session_scrape_survives_a_trailing_stderr_line(self):
+        with temp_env() as te:
+            reg = self._reg(te)
+            log = te.root / "claude.log"
+            sid = "sess_0123456789abcdef"
+            log.write_text(
+                json.dumps({"type": "result", "subtype": "success",
+                            "session_id": sid, "result": "claude final"})
+                + "\nWarning: something wrote to stderr after the object\n"
+            )
+            self.assertEqual(
+                self.adapters.parse_session("claude", str(log), reg=reg), sid
+            )
+            self.assertEqual(
+                self.digest.final_message("claude", str(log), reg=reg), "claude final"
+            )
+
+    def test_pretty_printed_json_still_yields_a_final_for_a_jsonl_worker(self):
+        with temp_env() as te:
+            reg = self._reg(te)
+            log = te.root / "grok.log"
+            log.write_text(json.dumps(
+                {"type": "result", "subtype": "success", "result": "pretty final"},
+                indent=2) + "\n")
+            self.assertEqual(
+                self.digest.final_message("grok", str(log), reg=reg), "pretty final"
+            )
+
+    def test_kimi_digest_reads_assistant_tool_calls_and_results(self):
+        with temp_env() as te:
+            reg = self._reg(te)
+            log = te.root / "kimi.log"
+            log.write_text("\n".join([
+                json.dumps({"role": "assistant", "content": "reading the brief",
+                            "tool_calls": [{"function": {"name": "read_file",
+                                                         "arguments": "{\"path\": \"BRIEF.md\"}"}}]}),
+                json.dumps({"role": "tool", "tool_call_id": "c0", "content": "12345"}),
+                json.dumps({"role": "assistant", "content": "kimi final"}),
+                json.dumps({"role": "meta", "type": "session.resume_hint",
+                            "session_id": "k" * 12,
+                            "content": "To resume this session: kimi -r " + "k" * 12}),
+            ]) + "\n")
+            doc = self.digest.digest("kimi", str(log), reg=reg)
+            self.assertEqual(doc["counts"]["assistant"], 2)
+            self.assertEqual(doc["counts"]["tool"], 1)
+            self.assertEqual(doc["counts"]["tool_result"], 1)
+            self.assertEqual(doc["final"], "kimi final")
+            self.assertNotIn("To resume this session", self.digest.render(doc))
+            self.assertEqual(
+                self.adapters.parse_session("kimi", str(log), reg=reg), "k" * 12
+            )
 
     def test_registry_rejects_a_bad_final_rule(self):
         with temp_env() as te:

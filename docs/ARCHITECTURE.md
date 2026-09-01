@@ -18,7 +18,8 @@ flowchart TB
     CLI --> ST["ssa/state.py<br/>legal transitions only, atomic task.json"]
     REG --> WJ[("workers.json<br/>binary, sandbox, effort ladder, fit prior")]
     ADAPT --> WJ
-    ST --> TD["per-task dir<br/>task.json, events.jsonl, outcome.json, worktree"]
+    ST --> TD["per-task dir<br/>task.json, events.jsonl, outcome.json"]
+    TD -.-> WT["$SSA_WORK_DIR/wt/id<br/>the worktree, a sibling not a child"]
 ```
 
 `scripts/ssa/` is the runtime: Python 3.9, stdlib only, no third-party imports.
@@ -111,10 +112,17 @@ omitted so the line stays readable. The rest that the picture compresses:
   not work: an env-blocked or stalled dispatch still owes the ledger a line, and
   losing those lines would quietly bias the learned fit.
 
+- A run that ends can be run again: `exited -> running` is the re-dispatch edge,
+  and `stalled` and `aborted` reach `picked` (and `exited`, because a killed
+  worker still returns an exit code the record has to carry).
+
 `reported` is the only terminal state. `status` shows both the recorded `state`
 and the `phase` inferred from which artifacts exist on disk: they disagree
 exactly when something went wrong, which is the point. The full table, including
-the `aborted` edge out of every early state, is `TRANSITIONS` in `state.py`.
+the `aborted` edge out of every early state, is `TRANSITIONS` in `state.py`. A
+transition the table refuses is not swallowed: the launcher appends a line to
+`state-desync.txt` and forces the record, which stamps `"desync": true` rather
+than freezing the task at a state it left hours ago.
 
 ## Adding a worker
 

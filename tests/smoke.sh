@@ -135,7 +135,7 @@ make_repo "$init_repo"
 SSA_WORK_DIR="$init_work" SSA_USAGE_PY="$usage_stub" \
   SSA_STUB_ARGV="$init_argv" "$SSA" init --repo "$init_repo" \
   --kind review --difficulty hard >/dev/null
-init_dir="$(find "$init_work" -mindepth 1 -maxdepth 1 -type d | head -1)"
+init_dir="$(find "$init_work" -mindepth 1 -maxdepth 1 -type d -not -name wt | head -1)"
 [[ "$(cat "$init_dir/kind.txt")" == "review" ]] || fail "init kind file"
 grep -qx -- '--task-kind' "$init_argv" || fail "init task kind flag"
 grep -qx -- 'review' "$init_argv" || fail "init task kind value"
@@ -471,7 +471,10 @@ module.annotate_forecasts(statuses, now=now)
 assert statuses[0].windows[0].forecast_exhausts_in_hours == hours
 rec = module.recommend(statuses, task_size="medium", difficulty="routine")
 assert any("at current burn" in r for r in rec["reasons"]), rec["reasons"]
-assert rec["local_labor_ok"] is True
+# No claude status in this fleet, so local labor is withheld: an unread
+# claude meter is never a licence to burn premium quota locally.
+assert rec["local_labor_ok"] is False
+assert any("not probed" in r for r in rec["reasons"]), rec["reasons"]
 PY
 pass "burn forecast stays advisory"
 
@@ -531,7 +534,7 @@ SSA_WORK_DIR="$plan_work" SSA_USAGE_PY="$usage_stub" \
 grep -qx -- '-c' "$plan_codex_argv" || fail "plan effort option"
 grep -qx -- 'model_reasoning_effort=high' "$plan_codex_argv" || \
   fail "plan effort value"
-plan_dir="$(find "$plan_work" -mindepth 1 -maxdepth 1 -type d | head -1)"
+plan_dir="$(find "$plan_work" -mindepth 1 -maxdepth 1 -type d -not -name wt | head -1)"
 [[ "$(cat "$plan_dir/kind.txt")" == "review" ]] || fail "plan kind file"
 grep -qx -- '--task-kind' "$plan_usage_argv" || fail "plan task kind flag"
 pass "plan applies worker args and kind"
@@ -547,7 +550,7 @@ ssa_ops() {
 }
 ssa_ops init --repo "$ops_repo" --size small --difficulty routine --kind impl \
   >/dev/null || fail "ops init"
-ops_dir="$(find "$ops_work" -mindepth 1 -maxdepth 1 -type d | head -1)"
+ops_dir="$(find "$ops_work" -mindepth 1 -maxdepth 1 -type d -not -name wt | head -1)"
 ops_wt="$(cat "$ops_dir/wt.txt")"
 ops_id="$(cat "$ops_dir/task-id.txt")"
 echo "Complete the fixture task.
@@ -633,7 +636,7 @@ pass "cleanup refuses dirty then removes clean"
 bg_dir=""
 ssa_ops init --repo "$ops_repo" --size small --difficulty routine \
   >/dev/null || fail "background init"
-bg_dir="$(find "$ops_work" -mindepth 1 -maxdepth 1 -type d | head -1)"
+bg_dir="$(find "$ops_work" -mindepth 1 -maxdepth 1 -type d -not -name wt | head -1)"
 echo "Complete the fixture task.
 
 ## Structural discovery

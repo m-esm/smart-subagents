@@ -1,5 +1,89 @@
 # Changelog
 
+## 0.3.4
+
+Five-lens audit of SSA (context bounds, process lifecycle, log parsing,
+routing, security and docs), every finding reproduced before it was fixed.
+
+- Output every command prints is bounded: `verify-summary` clips each section
+  to 200 lines and spills the rest to `verify-summary-full.txt` (measured 203
+  KB before), `ls` shows the 20 most recent plus everything in flight (`--all`,
+  `--state`), `gc` summarizes kept dirs by reason (`--verbose` restores the
+  lines), `pick` puts one line on stderr (`--explain` for the JSON), and
+  `outcome.json` carries 25 out-of-scope paths plus a count, with the full list
+  in `verify-out-of-scope.txt`.
+- New `diff --dir DIR [--path P] [--max-bytes N]`: the change as a stat, and
+  one path's unified diff clipped, so the playbook never asks for a bare
+  `git diff`.
+- `dispatch --resume` continues the recorded session id, the mode the agent
+  playbook already described.
+- The background watchdog works again: a stale `exit-code.txt` no longer
+  disarms it on the first tick, and it kills the worker's process group rather
+  than the wrapper's, so a stalled run still writes its exit code, diff stat
+  and final message. A foreground dispatch now records the worker's pid, pgid
+  and start time, so `stop`, `gc` and `status` can see it.
+- The staged `BRIEF.md` is excluded through the worktree's common git dir
+  (`--absolute-git-dir` pointed at a per-worktree dir git never reads) and
+  removed when the run ends, so it can no longer show as untracked, block
+  cleanup, or be swept into a `git add -A`.
+- Task state follows the task: `exited -> running` (re-dispatch), plus edges
+  out of `stalled` and `aborted`. A refused transition is recorded in
+  `state-desync.txt` and forced onto the record instead of being swallowed.
+- Worktrees moved to `$SSA_WORK_DIR/wt/<task id>`, beside the task dir rather
+  than inside it: a worker's cwd can no longer reach `../verify-cmds.txt` or
+  `../scope.txt`. The work dir must be owned by the current user.
+- The secret scan reads untracked files (where a leaked credential actually
+  lands), drops the entropy threshold to 3.5 for 32+ character tokens (a
+  40-char hex token measures 3.84), and records `gitleaks: ran|absent`.
+- Planning panels are checked for writes after the run (`panel-dirty.txt`,
+  `"dirty": true`), report `panel-done.txt` so `gc` cannot delete a live
+  panel's worktree, roll their worktree back if `plan` dies, and give an empty
+  planner a digest instead of a path to 555 KB of NDJSON.
+- `doctor` prints `env_scrub` per worker from the registry and collapses
+  `$HOME` to `~` in credential paths.
+
+Routing, classification and digest fixes from the 2026-09-01 audit:
+
+- Grok billing with `monthlyLimit.val = 0` and `used.val = 0` is an unreadable
+  meter, not 100% headroom. It scored grok at full capacity and sent 85 of 106
+  dispatches there. Same zero guard kimi already had.
+- A failed usage probe names itself: `skip_reason` becomes "usage probe
+  rate-limited" (429), "usage probe unauthorized" (401/403) or "usage probe
+  failed (HTTP n)", so `recommend` says why a CLI dropped out.
+- `local_labor_ok` fails closed. An empty claude `extras` (probe errored, or
+  claude was never probed) read as permission; it now needs an available
+  claude status that actually says `local_labor: true`, with a reason on the
+  recommendation when it does not.
+- Failure classification reads error envelopes, not the raw tail. A bare `429`
+  matched UUID segments and grep hits like `test_lattices.py:429:`, and a bare
+  `401` matched agent prose: 14 of 60 real logs misclassified, benching a
+  healthy CLI for 15 min or 24 h. Both numbers now need a status word in
+  front. Codex's real quota event (`turn.failed` with "You've hit your usage
+  limit") and kimi's `resource_exhausted` frame are recognized at last.
+- A stale `refresh.lock` left by SIGKILL (one was 8 days old) is broken after
+  one cache TTL instead of costing every cold-cache caller a 10 s wait.
+- Optional per-worker `error` rule in `workers.json`, validated like `final`.
+  A run that ended on `turn.failed` or an error result reports
+  `[run failed: ...]` instead of the last successful message, and the digest
+  carries a `terminal` field.
+- Digests keep the last 3 non-JSON lines as `stderr`: a crash whose stack
+  trace went to the merged fd used to digest to nothing.
+- Kimi's `final` rule targets its assistant lines. Its `session.resume_hint`
+  meta line comes last, so the final message was the resume hint. Digests also
+  summarize kimi's `tool_calls` and tool results.
+- Session scraping and final messages share one JSON ladder: one trailing
+  stderr line after claude's object no longer loses the session id, and a
+  pretty-printed object still yields a final message.
+- `format` values in the registry are validated (`jsonl`, `json`, `text`).
+- Security: claude drops `--setting-sources project` (it loaded the target
+  repo's `.claude/settings.json`, whose hooks then ran unsandboxed on this
+  machine) and runs with `env_scrub`, keeping HOME, PATH, TMPDIR and TERM,
+  which is all `claude -p` needs to find its own credentials.
+- Security: grok takes the brief by file reference like kimi and claude. The
+  whole brief in argv was readable by every local user through `ps`.
+- New `tests/test_docs_tables.py` gates the hand-written difficulty and
+  quota-floor tables in the docs against `DIFFICULTY` / `BASE_FLOOR`.
+
 ## 0.3.3
 
 Worker logs no longer leak into the supervisor context. Measured on

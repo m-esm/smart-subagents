@@ -300,6 +300,64 @@ class FitPosteriorTests(IsolatedStateTestCase):
         self.assertFalse(rec["fit"]["codex"]["used"])
 
 
+class LocalLaborTests(IsolatedStateTestCase):
+    """local_labor_ok fails closed: silence is never a licence to burn Opus."""
+
+    def _claude(self, **extras):
+        return make_status(
+            self.m,
+            cli="claude",
+            score=80.0,
+            effective_score=80.0,
+            admission_score=80.0,
+            extras=dict(extras),
+        )
+
+    def test_readable_healthy_claude_allows_local_labor(self):
+        rec = self.m.recommend([self._claude(local_labor=True)], difficulty="routine")
+        self.assertTrue(rec["local_labor_ok"])
+
+    def test_unreadable_claude_meter_withholds_local_labor(self):
+        # The probe errored, so extras is empty. `is not False` used to read
+        # that as permission.
+        rec = self.m.recommend([self._claude()], difficulty="routine")
+        self.assertFalse(rec["local_labor_ok"])
+        self.assertIn("claude usage unreadable: local labor withheld", rec["reasons"])
+
+    def test_unavailable_claude_withholds_local_labor(self):
+        st = self._claude(local_labor=True)
+        st.available = False
+        rec = self.m.recommend([st], difficulty="routine")
+        self.assertFalse(rec["local_labor_ok"])
+
+    def test_claude_absent_entirely_withholds_local_labor(self):
+        # `--cli codex` produces a status list with no claude in it at all.
+        only_codex = [
+            make_status(
+                self.m,
+                cli="codex",
+                score=80.0,
+                effective_score=80.0,
+                admission_score=80.0,
+            )
+        ]
+        rec = self.m.recommend(only_codex, difficulty="routine")
+        self.assertEqual(rec["primary_worker"], "codex")
+        self.assertFalse(rec["local_labor_ok"])
+        self.assertIn(
+            "claude was not probed: local labor withheld until its meter is read",
+            rec["reasons"],
+        )
+
+    def test_premium_window_still_withholds_even_with_the_flag_set(self):
+        st = self._claude(local_labor=True)
+        st.windows = [
+            self.m.Window(name="weekly_Opus", used_pct=92.0, remaining_pct=8.0)
+        ]
+        rec = self.m.recommend([st], difficulty="routine")
+        self.assertFalse(rec["local_labor_ok"])
+
+
 class ReasonsTextTests(IsolatedStateTestCase):
     def test_reasons_include_the_floor_sentence_when_no_worker_clears_it(self):
         thin = self.fleet({"codex": 5.0, "grok": 5.0, "kimi": 5.0})
