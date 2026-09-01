@@ -205,15 +205,15 @@ git -C "$REPO" status --porcelain -uall
 BASE_SHA=$(git -C "$REPO" rev-parse HEAD)
 echo "$BASE_SHA" > "$DIR/base-sha.txt"
 
-# Isolated worktree (writes)
-git -C "$REPO" worktree add "$DIR/wt" -b "ssa/$TASK_ID"
-WT="$DIR/wt"
+# Isolated worktree (writes). It is a sibling of the task dir, never a child:
+# a worker whose cwd is inside it must not reach ../verify-cmds.txt.
+WT="$SSA_WORK_DIR/wt/$TASK_ID"
+git -C "$REPO" worktree add "$WT" -b "ssa/$TASK_ID"
+echo "$WT" > "$DIR/wt.txt"
 ```
 
 - Dirty user tree is fine: worktree is isolated; never `git checkout` in `$REPO`.
 - Non-git path: only with explicit parent approval; use a scratch dir copy.
-- Grok's `--worktree` may replace the manual worktree for grok-only runs; still
-  keep `$DIR` for logs/usage.
 
 **Baseline verify** (once, before dispatch). Write the parent's verify commands
 to `$DIR/verify-cmds.txt`, one per line, then record how each one behaves on the
@@ -311,9 +311,15 @@ fix is the registry entry in `scripts/workers.json`, not a bespoke invocation
 here: a one-off command line is exactly the drift this seam exists to prevent.
 
 Session ids land in `$DIR/session-id.txt`, scraped per the worker's own registry
-rule (`parse-session`). Resume **only** by id, through the `resume` mode. When
-the file is empty, `resume-unavailable.txt` says so and a handoff needs a fresh
-brief instead.
+rule (`parse-session`). Resume **only** by id: `bash "$SSA" dispatch --dir
+"$DIR" --resume` builds the worker's `resume` mode with that id and refuses
+when there is none. `resume-unavailable.txt` says so, and a handoff then needs
+a fresh brief instead.
+
+The brief the worker reads inside its sandbox is `<worktree>/BRIEF.md`, staged
+by `dispatch` from `$DIR/brief.md` and removed when the run ends. Passing
+`--worker` rebinds `$DIR/worker-args.txt` to that CLI's flags, so an override
+after `init` never carries the originally picked CLI's effort or model.
 
 **Long runs:** do not hold the session open on a worker. Detach it:
 
@@ -360,7 +366,7 @@ Run the gate, then read its verdict. Do not hand-roll this in shell:
 
 ```bash
 bash "$SSA" verify --dir "$DIR"   # exit 0 pass, 1 fail, 2 inconclusive
-cat "$DIR/outcome.json"
+bash "$SSA" status --dir "$DIR"   # verdict line, bounded; never cat outcome.json
 ```
 
 `verify` runs every line of `$DIR/verify-cmds.txt` in the worktree, compares each
@@ -386,10 +392,15 @@ re-run, or report `partial` with the reason.
 Then read the diff yourself. The gate is mechanical, judgment is not:
 
 ```bash
-bash "$SSA" verify-summary --dir "$DIR"   # branch, status, stat, name-status
-git -C "$WT" diff "$BASE_SHA"             # skim; never dump huge blobs
-git -C "$REPO" status --porcelain         # catch leakage outside the worktree
+bash "$SSA" verify-summary --dir "$DIR"           # branch, status, stat, name-status (clipped)
+bash "$SSA" diff --dir "$DIR"                     # the whole change as a stat
+bash "$SSA" diff --dir "$DIR" --path src/foo.ts   # one path, clipped to 20 KB
+git -C "$REPO" status --porcelain                 # catch leakage outside the worktree
 ```
+
+Never run a bare `git diff` over a worker's change: it is unbounded, and every
+byte of it lands in this context. Read the stat, then drill into the paths that
+matter one at a time.
 
 Empty diff after a claimed success is a hard fail. Reject surprise lockfile or
 dependency bumps, binaries, debug litter, and rewrites of out-of-scope files even
@@ -514,8 +525,9 @@ bash "$SSA" gc --older-than 7      # dry run by default, --no-dry-run to delete
 Never clean up an implementation worktree in the same breath as reporting: the
 parent still needs it to merge, and `cleanup` deleting a branch with unique
 commits is exactly the failure it refuses by default. Planning panels are
-different: their worktrees are read-only scratch and `gc` collects them once
-their plan files exist.
+different: their worktrees are scratch the planners are expected to leave
+untouched (`plan` checks afterwards and reports `"dirty": true` when they did
+not), and `gc` collects them once the panel reports `panel-done.txt`.
 
 Final message to parent:
 

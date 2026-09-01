@@ -33,6 +33,22 @@ SSA_LEDGER="${SSA_LEDGER:-${SSA_STATE_DIR}/outcomes.jsonl}"
 die() { echo "smart-subagents: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing $1"; }
 
+# Briefs, worktrees and worker logs live here. On a shared /tmp another user
+# can own (or pre-create) the path, and `chmod 700` on someone else's dir is a
+# silent no-op, so ownership is checked rather than assumed.
+_ssa_ensure_work_dir() {
+  mkdir -p "$SSA_WORK_DIR" 2>/dev/null || die "cannot create $SSA_WORK_DIR"
+  [[ -O "$SSA_WORK_DIR" ]] || die "$SSA_WORK_DIR is not owned by this user; refusing to write briefs and worktrees into it (set SSA_WORK_DIR to a path you own)"
+  chmod 700 "$SSA_WORK_DIR" 2>/dev/null || true
+}
+
+# Worktrees are siblings of the task dirs, never children of one: a worker with
+# its cwd in the worktree must not be able to reach ../verify-cmds.txt,
+# ../scope.txt or ../outcome.json and forge its own verification.
+_ssa_wt_path() {
+  printf '%s/wt/%s' "$SSA_WORK_DIR" "$1"
+}
+
 # Some clones never return from `git status --porcelain -uall` (untracked
 # explosion) or return a list so large the command is unusable. Probe with a
 # timeout and an untracked cap, then refuse rather than hang. `status -uno`
@@ -92,6 +108,24 @@ if dest:
         out.write(text)
 sys.exit(0)
 PY
+}
+
+# Every byte printed by a command lands in the supervisor's context, so any
+# output whose size the repo controls is clipped and spilled to a file.
+# _ssa_clip_file SRC LABEL MAX FULL -> print LABEL and at most MAX lines.
+_ssa_clip_file() {
+  local src="$1" label="$2" max="${3:-200}" full="$4" total=0
+  printf '### %s\n' "$label"
+  [[ -f "$src" ]] || return 0
+  total="$(wc -l <"$src" | tr -d ' ')"
+  [[ "$total" =~ ^[0-9]+$ ]] || total=0
+  if [[ -n "$full" ]]; then
+    { printf '### %s\n' "$label"; cat "$src"; } >>"$full"
+  fi
+  head -n "$max" "$src"
+  if (( total > max )); then
+    printf '(+%s more lines, full text in %s)\n' "$(( total - max ))" "$full"
+  fi
 }
 
 # Implement briefs must declare how structural discovery happened. Workers
@@ -207,8 +241,37 @@ _ssa_event() {
 _ssa_state() {
   local dir="$1" to="$2"; shift 2
   [[ -d "$dir" ]] || return 0
-  _ssa transition --dir "$dir" --to "$to" --quiet "$@" \
-    || echo "smart-subagents: state refused ->$to for $dir" >&2
+  if _ssa transition --dir "$dir" --to "$to" --quiet "$@" 2>/dev/null; then
+    return 0
+  fi
+  # A retry re-enters the lifecycle through "picked": that edge exists from
+  # every end of a run, so an ordinary second dispatch is not a desync.
+  if [[ "$to" == "running" ]] \
+      && _ssa transition --dir "$dir" --to picked --quiet 2>/dev/null \
+      && _ssa transition --dir "$dir" --to "$to" --quiet "$@" 2>/dev/null; then
+    return 0
+  fi
+  # Swallowing the refusal is what froze 1788291814-77216 at "running" forever.
+  # Record the drift, then force the record to say what actually happened.
+  printf '%s refused %s -> %s\n' "$(_utc)" "$(_task_state "$dir")" "$to" \
+    >>"$dir/state-desync.txt"
+  echo "smart-subagents: state refused ->$to for $dir (recorded in $dir/state-desync.txt)" >&2
+  _ssa_state_force "$dir" "$to" || true
+}
+
+# The forced write. cli.py has no --force flag, so the transition goes through
+# ssa.state directly; unknown state names are still refused there.
+_ssa_state_force() {
+  local dir="$1" to="$2"
+  python3 - "$SSA_CLI_PY" "$dir" "$to" <<'PY' 2>/dev/null || return 1
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(sys.argv[1]))))
+from ssa import state  # noqa: E402
+
+state.transition(sys.argv[2], sys.argv[3], force=True)
+PY
 }
 
 # --- small artifact helpers ---------------------------------------------------
@@ -271,7 +334,12 @@ _worker_state() {
   if _pid_alive "$pid"; then
     start="$(_read1 "$dir/worker-start.txt")"
     now="$(_pid_start "$pid")"
-    if [[ -n "$start" && -n "$now" && "$start" != "$now" ]]; then
+    # No readable start time for a live pid means we cannot prove the process
+    # is still ours, and "probably ours" is how a stranger's pid gets killed.
+    if [[ -z "$now" ]]; then
+      printf 'reused'; return 0
+    fi
+    if [[ -n "$start" && "$start" != "$now" ]]; then
       printf 'reused'; return 0
     fi
     printf 'running'; return 0
@@ -334,11 +402,16 @@ _INIT_DIR=""
 _INIT_ID=""
 
 _init_rollback() {
-  local rc=$?
+  local rc=$? clean=1 st
   [[ -n "$_INIT_WT" ]] || exit "$rc"
+  st="$(mktemp "${TMPDIR:-/tmp}/ssa-rollback-status.XXXXXX")"
+  if ! _ssa_git_status_porcelain_uall "$_INIT_WT" "$st" "init-rollback" 2>/dev/null \
+      || [[ -s "$st" ]]; then
+    clean=0
+  fi
+  rm -f "$st"
   # Only ever remove a worktree this call created and nobody has written to.
-  if [[ -d "$_INIT_WT" ]] \
-      && [[ -z "$(git -C "$_INIT_WT" status --porcelain -uall 2>/dev/null || echo dirty)" ]]; then
+  if [[ -d "$_INIT_WT" ]] && (( clean == 1 )); then
     git -C "$_INIT_REPO" worktree remove "$_INIT_WT" >/dev/null 2>&1 || true
     git -C "$_INIT_REPO" branch -D "ssa/${_INIT_ID}" >/dev/null 2>&1 || true
     git -C "$_INIT_REPO" worktree prune >/dev/null 2>&1 || true
@@ -374,8 +447,7 @@ cmd_init() {
     exit 1
   fi
   task_id="$(date +%s)-$$"
-  mkdir -p "$SSA_WORK_DIR"
-  chmod 700 "$SSA_WORK_DIR" 2>/dev/null || true
+  _ssa_ensure_work_dir
   dir="${SSA_WORK_DIR}/${task_id}"
   mkdir -m 700 -p "$dir"
   mv "$status_tmp" "$dir/repo-status.txt"
@@ -397,8 +469,10 @@ cmd_init() {
     >"$dir/usage.json" &
   local usage_pid=$!
 
-  local wt="$dir/wt"
+  local wt
+  wt="$(_ssa_wt_path "$task_id")"
   if git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    mkdir -m 700 -p "$(dirname "$wt")"
     # git worktree prints progress on stdout, keep JSON clean
     git -C "$repo" worktree add "$wt" -b "ssa/${task_id}" >/dev/null 2>&1 \
       || die "init: worktree add failed for $repo"
@@ -476,7 +550,8 @@ PY
 }
 
 cmd_pick() {
-  local size="medium" out="" preferred="" difficulty="routine" kind="default" fresh=()
+  local size="medium" out="" preferred="" difficulty="routine" kind="default" explain=""
+  local fresh=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --size) size="${2:-}"; shift 2 ;;
@@ -485,24 +560,31 @@ cmd_pick() {
       --out) out="${2:-}"; shift 2 ;;
       --prefer) preferred="${2:-}"; shift 2 ;;
       --fresh) fresh=(--fresh); shift ;;
+      --explain) explain=1; shift ;;
       *) die "pick: unknown arg $1" ;;
     esac
   done
   need python3
   local tmp
-  tmp="$(mktemp)"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/ssa-pick.XXXXXX")"
   # bash 3.2 + set -u: an empty array must be expanded defensively
-  python3 "$USAGE_PY" --json --task-size "$size" --difficulty "$difficulty" \
-    --task-kind "$kind" \
-    ${fresh[@]+"${fresh[@]}"} >"$tmp"
+  if ! python3 "$USAGE_PY" --json --task-size "$size" --difficulty "$difficulty" \
+      --task-kind "$kind" \
+      ${fresh[@]+"${fresh[@]}"} >"$tmp"; then
+    rm -f "$tmp"
+    die "pick: usage preflight failed"
+  fi
   if [[ -n "$out" ]]; then
     mkdir -p "$out"
     cp "$tmp" "$out/usage.json"
   fi
-  python3 - "$tmp" "$preferred" <<'PY'
+  # stderr is read by a supervisor, so it is one line unless asked otherwise:
+  # the full recommendation is 2 KB+ of JSON nobody reads on the happy path.
+  python3 - "$tmp" "$preferred" "${explain:-0}" <<'PY'
 import json, sys
 usage = json.loads(open(sys.argv[1]).read())
 preferred = (sys.argv[2] or "").strip().lower()
+explain = sys.argv[3] == "1"
 rec = usage.get("recommendation") or {}
 ranked = rec.get("ranked") or []
 eligible = {r["cli"] for r in ranked}
@@ -514,7 +596,16 @@ elif primary:
 else:
     pick = ""
 print(pick or "none")
-print(json.dumps(rec, indent=2), file=sys.stderr)
+if explain:
+    print(json.dumps(rec, indent=2), file=sys.stderr)
+else:
+    score = next((r.get("score") for r in ranked if r.get("cli") == pick), None)
+    fallbacks = [c for c in (rec.get("fallback_workers") or []) if c != pick]
+    print(
+        "primary=%s score=%s fallbacks=%s local_labor_ok=%s (--explain for the full JSON)"
+        % (pick or "none", score, ",".join(fallbacks) or "-", rec.get("local_labor_ok")),
+        file=sys.stderr,
+    )
 PY
   rm -f "$tmp"
 }
@@ -619,12 +710,13 @@ PY
 }
 
 cmd_dispatch() {
-  local dir="" worker="" background=""
+  local dir="" worker="" background="" mode="implement" resume=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dir) dir="${2:-}"; shift 2 ;;
       --worker) worker="${2:-}"; shift 2 ;;
       --background|--bg) background=1; shift ;;
+      --resume) resume=1; mode="resume"; shift ;;
       *) die "dispatch: unknown arg $1" ;;
     esac
   done
@@ -644,13 +736,35 @@ cmd_dispatch() {
   [[ -n "$wt" && -d "$wt" ]] || die "dispatch: missing worktree ($dir/wt.txt)"
   _ssa_bind_worker_args "$dir" "$worker" || die "dispatch: worker-args do not match $worker"
 
+  # Resume is by session id only: a worker that emitted none cannot be resumed,
+  # and a handoff there needs a fresh brief instead.
+  local resume_sid=""
+  if [[ -n "$resume" ]]; then
+    [[ ! -f "$dir/resume-unavailable.txt" ]] \
+      || die "dispatch: $dir has no resumable session (resume-unavailable.txt)"
+    resume_sid="$(_read1 "$dir/session-id.txt")"
+    [[ -n "$resume_sid" ]] || die "dispatch: no session id in $dir/session-id.txt"
+  fi
+
   if [[ -n "$background" ]]; then
-    _dispatch_background "$dir" "$worker"
+    _dispatch_background "$dir" "$worker" "$resume"
     return $?
   fi
 
   # Quota snapshot before the run: the ledger needs both ends to attribute cost.
+  # init's usage.json is minutes to hours old by dispatch time, so the ledger
+  # was charging this run for quota someone else spent. Take a fresh one unless
+  # the snapshot is already current or the environment forbids the network.
+  local usage_age=999999
   if [[ -f "$dir/usage.json" ]]; then
+    usage_age=$(( $(_now) - $(_mtime "$dir/usage.json") ))
+  fi
+  if [[ "${SSA_NO_QUOTA_SNAPSHOT:-}" != "1" && -f "$USAGE_PY" ]] \
+      && (( usage_age >= 60 )); then
+    python3 "$USAGE_PY" --json --fresh >"$dir/quota-before.json" 2>/dev/null || true
+    [[ -s "$dir/quota-before.json" ]] || rm -f "$dir/quota-before.json"
+  fi
+  if [[ ! -s "$dir/quota-before.json" && -f "$dir/usage.json" ]]; then
     cp "$dir/usage.json" "$dir/quota-before.json" 2>/dev/null || true
   fi
 
@@ -662,10 +776,11 @@ cmd_dispatch() {
 
   # Difficulty-derived flags come from the recommender, never re-derived here;
   # the registry decides where in the argv they land.
-  _ssa_build "$worker" implement \
+  _ssa_build "$worker" "$mode" \
     --worktree "$wt" --brief "$launch_brief" --output "$dir/last-msg.txt" \
     --args-file "$dir/worker-args.txt" \
-    || die "dispatch: cannot build a command for worker $worker"
+    ${resume_sid:+--session-id "$resume_sid"} \
+    || die "dispatch: cannot build a $mode command for worker $worker"
 
   # Capability, not a name: a worker with no sandbox cannot be trusted with a
   # write dispatch just because a worktree looks like containment.
@@ -679,14 +794,27 @@ cmd_dispatch() {
   fi
   [[ -n "$_BC_BIN" && -x "$_BC_BIN" ]] || die "$worker not found at ${_BC_BIN:-<unresolved>}"
 
-  _ssa_state "$dir" running --worker "$worker" --pid "$$"
-  _ssa_event "$dir" --phase running --worker "$worker" --pid "$$"
-
+  # Job control gives the worker its own process group, so `stop` and the
+  # watchdog can end the worker without taking this wrapper (and the artifacts
+  # it still owes) down with it. A foreground dispatch used to record no pid at
+  # all, which left stop and gc blind to a live worker.
+  local wpid=0 wpgid=""
+  set -m
   if [[ -n "$_BC_STDIN" ]]; then
-    _ssa_run_worker <"$_BC_STDIN" >"$log" 2>&1 || rc=$?
+    _ssa_run_worker <"$_BC_STDIN" >"$log" 2>&1 &
   else
-    _ssa_run_worker >"$log" 2>&1 || rc=$?
+    _ssa_run_worker </dev/null >"$log" 2>&1 &
   fi
+  wpid=$!
+  set +m
+  echo "$wpid" >"$dir/worker.pid"
+  _pid_start "$wpid" >"$dir/worker-start.txt"
+  wpgid="$(_pgid_of "$wpid")"
+  echo "$wpgid" >"$dir/worker.pgid"
+  _ssa_state "$dir" running --worker "$worker" --pid "$wpid"
+  _ssa_event "$dir" --phase running --worker "$worker" --pid "$wpid"
+
+  wait "$wpid" || rc=$?
 
   sid="$(_ssa parse-session --worker "$worker" --log "$log" 2>/dev/null || true)"
   failure="$(_classify_failure "$rc" "$log")"
@@ -703,12 +831,15 @@ cmd_dispatch() {
   if [[ -z "$sid" ]]; then
     echo "worker did not emit a resumable session id" >"$dir/resume-unavailable.txt"
   fi
+  # The staged brief is a launch path, not part of the change: remove it before
+  # anything reads the tree, so it can never reach a diff or a `git add -A`.
+  rm -f "$wt/BRIEF.md"
   # Diff stat for supervisor
   local base
   base="$(cat "$dir/base-sha.txt" 2>/dev/null || true)"
   if [[ -n "$base" ]]; then
     git -C "$wt" diff --stat "$base" >"$dir/diff-stat.txt" 2>/dev/null || true
-    git -C "$wt" status --porcelain -uall >"$dir/wt-status.txt" 2>/dev/null || true
+    _ssa_git_status_porcelain_uall "$wt" "$dir/wt-status.txt" "dispatch" 2>/dev/null || true
   fi
   # Quota snapshot after the run. This is the one place `|| true` on a network
   # call is right: a dead network must not turn a finished run into a failure.
@@ -771,9 +902,15 @@ _ssa_log_digest() {
 # see it.
 _ssa_stage_worktree_brief() {
   local wt="$1" src="$2"
-  local dest="$wt/BRIEF.md" git_dir exclude
-  git_dir="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null || true)"
-  [[ -n "$git_dir" ]] || die "dispatch: cannot resolve git dir for $wt"
+  local dest="$wt/BRIEF.md" git_dir exclude common
+  # --absolute-git-dir in a linked worktree is .git/worktrees/<id>, whose
+  # info/exclude git never reads: the brief then showed up untracked in every
+  # dispatch, which blocked cleanup and let `git add -A` commit it. The shared
+  # info/exclude lives under the common dir, which may be relative to $wt.
+  common="$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null || true)"
+  [[ -n "$common" ]] || die "dispatch: cannot resolve git dir for $wt"
+  git_dir="$(cd "$wt" && cd "$common" && pwd)" \
+    || die "dispatch: cannot resolve git dir for $wt"
   exclude="$git_dir/info/exclude"
   mkdir -p "$(dirname "$exclude")"
   if ! grep -qxF '/BRIEF.md' "$exclude" 2>/dev/null; then
@@ -813,17 +950,24 @@ _watchdog_should_exit() {
   # cmd_dispatch writes exit-code.txt when the worker returns. After that the
   # run is finished even if the bg-run wrapper is still alive (it waits on
   # this watchdog). Stalling then is 1788154673-70654 / 1788215189-74491:
-  # reported -> stalled.
-  local dir="$1"
-  [[ -f "$dir/exit-code.txt" || -f "$dir/stopped.txt" ]]
+  # reported -> stalled. Only THIS run's exit code counts: a leftover file from
+  # an earlier dispatch used to disarm the watchdog on the first tick, which
+  # left every re-dispatch unsupervised.
+  local dir="$1" ec started
+  [[ ! -f "$dir/stopped.txt" ]] || return 0
+  [[ -f "$dir/exit-code.txt" ]] || return 1
+  ec="$(_mtime "$dir/exit-code.txt")"
+  started="$(_mtime "$dir/started-at.txt")"
+  (( ec >= started ))
 }
 
 _watchdog() {
   # Stall detection is two signals, not one: a worker that is thinking still
   # writes to the log, and a worker that is editing still moves the tree.
-  # TERM is ignored because the watchdog shares the worker process group;
-  # cmd_bg_run reaps it with KILL after dispatch. Do not trap KILL.
-  local dir="$1" leader="$2" pgid="$3"
+  # TERM is ignored because the watchdog shares the wrapper's process group and
+  # must outlive a TERM aimed at the run; cmd_bg_run reaps it with KILL after
+  # dispatch. Do not trap KILL.
+  local dir="$1" leader="$2" pgid=""
   local interval="${SSA_WATCHDOG_INTERVAL_SECS:-30}"
   local stall="${SSA_STALL_SECS:-600}"
   local deadline="${SSA_DEADLINE_SECS:-0}"
@@ -862,31 +1006,44 @@ _watchdog() {
   _ssa_event "$dir" --phase stalled --failure-class "$reason" \
     --artifact "$dir/stalled.txt"
   _ssa_state "$dir" stalled --failure-class "$reason"
+  # The worker's own group, written by cmd_dispatch. Killing the caller's group
+  # instead took the bg-run wrapper with it, so a stalled run never produced an
+  # exit code, a diff stat or a final message.
+  pgid="$(_read1 "$dir/worker.pgid" "$(_read1 "$dir/worker.pid")")"
+  [[ -n "$pgid" ]] || exit 0
+  [[ "$pgid" != "$(_pgid_of "$$")" ]] || exit 0
   _kill_group "$pgid"
 }
 
 _dispatch_background() {
-  local dir="$1" worker="$2" pid="" waited=0
-  local state
+  local dir="$1" worker="$2" resume="${3:-}" pid="" waited=0
+  local state resume_arg=()
+  [[ -z "$resume" ]] || resume_arg=(--resume)
   state="$(_worker_state "$dir")"
   [[ "$state" != "running" ]] || \
     die "dispatch: a worker is already running for $dir (pid $(_read1 "$dir/worker.pid"))"
+  # Every artifact of the previous run goes, not just the pid files: a stale
+  # exit-code.txt disarms the watchdog, and a stale last-msg / diff-stat /
+  # session id reads as this run's result.
   rm -f "$dir/worker.pid" "$dir/worker.pgid" "$dir/worker-start.txt" \
-    "$dir/stalled.txt" "$dir/stopped.txt"
+    "$dir/stalled.txt" "$dir/stopped.txt" "$dir/exit-code.txt" \
+    "$dir/last-msg.txt" "$dir/diff-stat.txt" "$dir/wt-status.txt"
+  # A resume needs the id it is resuming, so that one file survives.
+  [[ -n "$resume" ]] || rm -f "$dir/session-id.txt" "$dir/resume-unavailable.txt"
   if command -v setsid >/dev/null 2>&1; then
     setsid bash "$SSA_SELF" bg-run --dir "$dir" --worker "$worker" \
-      >>"$dir/bg.log" 2>&1 &
+      ${resume_arg[@]+"${resume_arg[@]}"} >>"$dir/bg.log" 2>&1 &
   else
     # bash 3.2 on macOS has no setsid: job control gives the child its own
     # process group, nohup keeps it alive past this shell.
     set -m
     nohup bash "$SSA_SELF" bg-run --dir "$dir" --worker "$worker" \
-      >>"$dir/bg.log" 2>&1 &
+      ${resume_arg[@]+"${resume_arg[@]}"} >>"$dir/bg.log" 2>&1 &
     set +m
     disown 2>/dev/null || true
   fi
-  # The wrapper records its own pid, which is the one worth killing.
-  while (( waited < 100 )); do
+  # cmd_dispatch records the worker's own pid, which is the one worth killing.
+  while (( waited < 200 )); do
     pid="$(_read1 "$dir/worker.pid")"
     [[ -z "$pid" ]] || break
     sleep 0.1
@@ -902,26 +1059,27 @@ _dispatch_background() {
 cmd_bg_run() {
   # Internal: the detached wrapper. Records identity, arms the watchdog, runs
   # the ordinary foreground dispatch, then reaps the watchdog.
-  local dir="" worker="" rc=0 pgid wd=""
+  local dir="" worker="" rc=0 wd="" resume_arg=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dir) dir="${2:-}"; shift 2 ;;
       --worker) worker="${2:-}"; shift 2 ;;
+      --resume) resume_arg=(--resume); shift ;;
       *) die "bg-run: unknown arg $1" ;;
     esac
   done
   [[ -n "$dir" && -d "$dir" ]] || die "bg-run: --dir required"
-  echo "$$" >"$dir/worker.pid"
-  _pid_start "$$" >"$dir/worker-start.txt"
-  pgid="$(_pgid_of "$$")"
-  echo "$pgid" >"$dir/worker.pgid"
+  # worker.pid is the WORKER's pid, written by cmd_dispatch once the job is up.
+  # Recording this wrapper there made stop and the watchdog kill the wrapper,
+  # so a killed run wrote no exit code, no diff stat and no final message.
   _utc >"$dir/started-at.txt"
-  _watchdog "$dir" "$$" "$pgid" &
+  _watchdog "$dir" "$$" &
   wd=$!
-  cmd_dispatch --dir "$dir" --worker "$worker" || rc=$?
-  # The watchdog traps TERM (same process group as the worker). TERM therefore
-  # never reaps it, and wait deadlocks until the stall timer fires on an
-  # already-exited task. KILL is the only signal it cannot ignore.
+  cmd_dispatch --dir "$dir" --worker "$worker" \
+    ${resume_arg[@]+"${resume_arg[@]}"} || rc=$?
+  # The watchdog traps TERM (it must outlive a TERM aimed at this run). TERM
+  # therefore never reaps it, and wait deadlocks until the stall timer fires on
+  # an already-exited task. KILL is the only signal it cannot ignore.
   kill -KILL "$wd" 2>/dev/null || true
   wait "$wd" 2>/dev/null || true
   return "$rc"
@@ -986,28 +1144,38 @@ cmd_stop() {
 # --- ls / status: what is on this machine right now ---------------------------
 
 cmd_ls() {
+  # A machine that has been dispatching for a month holds a hundred task dirs,
+  # and printing all of them is 12 KB of context for the two that are live.
+  # Default: the recent ones plus everything still in flight.
+  local all="" want_state="" limit="${SSA_LS_LIMIT:-20}"
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --all) all=1; shift ;;
+      --state) want_state="${2:-}"; shift 2 ;;
       *) die "ls: unknown arg $1" ;;
     esac
   done
   [[ -d "$SSA_WORK_DIR" ]] || { echo "no task dirs under $SSA_WORK_DIR"; return 0; }
-  local now d id age repo worker class phase state diff rows=0
+  local now d id age repo worker class phase state diff hidden=0 shown=0
+  local tmp live
   now="$(_now)"
-  printf '%-18s %5s %-16s %-7s %-22s %-9s %-12s %s\n' \
-    TASK AGE REPO WORKER SIZE/DIFF/KIND PHASE STATE DIFF
+  tmp="$(mktemp "${TMPDIR:-/tmp}/ssa-ls.XXXXXX")"
   for d in "$SSA_WORK_DIR"/*; do
     [[ -d "$d" ]] || continue
     id="$(basename "$d")"
+    [[ "$id" != "wt" ]] || continue
     age="$(_age_human $(( now - $(_mtime "$d") )) )"
     repo="$(basename "$(_read1 "$d/repo.txt" '?')")"
     if [[ "$id" == plan-* ]]; then
       local plans
       plans="$(find "$d" -maxdepth 1 -name 'plan-*.md' 2>/dev/null | wc -l | tr -d ' ')"
-      printf '%-18s %5s %-16s %-7s %-22s %-9s %-12s %s\n' \
-        "$id" "$age" "$repo" "panel" "$(_task_class "$d")" "panel" "-" \
-        "${plans} plan(s)"
-      rows=$(( rows + 1 ))
+      state="panel"
+      live=0
+      [[ -f "$d/panel-done.txt" ]] || live=1
+      printf '%s\t%s\t%s\n' "$(_mtime "$d")" "$live:$state" \
+        "$(printf '%-18s %5s %-16s %-7s %-22s %-9s %-12s %s' \
+          "$id" "$age" "$repo" "panel" "$(_task_class "$d")" "panel" "-" \
+          "${plans} plan(s)")" >>"$tmp"
       continue
     fi
     [[ -f "$d/task-id.txt" ]] || continue
@@ -1017,11 +1185,31 @@ cmd_ls() {
     state="$(_task_state "$d")"
     diff="$(_diff_summary "$d")"
     [[ ! -f "$d/stalled.txt" ]] || phase="${phase}!"
-    printf '%-18s %5s %-16s %-7s %-22s %-9s %-12s %s\n' \
-      "$id" "$age" "$repo" "$worker" "$class" "$phase" "$state" "$diff"
-    rows=$(( rows + 1 ))
+    # In flight: still worth showing however old the dir is.
+    live=0
+    case "$state" in running|picked|briefed) live=1 ;; esac
+    case "$phase" in running|briefed) live=1 ;; esac
+    printf '%s\t%s\t%s\n' "$(_mtime "$d")" "$live:$state" \
+      "$(printf '%-18s %5s %-16s %-7s %-22s %-9s %-12s %s' \
+        "$id" "$age" "$repo" "$worker" "$class" "$phase" "$state" "$diff")" >>"$tmp"
   done
-  (( rows > 0 )) || echo "(none)"
+  printf '%-18s %5s %-16s %-7s %-22s %-9s %-12s %s\n' \
+    TASK AGE REPO WORKER SIZE/DIFF/KIND PHASE STATE DIFF
+  local key row
+  while IFS=$'\t' read -r _ key row; do
+    if [[ -n "$want_state" && "${key#*:}" != "$want_state" ]]; then
+      continue
+    fi
+    if [[ -z "$all" ]] && (( shown >= limit )) && [[ "${key%%:*}" != "1" ]]; then
+      hidden=$(( hidden + 1 ))
+      continue
+    fi
+    printf '%s\n' "$row"
+    shown=$(( shown + 1 ))
+  done < <(sort -rn -k1,1 "$tmp")
+  rm -f "$tmp"
+  (( shown > 0 )) || echo "(none)"
+  (( hidden == 0 )) || echo "… $hidden older tasks hidden (--all)"
 }
 
 cmd_status() {
@@ -1143,6 +1331,21 @@ docs, and plan strictly within them." ;;
   esac
 }
 
+_PLAN_REPO=""
+_PLAN_WT=""
+
+_plan_rollback() {
+  local rc=$?
+  [[ -n "$_PLAN_WT" ]] || exit "$rc"
+  # Read-only scratch: nothing in a panel worktree is worth keeping, and a
+  # leftover detached worktree is what gc would later delete under a live run.
+  git -C "$_PLAN_REPO" worktree remove --force "$_PLAN_WT" >/dev/null 2>&1 \
+    || rm -rf "$_PLAN_WT"
+  git -C "$_PLAN_REPO" worktree prune >/dev/null 2>&1 || true
+  echo "smart-subagents: plan failed, removed the shared worktree $_PLAN_WT" >&2
+  exit "$rc"
+}
+
 cmd_plan() {
   local repo="" goal="" goal_file="" n=3 difficulty="hard" size="medium" kind="default"
   while [[ $# -gt 0 ]]; do
@@ -1168,7 +1371,7 @@ cmd_plan() {
 
   local task_id dir
   task_id="$(date +%s)-$$"
-  mkdir -p "$SSA_WORK_DIR"; chmod 700 "$SSA_WORK_DIR" 2>/dev/null || true
+  _ssa_ensure_work_dir
   dir="${SSA_WORK_DIR}/plan-${task_id}"
   mkdir -m 700 -p "$dir"
   printf '%s\n' "$goal" >"$dir/goal.md"
@@ -1196,10 +1399,16 @@ PY
   local warr=($workers)
 
   # One shared read-only worktree: planners read a pinned tree, never the user's.
-  local wt="$dir/wt"
+  # It sits beside the panel dir, not inside it, so a planner's cwd cannot
+  # reach the panel's own artifacts.
+  local wt
+  wt="$(_ssa_wt_path "plan-${task_id}")"
+  mkdir -m 700 -p "$(dirname "$wt")"
   git -C "$repo" worktree add --detach "$wt" >/dev/null 2>&1 \
     || die "plan: worktree add failed for $repo"
   echo "$wt" >"$dir/wt.txt"
+  _PLAN_REPO="$repo"; _PLAN_WT="$wt"
+  trap '_plan_rollback' EXIT
 
   local i pids=() lenses=()
   for (( i=0; i<n; i++ )); do
@@ -1263,7 +1472,6 @@ PY
           _ssa_run_worker >"$dir/plan-$i.log" 2>&1 || true
         fi
       fi
-      [[ -s "$plan_out" ]] || echo "(planner produced no output; see plan-$i.log)" >"$plan_out"
     ) &
     pids+=($!)
   done
@@ -1271,22 +1479,72 @@ PY
   local pid
   for pid in "${pids[@]}"; do wait "$pid" || true; done
 
-  python3 - "$dir" "${lenses[@]}" <<'PY'
+  # The fallback lives out here: a planner that died mid-subshell still owes
+  # the panel a plan file, and "see plan-N.log" pointed the supervisor at a
+  # raw NDJSON log measured at 555 KB. A digest is the readable half of it.
+  local lens_worker
+  for (( i=0; i<n; i++ )); do
+    lens_worker="${lenses[$i]}"
+    lens="${lens_worker%%:*}"
+    worker="${lens_worker#*:}"
+    plan_out="$dir/plan-$i-$lens-$worker.md"
+    [[ ! -s "$plan_out" ]] || continue
+    {
+      echo "(planner produced no output. Digest of $dir/plan-$i.log follows.)"
+      echo
+      _ssa digest --worker "$worker" --log "$dir/plan-$i.log" \
+        --max-events 10 --final-chars 2000 2>/dev/null \
+        || echo "(no digest: $worker is not registered, or the log is empty)"
+    } >"$plan_out"
+  done
+
+  # C3: planners are dispatched read-only, but grok's sandbox is `workspace`
+  # and nothing checked afterwards. Say so rather than assume.
+  local dirty=false
+  if [[ -n "$(git -C "$wt" status --porcelain 2>/dev/null || true)" ]]; then
+    dirty=true
+    git -C "$wt" status --porcelain >"$dir/panel-dirty.txt" 2>/dev/null || true
+    echo "smart-subagents: plan: planners left the shared worktree dirty, see $dir/panel-dirty.txt" >&2
+  fi
+  # gc reads this: plan-*.md files exist from the moment a redirect opens, so
+  # they never meant the panel was finished.
+  _utc >"$dir/panel-done.txt"
+
+  python3 - "$dir" "$SSA_CLI_PY" "$dirty" "${lenses[@]}" <<'PY'
 import json, sys
 from pathlib import Path
 d = Path(sys.argv[1])
+cli_py, dirty = sys.argv[2], sys.argv[3] == "true"
 plans = []
 for f in sorted(d.glob("plan-*-*.md")):
     text = f.read_text(errors="replace").strip()
-    plans.append({"file": str(f), "lens": f.stem.split("-")[2],
-                  "worker": f.stem.split("-")[3], "bytes": len(text),
-                  "empty": text.startswith("(planner produced no output")})
-print(json.dumps({"dir": str(d), "worktree": str(d / "wt"),
-                  "goal": str(d / "goal.md"), "planners": sys.argv[2:],
-                  "plans": plans,
-                  "next": "supervisor: read every plan, reconcile disagreements, "
-                          "emit one plan"}, indent=2))
+    parts = f.stem.split("-")
+    index, lens, worker = parts[1], parts[2], parts[3]
+    log = d / ("plan-%s.log" % index)
+    entry = {"file": str(f), "lens": lens, "worker": worker, "bytes": len(text),
+             "empty": text.startswith("(planner produced no output")}
+    if log.exists():
+        # A byte count and a ready command, never the path on its own: the log
+        # is NDJSON nobody should cat.
+        entry["log_bytes"] = log.stat().st_size
+        entry["log_digest_cmd"] = (
+            'python3 %s digest --worker %s --log %s --max-events 30 --final-chars 4000'
+            % (cli_py, worker, log)
+        )
+    plans.append(entry)
+wt = (d / "wt.txt").read_text().strip() if (d / "wt.txt").exists() else ""
+doc = {"dir": str(d), "worktree": wt,
+       "goal": str(d / "goal.md"), "planners": sys.argv[4:],
+       "plans": plans,
+       "next": "supervisor: read every plan, reconcile disagreements, "
+               "emit one plan"}
+if dirty:
+    doc["dirty"] = True
+    doc["dirty_report"] = str(d / "panel-dirty.txt")
+print(json.dumps(doc, indent=2))
 PY
+  trap - EXIT
+  _PLAN_WT=""; _PLAN_REPO=""
 }
 
 cmd_scan_secrets() {
@@ -1307,16 +1565,21 @@ cmd_scan_secrets() {
   diff_file="$dir/verify-secrets.diff"
   added_file="$dir/verify-secrets-added.txt"
   names_file="$dir/verify-secrets-names.txt"
+  local untracked_file="$dir/verify-secrets-untracked.z"
   : >"$findings"
   git -C "$wt" diff --no-ext-diff --unified=0 "$base" -- >"$diff_file"
   git -C "$wt" diff --name-status --diff-filter=A "$base" -- >"$names_file"
-  python3 - "$diff_file" "$added_file" "$names_file" "$findings" <<'PY'
+  # A worker that leaks a credential leaks it in a file it never staged, so the
+  # tracked diff alone cannot see it. Untracked files count as added lines.
+  git -C "$wt" status --porcelain -uall -z >"$untracked_file" 2>/dev/null || : >"$untracked_file"
+  python3 - "$diff_file" "$added_file" "$names_file" "$findings" "$wt" "$untracked_file" <<'PY'
 import math
+import os
 import re
 import sys
 from collections import Counter
 
-diff_path, added_path, names_path, findings_path = sys.argv[1:]
+diff_path, added_path, names_path, findings_path, wt, untracked_path = sys.argv[1:]
 patterns = [
     ("aws-access-key", re.compile(r"AKIA[0-9A-Z]{16}")),
     ("openai-key", re.compile(r"sk-[A-Za-z0-9_-]{20,}")),
@@ -1338,16 +1601,62 @@ def entropy(value):
     return -sum((count / length) * math.log(count / length, 2)
                 for count in counts.values())
 
+def untracked_paths():
+    """`?? path` entries from a NUL-separated porcelain status."""
+    try:
+        with open(untracked_path, "rb") as fh:
+            blob = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+    out = []
+    for entry in blob.split("\0"):
+        if entry.startswith("?? "):
+            out.append(entry[3:])
+    return out
+
+
+def readable_lines(path):
+    """Text lines of a file small enough to scan. Binaries are skipped."""
+    full = os.path.join(wt, path)
+    try:
+        if os.path.getsize(full) > 1_000_000:
+            return []
+        with open(full, "rb") as fh:
+            blob = fh.read()
+    except OSError:
+        return []
+    if b"\0" in blob:
+        return []
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError:
+        return []
+    return text.splitlines()
+
+
 for raw in open(names_path, errors="replace"):
     fields = raw.rstrip("\n").split("\t", 1)
     if len(fields) == 2 and env_re.search(fields[1]):
         findings.append("env-file: " + fields[1])
 
-with open(added_path, "w") as added:
+new_files = []
+for path in untracked_paths():
+    if env_re.search(path):
+        findings.append("env-file: " + path)
+    new_files.append(path)
+
+def added_lines():
     for raw in open(diff_path, errors="replace"):
         if not raw.startswith("+") or raw.startswith("+++"):
             continue
-        line = raw[1:].rstrip("\n")
+        yield raw[1:].rstrip("\n")
+    for path in new_files:
+        for line in readable_lines(path):
+            yield line
+
+
+with open(added_path, "w") as added:
+    for line in added_lines():
         added.write(line + "\n")
         matches = []
         names = []
@@ -1356,9 +1665,11 @@ with open(added_path, "w") as added:
             if found:
                 names.append(name)
                 matches.extend(found)
+        # 3.5, not 4.5: a 40-char hex token (a git sha, an API token minted as
+        # hex) measures 3.84, so the old threshold never saw one.
         entropy_matches = [
             match for match in token_re.finditer(line)
-            if entropy(match.group(0)) > 4.5
+            if entropy(match.group(0)) > 3.5
         ]
         if entropy_matches:
             names.append("high-entropy-token")
@@ -1387,7 +1698,9 @@ with open(findings_path, "a") as out:
         out.write(finding + "\n")
 PY
 
+  echo absent >"$dir/verify-secrets-gitleaks.txt"
   if command -v gitleaks >/dev/null 2>&1; then
+    echo ran >"$dir/verify-secrets-gitleaks.txt"
     scan_tmp="$(mktemp -d "${TMPDIR:-/tmp}/ssa-gitleaks.XXXXXX")"
     gitleaks_report="$scan_tmp/report.json"
     mkdir "$scan_tmp/source"
@@ -1411,8 +1724,45 @@ PY
     fi
     rm -rf "$scan_tmp"
   fi
-  rm -f "$diff_file" "$added_file" "$names_file"
+  rm -f "$diff_file" "$added_file" "$names_file" "$untracked_file"
   [[ ! -s "$findings" ]]
+}
+
+cmd_diff() {
+  # `git diff` on a worker's change is unbounded, and the supervisor reads it
+  # into a context. Default is the stat; a path drills down, clipped.
+  local dir="" path="" max=20000
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dir="${2:-}"; shift 2 ;;
+      --path) path="${2:-}"; shift 2 ;;
+      --max-bytes) max="${2:-}"; shift 2 ;;
+      *) die "diff: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$dir" && -d "$dir" ]] || die "diff: --dir required"
+  [[ "$max" =~ ^[0-9]+$ ]] || die "diff: --max-bytes takes a whole number"
+  local wt base total
+  wt="$(_read1 "$dir/wt.txt")"
+  base="$(_read1 "$dir/base-sha.txt")"
+  [[ -n "$wt" && -d "$wt" ]] || die "diff: missing worktree ($dir/wt.txt)"
+  [[ -n "$base" ]] || die "diff: missing base SHA ($dir/base-sha.txt)"
+  echo "### diff stat"
+  git -C "$wt" diff --stat "$base" 2>/dev/null || true
+  [[ -n "$path" ]] || {
+    echo "(per-file: diff --dir DIR --path PATH [--max-bytes N])"
+    return 0
+  }
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/ssa-diff.XXXXXX")"
+  git -C "$wt" diff "$base" -- "$path" >"$tmp" 2>/dev/null || true
+  total="$(wc -c <"$tmp" | tr -d ' ')"
+  printf '### diff %s\n' "$path"
+  head -c "$max" "$tmp"
+  if (( total > max )); then
+    printf '\n(truncated, %s bytes total)\n' "$total"
+  fi
+  rm -f "$tmp"
 }
 
 cmd_verify_summary() {
@@ -1424,14 +1774,28 @@ cmd_verify_summary() {
     esac
   done
   [[ -n "$dir" && -d "$dir" ]] || die "verify-summary: --dir required"
-  local wt base
+  local wt base full sec
   wt="$(cat "$dir/wt.txt")"
   base="$(cat "$dir/base-sha.txt")"
+  # Measured 203 KB on a real repo, every byte of it into a supervisor context.
+  # Each section is clipped here and written in full to one file on disk.
+  full="$dir/verify-summary-full.txt"
+  : >"$full"
+  sec="$(mktemp "${TMPDIR:-/tmp}/ssa-summary.XXXXXX")"
   echo "### branch"; git -C "$wt" branch --show-current
-  echo "### status"; git -C "$wt" status --porcelain -uall
-  echo "### commits since base"; git -C "$wt" log --oneline "${base}..HEAD" || true
-  echo "### diff stat"; git -C "$wt" diff --stat "$base" || true
-  echo "### name-status"; git -C "$wt" diff --name-status "$base" || true
+  if _ssa_git_status_porcelain_uall "$wt" "$sec" "verify-summary"; then
+    _ssa_clip_file "$sec" status 200 "$full"
+  else
+    echo "### status"
+    echo "(unavailable: git status -uall is unusable in $wt)"
+  fi
+  git -C "$wt" log --oneline "${base}..HEAD" >"$sec" 2>/dev/null || : >"$sec"
+  _ssa_clip_file "$sec" "commits since base" 200 "$full"
+  git -C "$wt" diff --stat "$base" >"$sec" 2>/dev/null || : >"$sec"
+  _ssa_clip_file "$sec" "diff stat" 200 "$full"
+  git -C "$wt" diff --name-status "$base" >"$sec" 2>/dev/null || : >"$sec"
+  _ssa_clip_file "$sec" "name-status" 200 "$full"
+  rm -f "$sec"
   echo "### secrets"
   if cmd_scan_secrets --dir "$dir"; then
     echo "PASS"
@@ -1447,18 +1811,29 @@ cmd_verify_summary() {
 
 _task_unsafe_reason() {
   # Prints the reason a task dir must not be deleted, empty when it is safe.
-  local dir="$1" wt base state cnt
+  local dir="$1" wt base state cnt st
   state="$(_worker_state "$dir")"
-  if [[ "$state" == "running" || "$state" == "reused" ]]; then
+  # "reused" means the pid belongs to somebody else now, which is the opposite
+  # of a reason to keep the dir: nothing of ours is running.
+  if [[ "$state" == "running" ]]; then
     printf 'worker process %s is alive' "$(_read1 "$dir/worker.pid" '?')"
     return 0
   fi
   wt="$(_read1 "$dir/wt.txt")"
   if [[ -n "$wt" && "$wt" != "NOT_GIT" && -d "$wt" ]]; then
-    if [[ -n "$(git -C "$wt" status --porcelain -uall 2>/dev/null || echo unreadable)" ]]; then
+    st="$(mktemp "${TMPDIR:-/tmp}/ssa-unsafe-status.XXXXXX")"
+    if ! _ssa_git_status_porcelain_uall "$wt" "$st" "cleanup" 2>/dev/null; then
+      rm -f "$st"
+      printf 'worktree status is unreadable'
+      return 0
+    fi
+    # A staged brief is a launch artifact, not the worker's work.
+    if [[ -n "$(grep -v '^?? BRIEF.md$' "$st" || true)" ]]; then
+      rm -f "$st"
       printf 'worktree has uncommitted changes'
       return 0
     fi
+    rm -f "$st"
     base="$(_read1 "$dir/base-sha.txt")"
     if [[ -n "$base" ]]; then
       cnt="$(git -C "$wt" rev-list --count "${base}..HEAD" 2>/dev/null || echo 0)"
@@ -1484,6 +1859,10 @@ _cleanup_apply() {
     fi
     git -C "$repo" branch -D "ssa/${id}" >/dev/null 2>&1 || true
     git -C "$repo" worktree prune >/dev/null 2>&1 || true
+    # The worktree is a sibling of the task dir now, so removing the dir is not
+    # enough; and the shared parent goes when it empties.
+    rm -rf "$wt"
+    rmdir "$SSA_WORK_DIR/wt" >/dev/null 2>&1 || true
   fi
   rm -rf "$dir"
 }
@@ -1513,22 +1892,28 @@ cmd_cleanup() {
 }
 
 cmd_gc() {
-  local days=7 dry=1
+  local days=7 dry=1 verbose=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --older-than) days="${2:-}"; shift 2 ;;
       --dry-run) dry=1; shift ;;
       --no-dry-run) dry=0; shift ;;
+      --verbose) verbose=1; shift ;;
       *) die "gc: unknown arg $1" ;;
     esac
   done
   [[ "$days" =~ ^[0-9]+$ ]] || die "gc: --older-than takes whole days"
   [[ -d "$SSA_WORK_DIR" ]] || { echo "gc: nothing under $SSA_WORK_DIR"; return 0; }
   local now cutoff d age reason kind plans deleted=0 kept=0
+  # Kept rows are the boring majority (171 of them on a real machine), so they
+  # are counted by reason instead of printed one per dir. --verbose restores
+  # the per-dir lines.
+  local k_young=0 k_alive=0 k_dirty=0 k_commits=0 k_other=0 summary=""
   now="$(_now)"
   cutoff=$(( days * 86400 ))
   for d in "$SSA_WORK_DIR"/*; do
     [[ -d "$d" ]] || continue
+    [[ "$(basename "$d")" != "wt" ]] || continue
     age=$(( now - $(_mtime "$d") ))
     reason="$(_task_unsafe_reason "$d")"
     kind="task"
@@ -1536,19 +1921,30 @@ cmd_gc() {
       kind="panel"
       plans="$(find "$d" -maxdepth 1 -name 'plan-*.md' 2>/dev/null | wc -l | tr -d ' ')"
       # A finished panel is pure read-only scratch: its worktree is detached and
-      # its value is the plan files a supervisor already consumed.
-      if [[ -z "$reason" && "$plans" != "0" ]]; then
+      # its value is the plan files a supervisor already consumed. "Finished"
+      # is panel-done.txt, not the presence of plan files: those exist from the
+      # moment the redirect opens, so gc used to delete a live panel's worktree
+      # out from under its planners.
+      if [[ -z "$reason" && "$plans" != "0" && -f "$d/panel-done.txt" ]]; then
         age="$cutoff"
+      elif [[ -z "$reason" && ! -f "$d/panel-done.txt" ]]; then
+        reason="panel still running (no panel-done.txt)"
       fi
     fi
-    if [[ -n "$reason" ]]; then
-      echo "kept  $kind $(basename "$d") ($(_age_human "$age")): $reason"
-      kept=$(( kept + 1 ))
-      continue
+    if [[ -z "$reason" ]] && (( age < cutoff )); then
+      reason="younger than ${days}d"
     fi
-    if (( age < cutoff )); then
-      echo "kept  $kind $(basename "$d") ($(_age_human "$age")): younger than ${days}d"
+    if [[ -n "$reason" ]]; then
       kept=$(( kept + 1 ))
+      case "$reason" in
+        "younger than "*) k_young=$(( k_young + 1 )) ;;
+        "worker process "*) k_alive=$(( k_alive + 1 )) ;;
+        "worktree has uncommitted changes") k_dirty=$(( k_dirty + 1 )) ;;
+        "branch has "*) k_commits=$(( k_commits + 1 )) ;;
+        *) k_other=$(( k_other + 1 )) ;;
+      esac
+      [[ -z "$verbose" ]] || \
+        echo "kept  $kind $(basename "$d") ($(_age_human "$age")): $reason"
       continue
     fi
     if (( dry == 1 )); then
@@ -1559,6 +1955,14 @@ cmd_gc() {
     fi
     deleted=$(( deleted + 1 ))
   done
+  if (( kept > 0 )) && [[ -z "$verbose" ]]; then
+    (( k_young == 0 )) || summary="${summary}${summary:+, }$k_young younger than ${days}d"
+    (( k_alive == 0 )) || summary="${summary}${summary:+, }$k_alive worker alive"
+    (( k_dirty == 0 )) || summary="${summary}${summary:+, }$k_dirty dirty worktree"
+    (( k_commits == 0 )) || summary="${summary}${summary:+, }$k_commits unmerged commits"
+    (( k_other == 0 )) || summary="${summary}${summary:+, }$k_other other"
+    echo "kept: $summary (--verbose for one line per dir)"
+  fi
   if (( dry == 1 )); then
     echo "gc: dry run, $deleted safe, $kept kept (pass --no-dry-run to delete)"
   else
@@ -1623,6 +2027,28 @@ cmd_doctor() {
     fi
   done <"$reg_rows"
   rm -f "$reg_rows"
+  # Which workers run with a scrubbed environment is a registry fact, so it is
+  # printed from the registry rather than restated in a doc that would drift.
+  local scrub_row scrub_json
+  scrub_json="$(mktemp "${TMPDIR:-/tmp}/ssa-doctor-scrub.XXXXXX")"
+  scrub_row=""
+  if _ssa workers --json >"$scrub_json" 2>/dev/null; then
+    scrub_row="$(python3 - "$scrub_json" <<'PY' 2>/dev/null || true
+import json, sys
+rows = json.load(open(sys.argv[1]))
+on = [r["name"] for r in rows if r.get("env_scrub")]
+off = [r["name"] for r in rows if not r.get("env_scrub")]
+print("scrubbed: %s; inherits this environment: %s"
+      % (", ".join(on) or "none", ", ".join(off) or "none"))
+PY
+)"
+  fi
+  rm -f "$scrub_json"
+  if [[ -n "$scrub_row" ]]; then
+    _doc_row ok env-scrub "$scrub_row"
+  else
+    _doc_row warn env-scrub "registry did not report env_scrub"
+  fi
   if command -v security >/dev/null 2>&1; then
     if security find-generic-password -s 'Claude Code-credentials' \
         >/dev/null 2>&1; then
@@ -1666,6 +2092,8 @@ cmd_doctor() {
   if [[ -d "$SSA_WORK_DIR" ]]; then
     for d in "$SSA_WORK_DIR"/*; do
       [[ -d "$d" ]] || continue
+      # $SSA_WORK_DIR/wt holds the worktrees themselves, not task dirs.
+      [[ "$(basename "$d")" != "wt" ]] || continue
       if [[ "$(basename "$d")" != plan-* && ! -f "$d/task-id.txt" ]]; then
         orphans=$(( orphans + 1 ))
         continue
@@ -1733,11 +2161,14 @@ PY
 }
 
 _doc_auth() {
-  local cli="$1" path="$2"
+  # The path is printed with $HOME collapsed to ~: an absolute credential path
+  # carries the account's username, and doctor output gets pasted around.
+  local cli="$1" path="$2" shown="$2"
+  [[ -z "$HOME" ]] || shown="${path/#$HOME/\~}"
   if [[ -f "$path" ]]; then
     _doc_row ok "auth:$cli" "credentials file present"
   else
-    _doc_row warn "auth:$cli" "no credentials file at $path"
+    _doc_row warn "auth:$cli" "no credentials file at $shown"
   fi
 }
 
@@ -1841,6 +2272,8 @@ if scope_file.exists():
         if not any(fnmatch.fnmatch(path, g) for g in globs):
             scope_ok = False
             out_of_scope.append(path)
+if out_of_scope:
+    (d / "verify-out-of-scope.txt").write_text("\n".join(out_of_scope) + "\n")
 
 log_path = d / "stdout.log"
 log_text = log_path.read_text(errors="replace") if log_path.exists() else ""
@@ -1872,14 +2305,27 @@ elif baseline_raw is None and any_failure:
 else:
     verdict = "pass"
 
+gitleaks = "absent"
+gl_path = d / "verify-secrets-gitleaks.txt"
+if gl_path.exists():
+    gitleaks = gl_path.read_text(errors="replace").strip() or "absent"
+
 doc = {
     "schema_version": 1,
     "verify": {
         "commands": commands,
         "new_failures": new_failures,
         "scope_ok": scope_ok,
-        "out_of_scope": out_of_scope,
+        # Bounded: one out-of-scope worker wrote 900 paths into this file and
+        # every reader of outcome.json paid for them. The full list is on disk.
+        "out_of_scope": out_of_scope[:25],
+        "out_of_scope_count": len(out_of_scope),
+        "out_of_scope_file": (
+            str(d / "verify-out-of-scope.txt") if out_of_scope else None
+        ),
         "secrets_ok": secrets_ok,
+        # "absent" is not "clean": gitleaks was never run on this machine.
+        "gitleaks": gitleaks,
         "changed_files": len(changed),
         "verdict": verdict,
     },
@@ -1888,7 +2334,9 @@ doc = {
 print("verify: verdict=%s new_failures=%d scope_ok=%s secrets_ok=%s changed=%d"
       % (verdict, new_failures, scope_ok, secrets_ok, len(changed)))
 if out_of_scope:
-    print("verify: out of scope: " + ", ".join(out_of_scope[:10]))
+    print("verify: out of scope: %d path(s): %s%s"
+          % (len(out_of_scope), ", ".join(out_of_scope[:10]),
+             " ..." if len(out_of_scope) > 10 else ""))
 sys.exit({"pass": 0, "fail": 1, "inconclusive": 2}[verdict])
 PY
   rm -f "$dir/verify-changed.z"
@@ -2130,22 +2578,28 @@ Usage: smart-subagents.sh <command> [options]
       pick a worker. Prints JSON with task_id, dir, worker, reason.
 
   pick --size SIZE [--kind KIND] [--difficulty LEVEL] [--prefer CLI]
-       [--fresh] [--out DIR]
-      Print primary worker name on stdout; recommendation JSON on stderr.
+       [--fresh] [--out DIR] [--explain]
+      Print primary worker name on stdout; one summary line on stderr.
+      --explain puts the full recommendation JSON on stderr instead.
 
   Size is how many files the task touches (gates required quota headroom).
   Difficulty is how much thinking it needs (gates worker reasoning effort).
   They are independent: a 15-line lock-free ring buffer is small and hard.
 
-  dispatch --dir DIR [--worker CLI] [--background]
+  dispatch --dir DIR [--worker CLI] [--background] [--resume]
       Run the worker against DIR/brief.md in the worktree. Captures logs +
-      session id. With --background the worker is detached into its own process
-      group, the pid lands in DIR/worker.pid, and a watchdog kills a run whose
-      log and worktree both stop changing (SSA_STALL_SECS, default 600).
+      session id. The brief is staged as <worktree>/BRIEF.md for file-ref
+      workers and removed when the run ends. With --background the worker is
+      detached into its own process group, the pid lands in DIR/worker.pid, and
+      a watchdog kills a run whose log and worktree both stop changing
+      (SSA_STALL_SECS, default 600). --resume continues the recorded session id
+      from DIR/session-id.txt and refuses when there is none. Overriding
+      --worker rebinds DIR/worker-args.txt to that CLI's flags.
 
-  ls
+  ls [--all] [--state STATE]        (alias: list)
       One line per task and planning panel under SSA_WORK_DIR: age, repo,
-      worker, size/difficulty/kind, inferred phase, recorded state, diff.
+      worker, size/difficulty/kind, inferred phase, recorded state, diff. The
+      20 most recent plus everything still in flight; --all prints the rest.
 
   status --dir DIR
       Full detail for one task: base sha, branch, exit code, session or
@@ -2184,10 +2638,11 @@ Usage: smart-subagents.sh <command> [options]
       a worker is alive, the worktree is dirty, or the branch has commits the
       base does not have.
 
-  gc [--older-than DAYS] [--dry-run|--no-dry-run]
+  gc [--older-than DAYS] [--dry-run|--no-dry-run] [--verbose]
       Classify every task dir as safe or kept and, with --no-dry-run, delete
-      the safe ones. Dry run and 7 days by default. Finished planning panels
-      are collected regardless of age.
+      the safe ones. Dry run and 7 days by default. Kept dirs are summarized by
+      reason; --verbose prints one line each. Planning panels are collected
+      regardless of age once they have finished (panel-done.txt).
 
   doctor [--json]
       Offline health check: interpreter and git, worker binaries, credential
@@ -2200,10 +2655,19 @@ Usage: smart-subagents.sh <command> [options]
       Fan the goal out to N planners with different lenses (pragmatic, risk,
       architecture, constraints), spread across the CLIs that have quota, in
       one shared read-only worktree. Prints JSON listing every plan file for a
-      supervisor to consolidate. Planners never write to the tree.
+      supervisor to consolidate. Planners are expected to leave the tree
+      untouched, and the tree is checked after the run: a dirty one writes
+      panel-dirty.txt and sets "dirty": true in the JSON.
 
-  verify-summary --dir DIR
-      Compact git state for the supervisor (stat/name-status only).
+  verify-summary --dir DIR          (alias: summary)
+      Compact git state for the supervisor: branch, status (clipped), commits
+      since base, diff stat, name-status, then the secret scan. Each section is
+      clipped to 200 lines with the full text in DIR/verify-summary-full.txt.
+      Exits 1 when the secret scan finds something.
+
+  diff --dir DIR [--path PATH] [--max-bytes N]
+      Bounded diff for the supervisor: the whole change as --stat, and with
+      --path the unified diff of that path clipped to N bytes (default 20000).
 
   scan-secrets --dir DIR
       Scan added lines and newly added environment files for secrets.
@@ -2225,6 +2689,9 @@ Env:
   SSA_ALLOW_UNSANDBOXED_WRITE=1   accept a write dispatch to a worker with no sandbox
   SSA_ALLOW_KIMI_WRITE=1          legacy alias for SSA_ALLOW_UNSANDBOXED_WRITE
   SSA_STALL_SECS                  watchdog stall threshold (default 600)
+  SSA_WATCHDOG_INTERVAL_SECS      watchdog sampling interval (default 30)
+  SSA_GIT_STATUS_TIMEOUT          seconds before `git status -uall` is refused (default 5)
+  SSA_GIT_STATUS_UALL_MAX         untracked lines before it is refused (default 1000)
   SSA_DEADLINE_SECS               absolute run deadline (default 0, off)
   SSA_KILL_GRACE_SECS             seconds between TERM and KILL (default 10)
   SSA_NO_QUOTA_SNAPSHOT=1         skip the post-dispatch quota snapshot
@@ -2258,6 +2725,7 @@ main() {
     plan) cmd_plan "$@" ;;
     scan-secrets) cmd_scan_secrets "$@" ;;
     verify-summary|summary) cmd_verify_summary "$@" ;;
+    diff) cmd_diff "$@" ;;
     help|-h|--help) cmd_help ;;
     *) die "unknown command: $cmd (try help)" ;;
   esac

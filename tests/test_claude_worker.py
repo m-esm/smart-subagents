@@ -169,8 +169,9 @@ class ClaudeDispatchTests(unittest.TestCase):
             supervisor_brief = task_dir / "brief.md"
             launch_brief = repo / "BRIEF.md"
             self.assertTrue(supervisor_brief.is_file())
-            self.assertTrue(launch_brief.is_file())
-            self.assertEqual(launch_brief.read_text(), supervisor_brief.read_text())
+            # The staged copy is a launch path only: dispatch removes it when
+            # the run ends, so it can never reach a diff or a `git add -A`.
+            self.assertFalse(launch_brief.exists())
             porcelain = subprocess.check_output(
                 ["git", "-C", str(repo), "status", "--porcelain", "-uall"],
                 text=True,

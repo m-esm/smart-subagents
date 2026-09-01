@@ -152,7 +152,9 @@ smart-subagents.sh plan --repo ~/code/api --n 3 --difficulty hard --goal-file go
 ```
 
 Planners run in parallel in one shared read-only worktree, round-robined across whichever CLIs have
-quota, so a day with one eligible CLI still yields N plans instead of zero.
+quota, so a day with one eligible CLI still yields N plans instead of zero. Planners are expected to
+leave that tree untouched; `plan` checks it after the run and reports `"dirty": true` plus a
+`panel-dirty.txt` when one of them wrote anything.
 
 ## Guarantees
 
@@ -185,22 +187,24 @@ it checks offline whether a dispatch could run at all here.
 |---|---|
 | `doctor [--json]` | offline health check: git, python3, worker binaries, credential files (existence only), cache perms, work dir, orphans, stale worktrees. Nonzero only when a dispatch could not run |
 | `pick --size SIZE [--difficulty L] [--kind K]` | print the primary worker name on stdout, the full recommendation JSON on stderr |
-| `ls` | one line per task and planning panel: age, repo, worker, size/difficulty/kind, inferred phase, recorded state, diff size |
+| `ls [--all] [--state S]` (alias `list`) | one line per task and planning panel: age, repo, worker, size/difficulty/kind, inferred phase, recorded state, diff size. The 20 most recent plus everything still in flight; `--all` prints the rest |
 | `status --dir DIR` | one task in full: base sha, branch, exit code, session or `resume=unavailable`, worker pid state, recorded state and event count, verify verdict, and a bounded log digest (counts, last few events clipped, final message clipped). Never raw log lines |
 | `tail --dir DIR [--raw]` | follow the worker's `stdout.log` as one short line per event; `--raw` is the unfiltered NDJSON firehose (100 KB lines), redirect it to a file |
 | `stop --dir DIR` | TERM then KILL the worker's process group, refusing when the pid now belongs to someone else |
 | `verify --dir DIR` | run the verify commands against the baseline, check scope and secrets, write `outcome.json`; exit 0 pass, 1 fail, 2 inconclusive |
-| `verify-summary --dir DIR` | compact git state for the supervisor: stat and name-status only |
+| `verify-summary --dir DIR` (alias `summary`) | branch, status, commits since base, diff stat, name-status, then the secret scan. Every section is clipped to 200 lines with the full text in `verify-summary-full.txt`; exit 1 when the scan finds something |
+| `diff --dir DIR [--path P] [--max-bytes N]` | the whole change as `--stat`, and with `--path` that path's unified diff clipped to N bytes (default 20000) |
 | `scan-secrets --dir DIR` | credential regexes plus Shannon entropy over added lines, newly added env files, and a gitleaks pass when gitleaks is installed |
 | `cooldown --cli CLI [--clear]` | bench a worker across every task, or lift the bench early |
 | `record --dir DIR --outcome ...` | append one line to the outcome ledger (see [Privacy](#privacy) for what is in it) |
 | `ledger [--days N]` | per-CLI dispatch count, verified-pass rate, mean retries, quota consumed |
 | `cleanup --dir DIR` | remove worktree, `ssa/<id>` branch and task dir, refusing while a worker is alive, the tree is dirty, or the branch holds commits the base does not have |
-| `gc [--older-than DAYS]` | classify every task dir safe or kept; dry run until `--no-dry-run` |
+| `gc [--older-than DAYS] [--verbose]` | classify every task dir safe or kept; kept dirs are summarized by reason unless `--verbose`; dry run until `--no-dry-run` |
 
 A backgrounded worker (`dispatch --dir "$DIR" --background`) gets its own process group and a
 watchdog sampling log size and a worktree fingerprint every 30s; when both go quiet for
-`SSA_STALL_SECS` it kills the group and writes `stalled.txt`. The ledger is the part that compounds,
+`SSA_STALL_SECS` it kills the worker's group (not the wrapper's, so the run still writes its exit
+code, diff stat and final message) and writes `stalled.txt`. The ledger is the part that compounds,
 one line per run:
 
 ```console
@@ -253,7 +257,9 @@ templated in [`agents/smart-subagents.md`](agents/smart-subagents.md). The
 # Mint a task: private dir, isolated worktree, worker pick, one call.
 DIR=$(smart-subagents.sh init --repo ~/code/api --size medium --difficulty hard \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["dir"])')
-# Write the brief. The worktree is $DIR/wt; that is the workdir it names.
+# Write the brief. The worktree path is in $DIR/wt.txt; that is the workdir it
+# names. It lives beside the task dir, never inside it, so a worker cannot
+# reach the task's own verify-cmds.txt or scope.txt from its cwd.
 $EDITOR "$DIR/brief.md"
 # Run it, check it, then log the line that improves the next pick.
 smart-subagents.sh dispatch --dir "$DIR"
@@ -279,6 +285,9 @@ agent runs this loop for you.
 | `SSA_FIT_HALFLIFE_DAYS` | `30` | Half-life on ledger evidence feeding the learned fit posterior |
 | `SSA_FIT_MIN_SAMPLES` | `10` | Effective observations before a posterior ranks instead of the prior |
 | `SSA_STALL_SECS` | `600` | Watchdog patience before it kills a silent background worker |
+| `SSA_WATCHDOG_INTERVAL_SECS` | `30` | How often the watchdog samples log size and the worktree fingerprint |
+| `SSA_GIT_STATUS_TIMEOUT` | `5` | Seconds before `git status --porcelain -uall` is refused instead of hung on |
+| `SSA_GIT_STATUS_UALL_MAX` | `1000` | Untracked lines before that status is treated as unusable |
 | `SSA_KILL_GRACE_SECS` | `10` | Seconds between TERM and KILL when stopping a worker |
 | `SSA_DEADLINE_SECS` | off | Absolute ceiling on a background run |
 | `SSA_LEDGER` | `$XDG_STATE_HOME/smart-subagents/outcomes.jsonl` | Outcome ledger path |
@@ -309,6 +318,12 @@ logged, or transmitted anywhere else. Account emails are **redacted by default i
 path**, including `--json` and the cache; pass `--include-account` if you want them. The cache is
 mode 0600 inside a 0700 `$XDG_CACHE_HOME/smart-subagents/`, and task dirs (brief, worker logs, a
 full worktree of your source) are mode 0700 under `$TMPDIR`.
+
+A task dir holds `brief.md` (the supervisor's copy), worker logs, `last-msg.txt`, `task.json`,
+`events.jsonl` and the verify artifacts; the worktree is at `$SSA_WORK_DIR/wt/<task id>`. At launch
+`dispatch` stages the brief as `<worktree>/BRIEF.md` so a file-ref worker can read it inside its
+sandbox, excludes it through the worktree's shared git dir, and removes it when the run ends. Which
+workers run with a scrubbed environment is a registry fact, printed by `doctor` (`env-scrub`).
 
 The outcome ledger at `$XDG_STATE_HOME/smart-subagents/outcomes.jsonl` (0600) is deliberately thin:
 worker, task class, effort flags, exit code, wall time, diff counts, verification verdict, quota

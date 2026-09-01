@@ -15,6 +15,42 @@ Worker logs no longer leak into the supervisor context. Measured on
   no `-o` flag) and ends with a clipped final message.
 - Grok drops `--include-partial-messages`: per-token deltas were 43% of the
   log and the watchdog only needs per-turn growth.
+- Output every command prints is bounded: `verify-summary` clips each section
+  to 200 lines and spills the rest to `verify-summary-full.txt` (measured 203
+  KB before), `ls` shows the 20 most recent plus everything in flight (`--all`,
+  `--state`), `gc` summarizes kept dirs by reason (`--verbose` restores the
+  lines), `pick` puts one line on stderr (`--explain` for the JSON), and
+  `outcome.json` carries 25 out-of-scope paths plus a count, with the full list
+  in `verify-out-of-scope.txt`.
+- New `diff --dir DIR [--path P] [--max-bytes N]`: the change as a stat, and
+  one path's unified diff clipped, so the playbook never asks for a bare
+  `git diff`.
+- `dispatch --resume` continues the recorded session id, the mode the agent
+  playbook already described.
+- The background watchdog works again: a stale `exit-code.txt` no longer
+  disarms it on the first tick, and it kills the worker's process group rather
+  than the wrapper's, so a stalled run still writes its exit code, diff stat
+  and final message. A foreground dispatch now records the worker's pid, pgid
+  and start time, so `stop`, `gc` and `status` can see it.
+- The staged `BRIEF.md` is excluded through the worktree's common git dir
+  (`--absolute-git-dir` pointed at a per-worktree dir git never reads) and
+  removed when the run ends, so it can no longer show as untracked, block
+  cleanup, or be swept into a `git add -A`.
+- Task state follows the task: `exited -> running` (re-dispatch), plus edges
+  out of `stalled` and `aborted`. A refused transition is recorded in
+  `state-desync.txt` and forced onto the record instead of being swallowed.
+- Worktrees moved to `$SSA_WORK_DIR/wt/<task id>`, beside the task dir rather
+  than inside it: a worker's cwd can no longer reach `../verify-cmds.txt` or
+  `../scope.txt`. The work dir must be owned by the current user.
+- The secret scan reads untracked files (where a leaked credential actually
+  lands), drops the entropy threshold to 3.5 for 32+ character tokens (a
+  40-char hex token measures 3.84), and records `gitleaks: ran|absent`.
+- Planning panels are checked for writes after the run (`panel-dirty.txt`,
+  `"dirty": true`), report `panel-done.txt` so `gc` cannot delete a live
+  panel's worktree, roll their worktree back if `plan` dies, and give an empty
+  planner a digest instead of a path to 555 KB of NDJSON.
+- `doctor` prints `env_scrub` per worker from the registry and collapses
+  `$HOME` to `~` in credential paths.
 
 ## 0.3.2
 
