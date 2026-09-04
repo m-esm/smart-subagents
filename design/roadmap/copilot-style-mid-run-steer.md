@@ -8,7 +8,7 @@ target: 1
 measure: python3 -c "import subprocess,re; out=subprocess.check_output(['bash','scripts/smart-subagents.sh'], stderr=subprocess.STDOUT, text=True); print(len(re.findall(r'(?im)^  (steer|followup|follow-up|inject)\\b', out)))"
 evidence:
   - design/roadmap/evidence/2026-09-04-copilot-mission-control.png
-  - design/roadmap/evidence/2026-09-04-copilot-mission-control-extract.md
+  - design/roadmap/evidence/2026-09-04-copilot-mission-control-extract.txt
 slices: 0/3
 after:
 ---
