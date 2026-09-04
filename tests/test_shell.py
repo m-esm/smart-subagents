@@ -1342,6 +1342,144 @@ class ResumeTests(unittest.TestCase):
             self.assertIn("resume", err)
 
 
+class SteerTests(unittest.TestCase):
+    def _wait_for(self, path, seconds=40):
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if path.exists():
+                return True
+            time.sleep(0.2)
+        return False
+
+    def _env_with_ps_shim(self, te, extra=None):
+        """A PATH-front ps that answers lstart/pgid without calling /bin/ps.
+
+        _worker_state treats an unreadable start time as reused, so a live
+        sleeper would refuse steer in environments where ps is blocked.
+        """
+        bindir = te.root / "bin"
+        bindir.mkdir(exist_ok=True)
+        shim = bindir / "ps"
+        shim.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "args, fmt, pid = sys.argv[1:], None, None\n"
+            "i = 0\n"
+            "while i < len(args):\n"
+            "    a = args[i]\n"
+            "    if a == '-o' and i + 1 < len(args):\n"
+            "        fmt = args[i + 1]; i += 2; continue\n"
+            "    if a.startswith('-o'):\n"
+            "        fmt = a[2:]; i += 1; continue\n"
+            "    if a == '-p' and i + 1 < len(args):\n"
+            "        pid = args[i + 1]; i += 2; continue\n"
+            "    if a.startswith('-p'):\n"
+            "        pid = a[2:]; i += 1; continue\n"
+            "    i += 1\n"
+            "if not pid:\n"
+            "    sys.exit(1)\n"
+            "try:\n"
+            "    pid_i = int(pid)\n"
+            "    os.kill(pid_i, 0)\n"
+            "except (OSError, ValueError):\n"
+            "    sys.exit(1)\n"
+            "fmt = (fmt or '').rstrip('=')\n"
+            "if fmt == 'lstart':\n"
+            "    print('Thu Jan  1 00:00:00 2026')\n"
+            "elif fmt == 'pgid':\n"
+            "    try:\n"
+            "        print(os.getpgid(pid_i))\n"
+            "    except OSError:\n"
+            "        sys.exit(1)\n"
+            "else:\n"
+            "    sys.exit(1)\n"
+        )
+        shim.chmod(0o755)
+        env = dict(te.env)
+        env["PATH"] = "%s:%s" % (bindir, env.get("PATH", ""))
+        if extra:
+            env.update(extra)
+        return env
+
+    def test_no_pid(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            rc, out, err = run_ssa(
+                "steer", "--dir", str(task_dir), "--message", "hello", env=te.env
+            )
+            self.assertEqual(rc, 1, err + out)
+            self.assertFalse((task_dir / "steer.txt").exists())
+
+    def test_not_running(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            dead = subprocess.Popen(["true"])
+            dead.wait()
+            (task_dir / "worker.pid").write_text("%d\n" % dead.pid)
+            rc, out, err = run_ssa(
+                "steer", "--dir", str(task_dir), "--message", "hello", env=te.env
+            )
+            self.assertEqual(rc, 1, err + out)
+            self.assertFalse((task_dir / "steer.txt").exists())
+
+    def test_reused(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "worker.pid").write_text("%d\n" % os.getpid())
+            (task_dir / "worker-start.txt").write_text("Thu Jan  1 00:00:00 1970\n")
+            rc, out, err = run_ssa(
+                "steer", "--dir", str(task_dir), "--message", "hello", env=te.env
+            )
+            self.assertEqual(rc, 1, err + out)
+            self.assertFalse((task_dir / "steer.txt").exists())
+
+    def test_delivers(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            sleeper = write_script(te.root / "codex-slow.sh", "#!/bin/sh\nsleep 30\n")
+            env = self._env_with_ps_shim(
+                te,
+                extra={
+                    "CODEX_BIN": str(sleeper),
+                    "SSA_KILL_GRACE_SECS": "2",
+                },
+            )
+            task_id = (task_dir / "task-id.txt").read_text()
+            proc = subprocess.Popen(
+                ["bash", str(SSA_SH), "dispatch", "--dir", str(task_dir),
+                 "--worker", "codex"],
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                self.assertTrue(self._wait_for(task_dir / "worker.pid", 20))
+                seen = ""
+                deadline = time.time() + 20
+                while time.time() < deadline:
+                    _, seen, _ = run_ssa("status", "--dir", str(task_dir), env=env)
+                    if "(running)" in seen:
+                        break
+                    time.sleep(0.2)
+                self.assertIn("(running)", seen)
+                rc, out, err = run_ssa(
+                    "steer", "--dir", str(task_dir), "--message", "course-correct",
+                    env=env,
+                )
+                self.assertEqual(rc, 0, err + out)
+                self.assertEqual((task_dir / "steer.txt").read_text(), "course-correct\n")
+                _, seen, _ = run_ssa("status", "--dir", str(task_dir), env=env)
+                self.assertIn("(running)", seen)
+                self.assertEqual((task_dir / "task-id.txt").read_text(), task_id)
+                self.assertFalse((task_dir / "exit-code.txt").exists())
+                self.assertFalse((task_dir / "stopped.txt").exists())
+            finally:
+                run_ssa("stop", "--dir", str(task_dir), env=env)
+                proc.wait(timeout=60)
+
+
 class VersionTests(unittest.TestCase):
     def test_plugin_version_matches_the_top_changelog_heading(self):
         import re

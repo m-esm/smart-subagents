@@ -1141,6 +1141,40 @@ cmd_stop() {
   echo "stop: signalled process group $pgid for $dir"
 }
 
+cmd_steer() {
+  local dir="" message=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dir="${2:-}"; shift 2 ;;
+      --message) message="${2:-}"; shift 2 ;;
+      *) die "steer: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$dir" && -d "$dir" ]] || die "steer: --dir required"
+  [[ -n "$message" ]] || die "steer: --message required"
+  local pid state
+  pid="$(_read1 "$dir/worker.pid")"
+  state="$(_worker_state "$dir")"
+  if [[ -z "$pid" ]]; then
+    echo "steer: nothing to steer, no worker.pid in $dir (phase=$(_task_phase "$dir"))"
+    return 1
+  fi
+  case "$state" in
+    running) ;;
+    reused)
+      echo "steer: refusing, pid $pid is alive but its start time does not match" \
+        "the recorded one, so it is a different process now"
+      return 1 ;;
+    *)
+      echo "steer: worker $pid is not running (state=$state," \
+        "exit=$(_read1 "$dir/exit-code.txt" '?'))"
+      return 1 ;;
+  esac
+  printf '%s\n' "$message" >"$dir/steer.txt"
+  _ssa_event "$dir" --phase running --artifact "$dir/steer.txt"
+  echo "steer: delivered to $dir/steer.txt"
+}
+
 # --- ls / status: what is on this machine right now ---------------------------
 
 cmd_ls() {
@@ -2613,6 +2647,11 @@ Usage: smart-subagents.sh <command> [options]
       TERM then KILL the recorded process group. Refuses when the pid is gone
       or belongs to a different process now.
 
+  steer --dir DIR --message TEXT
+      Deliver TEXT into a live worker as DIR/steer.txt. Refuses when the
+      worker is not running or the pid belongs to a different process now.
+      Does not mint a task, stop the run, or increment retries.
+
   verify --dir DIR
       Run DIR/verify-cmds.txt in the worktree, compare against
       DIR/baseline-results.txt, check changed paths against DIR/scope.txt, run
@@ -2715,6 +2754,7 @@ main() {
     status) cmd_status "$@" ;;
     tail) cmd_tail "$@" ;;
     stop) cmd_stop "$@" ;;
+    steer) cmd_steer "$@" ;;
     verify) cmd_verify "$@" ;;
     cooldown) cmd_cooldown "$@" ;;
     record) cmd_record "$@" ;;

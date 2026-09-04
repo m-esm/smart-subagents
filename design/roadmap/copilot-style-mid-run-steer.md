@@ -1,5 +1,5 @@
 ---
-state: promoted
+state: building
 lens: outside-in
 created: 2026-09-03
 metric: top-level CLI verbs that inject a follow-up into a live dispatch
@@ -9,7 +9,7 @@ measure: python3 -c "import subprocess,re; out=subprocess.check_output(['bash','
 evidence:
   - design/roadmap/evidence/2026-09-04-copilot-mission-control.png
   - design/roadmap/evidence/2026-09-04-copilot-mission-control-extract.txt
-slices: 0/3
+slices: 1/3
 after:
 ---
 # Copilot-style mid-run steer (no extra dispatch)
@@ -24,6 +24,6 @@ Copilot: type into the live session; the agent adapts after the current tool cal
 
 ## Slices
 
-- [ ] `steer --dir DIR --message TEXT` refuses when the worker is not running, otherwise delivers the text and leaves the same task_id in `running`.
+- [x] `steer --dir DIR --message TEXT` refuses when the worker is not running, otherwise delivers the text and leaves the same task_id in `running`.
 - [ ] `status --dir DIR` (and `ls`) show that a live session accepts steer; no new lifecycle state required beyond documenting the inject.
 - [ ] Gate: the measure command prints 1. A steered run is the same dispatch in the ledger, not a retry.
