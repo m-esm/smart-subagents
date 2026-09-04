@@ -1,5 +1,5 @@
 ---
-state: proposed
+state: promoted
 lens: outside-in
 created: 2026-09-03
 metric: top-level CLI verbs that inject a follow-up into a live dispatch
