@@ -1479,6 +1479,119 @@ class SteerTests(unittest.TestCase):
                 run_ssa("stop", "--dir", str(task_dir), env=env)
                 proc.wait(timeout=60)
 
+    def _steer_field(self, status_out):
+        for line in status_out.splitlines():
+            if line.startswith("steer"):
+                return line.split(":", 1)[1].strip()
+        self.fail("no steer field in status:\n" + status_out)
+
+    def _ls_steer(self, ls_out, task_id):
+        header = ls_out.splitlines()[0] if ls_out else ""
+        idx = header.find("STEER")
+        self.assertGreaterEqual(idx, 0, "ls header has no STEER column:\n" + ls_out)
+        for line in ls_out.splitlines()[1:]:
+            if line.startswith(task_id):
+                return line[idx:idx + 5].strip()
+        self.fail("no ls row for %s:\n%s" % (task_id, ls_out))
+
+    def test_steer_no_idle(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            task_id = (task_dir / "task-id.txt").read_text().strip()
+            rc, out, err = run_ssa("status", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertEqual(self._steer_field(out), "no")
+            rc, out, err = run_ssa("ls", "--all", env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertEqual(self._ls_steer(out, task_id), "no")
+            rc, out, err = run_ssa("list", "--all", env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertEqual(self._ls_steer(out, task_id), "no")
+
+    def test_steer_no_dead(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            dead_dir = make_task_dir(te.work_dir, repo)
+            dead = subprocess.Popen(["true"])
+            dead.wait()
+            (dead_dir / "worker.pid").write_text("%d\n" % dead.pid)
+            reused_dir = make_task_dir(te.work_dir, repo)
+            (reused_dir / "worker.pid").write_text("%d\n" % os.getpid())
+            (reused_dir / "worker-start.txt").write_text("Thu Jan  1 00:00:00 1970\n")
+
+            rc, out, err = run_ssa("status", "--dir", str(dead_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertEqual(self._steer_field(out), "no")
+            rc, out, err = run_ssa("status", "--dir", str(reused_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertEqual(self._steer_field(out), "no")
+            self.assertIn("(reused)", out)
+
+            rc, out, err = run_ssa("ls", "--all", env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            dead_id = (dead_dir / "task-id.txt").read_text().strip()
+            reused_id = (reused_dir / "task-id.txt").read_text().strip()
+            self.assertEqual(self._ls_steer(out, dead_id), "no")
+            self.assertEqual(self._ls_steer(out, reused_id), "no")
+
+    def test_steer_yes_live(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            idle_dir = make_task_dir(te.work_dir, repo)
+            sleeper = write_script(te.root / "codex-slow.sh", "#!/bin/sh\nsleep 30\n")
+            env = self._env_with_ps_shim(
+                te,
+                extra={
+                    "CODEX_BIN": str(sleeper),
+                    "SSA_KILL_GRACE_SECS": "2",
+                },
+            )
+            task_id = (task_dir / "task-id.txt").read_text().strip()
+            idle_id = (idle_dir / "task-id.txt").read_text().strip()
+            proc = subprocess.Popen(
+                ["bash", str(SSA_SH), "dispatch", "--dir", str(task_dir),
+                 "--worker", "codex"],
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                self.assertTrue(self._wait_for(task_dir / "worker.pid", 20))
+                seen = ""
+                deadline = time.time() + 20
+                while time.time() < deadline:
+                    _, seen, _ = run_ssa("status", "--dir", str(task_dir), env=env)
+                    if "(running)" in seen:
+                        break
+                    time.sleep(0.2)
+                self.assertIn("(running)", seen)
+                self.assertEqual(self._steer_field(seen), "yes")
+                rc, out, err = run_ssa("ls", "--all", env=env)
+                self.assertEqual(rc, 0, err + out)
+                self.assertEqual(self._ls_steer(out, task_id), "yes")
+                self.assertEqual(self._ls_steer(out, idle_id), "no")
+                rc, out, err = run_ssa("list", "--all", env=env)
+                self.assertEqual(rc, 0, err + out)
+                self.assertEqual(self._ls_steer(out, task_id), "yes")
+            finally:
+                run_ssa("stop", "--dir", str(task_dir), env=env)
+                proc.wait(timeout=60)
+
+    def test_help_steer(self):
+        with temp_env() as te:
+            rc, out, err = run_ssa("help", env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            ls_idx = out.find("ls [--all]")
+            status_idx = out.find("status --dir DIR")
+            steer_idx = out.find("steer --dir DIR")
+            self.assertGreater(ls_idx, 0, out)
+            self.assertGreater(status_idx, ls_idx, out)
+            self.assertGreater(steer_idx, status_idx, out)
+            ls_block = " ".join(out[ls_idx:status_idx].split())
+            status_block = " ".join(out[status_idx:steer_idx].split())
+            self.assertIn("whether a live session accepts steer", ls_block)
+            self.assertIn("whether a live session accepts steer", status_block)
+
 
 class VersionTests(unittest.TestCase):
     def test_plugin_version_matches_the_top_changelog_heading(self):

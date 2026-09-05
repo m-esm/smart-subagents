@@ -1190,7 +1190,7 @@ cmd_ls() {
     esac
   done
   [[ -d "$SSA_WORK_DIR" ]] || { echo "no task dirs under $SSA_WORK_DIR"; return 0; }
-  local now d id age repo worker class phase state diff hidden=0 shown=0
+  local now d id age repo worker class phase state steer diff hidden=0 shown=0
   local tmp live
   now="$(_now)"
   tmp="$(mktemp "${TMPDIR:-/tmp}/ssa-ls.XXXXXX")"
@@ -1207,8 +1207,8 @@ cmd_ls() {
       live=0
       [[ -f "$d/panel-done.txt" ]] || live=1
       printf '%s\t%s\t%s\n' "$(_mtime "$d")" "$live:$state" \
-        "$(printf '%-18s %5s %-16s %-7s %-22s %-9s %-12s %s' \
-          "$id" "$age" "$repo" "panel" "$(_task_class "$d")" "panel" "-" \
+        "$(printf '%-18s %5s %-16s %-7s %-22s %-9s %-12s %-5s %s' \
+          "$id" "$age" "$repo" "panel" "$(_task_class "$d")" "panel" "-" "no" \
           "${plans} plan(s)")" >>"$tmp"
       continue
     fi
@@ -1218,17 +1218,20 @@ cmd_ls() {
     phase="$(_task_phase "$d")"
     state="$(_task_state "$d")"
     diff="$(_diff_summary "$d")"
+    # Same gate as cmd_steer: only a live worker pid accepts mid-run inject.
+    steer=no
+    [[ "$(_worker_state "$d")" == "running" ]] && steer=yes
     [[ ! -f "$d/stalled.txt" ]] || phase="${phase}!"
     # In flight: still worth showing however old the dir is.
     live=0
     case "$state" in running|picked|briefed) live=1 ;; esac
     case "$phase" in running|briefed) live=1 ;; esac
     printf '%s\t%s\t%s\n' "$(_mtime "$d")" "$live:$state" \
-      "$(printf '%-18s %5s %-16s %-7s %-22s %-9s %-12s %s' \
-        "$id" "$age" "$repo" "$worker" "$class" "$phase" "$state" "$diff")" >>"$tmp"
+      "$(printf '%-18s %5s %-16s %-7s %-22s %-9s %-12s %-5s %s' \
+        "$id" "$age" "$repo" "$worker" "$class" "$phase" "$state" "$steer" "$diff")" >>"$tmp"
   done
-  printf '%-18s %5s %-16s %-7s %-22s %-9s %-12s %s\n' \
-    TASK AGE REPO WORKER SIZE/DIFF/KIND PHASE STATE DIFF
+  printf '%-18s %5s %-16s %-7s %-22s %-9s %-12s %-5s %s\n' \
+    TASK AGE REPO WORKER SIZE/DIFF/KIND PHASE STATE STEER DIFF
   local key row
   while IFS=$'\t' read -r _ key row; do
     if [[ -n "$want_state" && "${key#*:}" != "$want_state" ]]; then
@@ -1290,6 +1293,12 @@ cmd_status() {
     echo "session   : resume=unavailable"
   fi
   echo "worker pid: $pid ($state)"
+  # Same gate as cmd_steer: yes only while _worker_state is running.
+  if [[ "$state" == "running" ]]; then
+    echo "steer     : yes"
+  else
+    echo "steer     : no"
+  fi
   [[ ! -f "$dir/stalled.txt" ]] || echo "stalled   : $(tail -n1 "$dir/stalled.txt")"
   [[ ! -f "$dir/stopped.txt" ]] || echo "stopped   : $(tail -n1 "$dir/stopped.txt")"
   echo "diff      : $(_diff_summary "$dir")"
@@ -2632,13 +2641,15 @@ Usage: smart-subagents.sh <command> [options]
 
   ls [--all] [--state STATE]        (alias: list)
       One line per task and planning panel under SSA_WORK_DIR: age, repo,
-      worker, size/difficulty/kind, inferred phase, recorded state, diff. The
-      20 most recent plus everything still in flight; --all prints the rest.
+      worker, size/difficulty/kind, inferred phase, recorded state, whether a
+      live session accepts steer, diff. The 20 most recent plus everything
+      still in flight; --all prints the rest.
 
   status --dir DIR
       Full detail for one task: base sha, branch, exit code, session or
-      resume=unavailable, worker pid state, recorded lifecycle state and event
-      count, verify state, last log lines.
+      resume=unavailable, worker pid state, recorded lifecycle state and
+      event count, whether a live session accepts steer, verify state,
+      last log lines.
 
   tail --dir DIR
       Follow DIR/stdout.log.
