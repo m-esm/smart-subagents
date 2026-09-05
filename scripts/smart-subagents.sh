@@ -2417,6 +2417,14 @@ cmd_record() {
     *) die "record: --outcome must be one of verified-pass partial rejected blocked env-blocked rate-limited" ;;
   esac
   [[ "$retries" =~ ^[0-9]+$ ]] || die "record: --retries takes a whole number"
+  # A mid-run steer is the same dispatch. Counting it as --retries would
+  # train the ledger that this was a second attempt (GOAL.md number 3).
+  if [[ -f "$dir/steer.txt" ]]; then
+    if [[ "$retries" != 0 ]]; then
+      echo "record: steered run; retries forced to 0 (same dispatch, not a retry)" >&2
+    fi
+    retries=0
+  fi
   need python3
   mkdir -p "$SSA_STATE_DIR" 2>/dev/null || true
   chmod 700 "$SSA_STATE_DIR" 2>/dev/null || true
@@ -2678,6 +2686,8 @@ Usage: smart-subagents.sh <command> [options]
          [--retries N] [--handoff-to CLI] [--notes STR]
       Append one outcome line to the ledger and write DIR/outcome-record.json.
       Carries no prompts, diffs, paths, session ids or account identifiers.
+      If DIR/steer.txt exists, retries is 0 even when --retries N is passed:
+      a steered run is the same dispatch, not a retry.
 
   ledger [--days N]
       Per-CLI dispatch count, verified-pass rate, mean retries and quota
