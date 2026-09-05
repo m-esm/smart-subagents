@@ -1,0 +1,16 @@
+{
+  "name": "brief-to-verified",
+  "kind": "cli",
+  "lens": "journey",
+  "created": "2026-09-06",
+  "goal": "Hand a repo and a brief; get pass, fail, or inconclusive without trusting last-msg.txt and without writing the user's checkout.",
+  "broken_today": "dispatch returns when the worker process exits. verify is a later, optional command. A finished task with exit 0 and no outcome.json is a completed-looking run that never verified.",
+  "measure": "python3 -c \"import pathlib,re; t=pathlib.Path('scripts/smart-subagents.sh').read_text(); s=t.find('cmd_dispatch() {'); e=t.find('\\\\ncmd_', s+10); print(len(re.findall(r'\\\\bcmd_verify\\\\b', t[s:e])))\"",
+  "steps": [
+    {"id": "init", "cmd": "smart-subagents.sh init --repo PATH", "completes": true},
+    {"id": "brief", "cmd": "write DIR/brief.md", "completes": true},
+    {"id": "dispatch", "cmd": "smart-subagents.sh dispatch --dir DIR", "completes": true, "note": "cmd_dispatch body contains 0 calls to cmd_verify"},
+    {"id": "verify", "cmd": "smart-subagents.sh verify --dir DIR", "completes": false, "note": "optional; doctor verify:pending was 6 on 2026-09-06, including grok exit 0"},
+    {"id": "report", "cmd": "read outcome.json, not last-msg.txt", "completes": false, "note": "no report verb; parent can only trust worker last-msg.txt unless they remember verify"}
+  ]
+}

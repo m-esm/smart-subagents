@@ -1,0 +1,20 @@
+[ok  ] python3          Python 3.9.6
+[ok  ] git              git version 2.50.1 (Apple Git-155)
+[ok  ] registry         4 worker(s) registered
+[ok  ] bin:codex        /Users/moshe/.local/bin/codex
+[ok  ] auth:codex       credentials file present
+[ok  ] bin:grok         /Users/moshe/.grok/bin/grok
+[ok  ] auth:grok        credentials file present
+[ok  ] bin:kimi         /Users/moshe/.kimi-code/bin/kimi
+[ok  ] auth:kimi        credentials file present
+[ok  ] bin:claude       /Users/moshe/.local/bin/claude
+[warn] auth:claude      registry declares no credential file
+[ok  ] env-scrub        scrubbed: kimi, claude; inherits this environment: codex, grok
+[ok  ] auth:claude      keychain item present
+[ok  ] cache:perms      /Users/moshe/.cache/smart-subagents is 0700
+[ok  ] cache:usage      quota cache 34m old
+[ok  ] workdir          /var/folders/xy/5_g6rfg54mxccc5v00y07sdc0000gn/T//smart-subagents writable
+[warn] orphans          161 dir(s) without task-id.txt under /var/folders/xy/5_g6rfg54mxccc5v00y07sdc0000gn/T//smart-subagents
+[warn] verify:pending   6 finished task(s) unverified, run: smart-subagents.sh verify --dir DIR
+[ok  ] resume           no tasks marked resume-unavailable
+[ok  ] worktrees        no registered worktree points at a missing path

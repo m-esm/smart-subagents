@@ -1,0 +1,41 @@
+{
+  "count": 6,
+  "tasks": [
+    {
+      "dir": "1788315826-72970",
+      "exit": "143",
+      "worker": "grok",
+      "has_record": false
+    },
+    {
+      "dir": "1788374689-10589",
+      "exit": "1",
+      "worker": "codex",
+      "has_record": false
+    },
+    {
+      "dir": "1788432609-8676",
+      "exit": "1",
+      "worker": "codex",
+      "has_record": true
+    },
+    {
+      "dir": "1788521711-48022",
+      "exit": "1",
+      "worker": "codex",
+      "has_record": true
+    },
+    {
+      "dir": "1788523646-54165",
+      "exit": "0",
+      "worker": "grok",
+      "has_record": false
+    },
+    {
+      "dir": "1788583502-19964",
+      "exit": "1",
+      "worker": "codex",
+      "has_record": false
+    }
+  ]
+}

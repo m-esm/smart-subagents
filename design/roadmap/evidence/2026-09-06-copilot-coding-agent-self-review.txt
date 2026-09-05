@@ -1,0 +1,13 @@
+source: https://github.blog/ai-and-ml/github-copilot/whats-new-with-github-copilot-coding-agent/
+fetched: 2026-09-06
+uiwalk: design/roadmap/evidence/2026-09-06-copilot-coding-agent-self-review.png
+hero dek: "GitHub Copilot coding agent now includes a model picker, self-review, built-in security scanning, custom agents, and CLI handoff."
+
+Pulled from the article body (web_search/open_page, 2026-09-06):
+
+"Copilot coding agent now reviews its own changes using Copilot code review before it opens the pull request. It gets feedback, iterates, and improves the patch. By the time you’re tagged for review, someone already went through it."
+
+"Copilot coding agent now runs code scanning, secret scanning, and dependency vulnerability checks directly inside its workflow."
+
+Copilot CLI comparable end-to-end (https://docs.github.com/en/copilot/how-tos/copilot-cli/manage-pull-requests):
+"/pr auto — Create a pull request if needed, then loop through all fix phases until all pull request checks are passing."
