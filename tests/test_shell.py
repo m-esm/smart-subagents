@@ -700,6 +700,35 @@ class RecordTests(unittest.TestCase):
             self.assertNotIn("repo", record)
             self.assertNotIn("dir", record)
 
+    def test_record_steered_run_is_not_a_retry(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "exit-code.txt").write_text("0\n")
+            (task_dir / "steer.txt").write_text("course-correct\n")
+            task_id = (task_dir / "task-id.txt").read_text().strip()
+
+            rc, out, err = run_ssa(
+                "record",
+                "--dir",
+                str(task_dir),
+                "--outcome",
+                "verified-pass",
+                "--retries",
+                "1",
+                env=te.env,
+            )
+            self.assertEqual(rc, 0, err)
+            self.assertIn("retries forced to 0", err)
+
+            ledger_path = te.state_dir / "outcomes.jsonl"
+            lines = ledger_path.read_text().strip().splitlines()
+            self.assertEqual(len(lines), 1)
+            record = json.loads(lines[-1])
+            self.assertEqual(record["retries"], 0)
+            self.assertEqual(record["task_id"], task_id)
+            self.assertEqual(record["outcome"], "verified-pass")
+
 
 class StructuralBriefTests(unittest.TestCase):
     def test_dispatch_refuses_brief_without_structural_section(self):
