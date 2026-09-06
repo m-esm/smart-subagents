@@ -1608,21 +1608,27 @@ cmd_scan_secrets() {
   diff_file="$dir/verify-secrets.diff"
   added_file="$dir/verify-secrets-added.txt"
   names_file="$dir/verify-secrets-names.txt"
-  local untracked_file="$dir/verify-secrets-untracked.z"
+  local untracked_file="$dir/verify-secrets-untracked.txt"
   : >"$findings"
   git -C "$wt" diff --no-ext-diff --unified=0 "$base" -- >"$diff_file"
   git -C "$wt" diff --name-status --diff-filter=A "$base" -- >"$names_file"
   # A worker that leaks a credential leaks it in a file it never staged, so the
   # tracked diff alone cannot see it. Untracked files count as added lines.
-  git -C "$wt" status --porcelain -uall -z >"$untracked_file" 2>/dev/null || : >"$untracked_file"
-  python3 - "$diff_file" "$added_file" "$names_file" "$findings" "$wt" "$untracked_file" <<'PY'
+  # Use the timed/capped -uall probe: unbounded `status -uall -z` hangs on the
+  # same clones init already refuses, and an untracked explosion is what made
+  # gitleaks fail 1788547916 / 1788606058 on files already at base.
+  if ! _ssa_git_status_porcelain_uall "$wt" "$untracked_file" "scan-secrets"; then
+    : >"$untracked_file"
+  fi
+  python3 - "$diff_file" "$added_file" "$names_file" "$findings" "$wt" "$untracked_file" "$base" <<'PY'
 import math
 import os
 import re
+import subprocess
 import sys
 from collections import Counter
 
-diff_path, added_path, names_path, findings_path, wt, untracked_path = sys.argv[1:]
+diff_path, added_path, names_path, findings_path, wt, untracked_path, base = sys.argv[1:]
 patterns = [
     ("aws-access-key", re.compile(r"AKIA[0-9A-Z]{16}")),
     ("openai-key", re.compile(r"sk-[A-Za-z0-9_-]{20,}")),
@@ -1633,6 +1639,12 @@ patterns = [
 ]
 token_re = re.compile(r"[A-Za-z0-9+/=_-]{32,}")
 env_re = re.compile(r"(^|/)\.env(\..+)?$")
+# 1788547835-63023: catalog lines naming pre-existing STL/PDF files tripped
+# high-entropy because a 40-char hex stem measures 3.84.
+ASSET_FOLLOW = re.compile(
+    r"\.(?:stl|pdf|png|jpe?g|gif|webp|step|stp|3mf|obj|wrl|iges|igs|glb|gltf|bin)(?:\b|$)",
+    re.I,
+)
 findings = []
 
 def masked(value):
@@ -1644,17 +1656,47 @@ def entropy(value):
     return -sum((count / length) * math.log(count / length, 2)
                 for count in counts.values())
 
+def at_base(secret):
+    """True when this exact string already exists in the base tree."""
+    secret = secret or ""
+    if len(secret) < 16:
+        return False
+    cached = at_base.cache
+    if secret in cached:
+        return cached[secret]
+    try:
+        ran = subprocess.run(
+            ["git", "-C", wt, "grep", "-F", "-I", "-l", "--max-count=1",
+             "-e", secret, base, "--"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        hit = ran.returncode == 0
+    except OSError:
+        hit = False
+    cached[secret] = hit
+    return hit
+
+
+at_base.cache = {}
+
 def untracked_paths():
-    """`?? path` entries from a NUL-separated porcelain status."""
+    """`?? path` entries from porcelain status (NUL or newline separated)."""
     try:
         with open(untracked_path, "rb") as fh:
             blob = fh.read().decode("utf-8", "replace")
     except OSError:
         return []
+    sep = "\0" if "\0" in blob else "\n"
     out = []
-    for entry in blob.split("\0"):
-        if entry.startswith("?? "):
-            out.append(entry[3:])
+    for entry in blob.split(sep):
+        entry = entry.strip()
+        if not entry.startswith("?? "):
+            continue
+        path = entry[3:]
+        if len(path) >= 2 and path[0] == path[-1] == '"':
+            path = path[1:-1]
+        out.append(path)
     return out
 
 
@@ -1710,14 +1752,20 @@ with open(added_path, "w") as added:
                 matches.extend(found)
         # 3.5, not 4.5: a 40-char hex token (a git sha, an API token minted as
         # hex) measures 3.84, so the old threshold never saw one.
-        entropy_matches = [
-            match for match in token_re.finditer(line)
-            if entropy(match.group(0)) > 3.5
-        ]
+        entropy_matches = []
+        for match in token_re.finditer(line):
+            if entropy(match.group(0)) <= 3.5:
+                continue
+            if ASSET_FOLLOW.match(line[match.end():]):
+                continue
+            entropy_matches.append(match)
         if entropy_matches:
             names.append("high-entropy-token")
             matches.extend(entropy_matches)
         if not matches:
+            continue
+        secrets = [match.group(0) for match in matches]
+        if secrets and all(at_base(secret) for secret in secrets):
             continue
         spans = []
         for start, end in sorted({(match.start(), match.end()) for match in matches}):
@@ -1750,16 +1798,36 @@ PY
     cp "$added_file" "$scan_tmp/source/added-lines.txt"
     if ! gitleaks detect --no-git --source "$scan_tmp/source" \
         --report-format json --report-path "$gitleaks_report" >/dev/null 2>&1; then
-      python3 - "$gitleaks_report" "$findings" <<'PY'
+      python3 - "$gitleaks_report" "$findings" "$wt" "$base" <<'PY'
 import json
+import subprocess
 import sys
 try:
     records = json.load(open(sys.argv[1]))
 except Exception:
     records = []
+wt, base = sys.argv[3], sys.argv[4]
+
+def at_base(secret):
+    secret = secret or ""
+    if len(secret) < 16:
+        return False
+    try:
+        ran = subprocess.run(
+            ["git", "-C", wt, "grep", "-F", "-I", "-l", "--max-count=1",
+             "-e", secret, base, "--"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return ran.returncode == 0
+    except OSError:
+        return False
+
 with open(sys.argv[2], "a") as out:
     for record in records:
         secret = str(record.get("Secret") or "")
+        if at_base(secret):
+            continue
         masked = secret[:4] + "*" * max(4, len(secret) - 4)
         rule = record.get("RuleID") or "finding"
         out.write("gitleaks-{}: {}\n".format(rule, masked))
@@ -2481,12 +2549,31 @@ if stat.exists():
         deletions = int(m.group(1)) if m else 0
 
 verified = None
+verdict = None
 oc = d / "outcome.json"
 if oc.exists():
     try:
-        verified = (json.loads(oc.read_text()).get("verify") or {}).get("verdict") == "pass"
+        verdict = (json.loads(oc.read_text()).get("verify") or {}).get("verdict")
+        verified = verdict == "pass"
     except Exception:
         verified = None
+        verdict = None
+
+# Supervisors were writing outcome=verified-pass while verify.verdict was
+# fail (task 1788304583-49540 secrets/gitleaks, 1788512758-73379 scope).
+# The ledger then trained pick() and woke improve-agents on a lie.
+if outcome == "verified-pass" and verified is not True:
+    if not oc.exists():
+        got = "missing outcome.json"
+    elif verdict is None:
+        got = "unreadable or missing verify.verdict"
+    else:
+        got = "verdict=%s" % verdict
+    sys.stderr.write(
+        "record: --outcome verified-pass requires outcome.json "
+        "verify.verdict=pass (got %s)\n" % got
+    )
+    raise SystemExit(1)
 
 def quota(name):
     p = d / name

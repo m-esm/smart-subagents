@@ -666,12 +666,25 @@ class LogDigestTests(unittest.TestCase):
             self.assertIn("unregistered worker", out)
 
 
+def write_outcome(task_dir: Path, verdict: str = "pass") -> None:
+    (task_dir / "outcome.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "verify": {"verdict": verdict},
+            }
+        )
+        + "\n"
+    )
+
+
 class RecordTests(unittest.TestCase):
     def test_record_writes_ledger_line_without_absolute_paths(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
             task_dir = make_task_dir(te.work_dir, repo)
             (task_dir / "exit-code.txt").write_text("0\n")
+            write_outcome(task_dir, "pass")
 
             rc, out, err = run_ssa(
                 "record",
@@ -699,6 +712,62 @@ class RecordTests(unittest.TestCase):
             self.assertTrue(record["repo_hash"])
             self.assertNotIn("repo", record)
             self.assertNotIn("dir", record)
+            self.assertTrue(record["verification_passed"])
+
+    def test_record_verified_pass_refuses_failed_verdict(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "exit-code.txt").write_text("0\n")
+            write_outcome(task_dir, "fail")
+            rc, out, err = run_ssa(
+                "record",
+                "--dir",
+                str(task_dir),
+                "--outcome",
+                "verified-pass",
+                env=te.env,
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn("verdict=fail", err)
+            self.assertFalse((te.state_dir / "outcomes.jsonl").exists())
+
+    def test_record_verified_pass_refuses_missing_outcome_json(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "exit-code.txt").write_text("0\n")
+            rc, out, err = run_ssa(
+                "record",
+                "--dir",
+                str(task_dir),
+                "--outcome",
+                "verified-pass",
+                env=te.env,
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn("missing outcome.json", err)
+
+    def test_record_partial_allowed_when_verify_failed(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "exit-code.txt").write_text("0\n")
+            write_outcome(task_dir, "fail")
+            rc, out, err = run_ssa(
+                "record",
+                "--dir",
+                str(task_dir),
+                "--outcome",
+                "partial",
+                env=te.env,
+            )
+            self.assertEqual(rc, 0, err)
+            record = json.loads(
+                (te.state_dir / "outcomes.jsonl").read_text().strip().splitlines()[-1]
+            )
+            self.assertEqual(record["outcome"], "partial")
+            self.assertIs(record["verification_passed"], False)
 
     def test_record_steered_run_is_not_a_retry(self):
         with temp_env() as te:
@@ -706,6 +775,7 @@ class RecordTests(unittest.TestCase):
             task_dir = make_task_dir(te.work_dir, repo)
             (task_dir / "exit-code.txt").write_text("0\n")
             (task_dir / "steer.txt").write_text("course-correct\n")
+            write_outcome(task_dir, "pass")
             task_id = (task_dir / "task-id.txt").read_text().strip()
 
             rc, out, err = run_ssa(
@@ -1280,6 +1350,38 @@ class SecretScanTests(unittest.TestCase):
             findings = (task_dir / "verify-secrets.txt").read_text()
             self.assertIn("high-entropy-token", findings)
             self.assertNotIn(self.HEX40, findings)
+
+    def test_secret_already_at_base_is_not_a_new_finding(self):
+        # 1788547916 / 1788606058: gitleaks/regex hits present at base in
+        # untouched files (or copied into the worktree) used to fail verify.
+        key = "AIza" + ("B" * 35)
+        with temp_env() as te:
+            repo = make_git_repo(
+                te.root / "repo",
+                files={"viewer-next/config.js": "const k = \"%s\";\n" % key},
+            )
+            task_dir = make_task_dir(te.work_dir, repo)
+            (repo / "copy.js").write_text("reuse = \"%s\";\n" % key)
+
+            rc, out, err = run_ssa("scan-secrets", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertFalse((task_dir / "verify-secrets.txt").read_text().strip())
+
+    def test_stl_filename_is_not_a_high_entropy_secret(self):
+        # 1788547835-63023: catalog lines naming pre-existing STL/PDF files.
+        stl = "%s.stl" % self.HEX40
+        pdf = "%s.pdf" % self.HEX40
+        with temp_env() as te:
+            repo = make_git_repo(
+                te.root / "repo",
+                files={"catalog.txt": "file=%s\n" % stl},
+            )
+            task_dir = make_task_dir(te.work_dir, repo)
+            (repo / "catalog.txt").write_text("file=%s\nalso=%s\n" % (stl, pdf))
+
+            rc, out, err = run_ssa("scan-secrets", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertFalse((task_dir / "verify-secrets.txt").read_text().strip())
 
     def test_verify_records_whether_gitleaks_ran(self):
         with temp_env() as te:
