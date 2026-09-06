@@ -1,5 +1,5 @@
 ---
-state: proposed
+state: promoted
 lens: journey
 created: 2026-09-06
 metric: cmd_verify calls inside cmd_dispatch
