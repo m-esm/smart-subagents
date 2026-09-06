@@ -1185,6 +1185,48 @@ class LifecycleTests(unittest.TestCase):
 
 
 class WorktreeBriefTests(unittest.TestCase):
+    def test_keeps_tracked_brief(self):
+        with temp_env() as te:
+            repo = make_git_repo(
+                te.root / "repo",
+                files={"README.md": "fixture\n", "BRIEF.md": "product-brief\n"},
+            )
+            task_dir = make_task_dir(te.work_dir, repo, worker_args=[])
+            env = dict(te.env)
+            env["KIMI_BIN"] = str(BIN_DIR / "fake-kimi")
+            env["SSA_ALLOW_KIMI_WRITE"] = "1"
+
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "kimi", env=env
+            )
+            self.assertEqual(rc, 0, err)
+
+            launch_brief = repo / ".ssa" / "BRIEF.md"
+            argv = read_argv_file(te.home / ".ssa-test" / "fake-kimi" / "argv.txt")
+            self.assertIn(
+                "Read the file %s and complete the task it describes." % launch_brief,
+                argv,
+            )
+            self.assertNotIn(
+                "Read the file %s and complete the task it describes."
+                % (repo / "BRIEF.md"),
+                argv,
+            )
+            self.assertEqual((repo / "BRIEF.md").read_text(), "product-brief\n")
+            porcelain = subprocess.check_output(
+                ["git", "-C", str(repo), "status", "--porcelain", "-uall"], text=True
+            )
+            self.assertNotIn("BRIEF.md", porcelain)
+            self.assertFalse(launch_brief.exists())
+            common = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "--git-common-dir"], text=True
+            ).strip()
+            common_path = Path(common)
+            if not common_path.is_absolute():
+                common_path = repo / common_path
+            exclude = common_path / "info" / "exclude"
+            self.assertIn("/.ssa/BRIEF.md", exclude.read_text())
+
     def test_staged_brief_is_excluded_and_removed_in_a_linked_worktree(self):
         # --absolute-git-dir points at .git/worktrees/<id>, whose info/exclude
         # git never reads, so the brief showed as untracked in every dispatch.

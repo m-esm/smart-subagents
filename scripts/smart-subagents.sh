@@ -833,7 +833,7 @@ cmd_dispatch() {
   fi
   # The staged brief is a launch path, not part of the change: remove it before
   # anything reads the tree, so it can never reach a diff or a `git add -A`.
-  rm -f "$wt/BRIEF.md"
+  rm -f "$launch_brief"
   # Diff stat for supervisor
   local base
   base="$(cat "$dir/base-sha.txt" 2>/dev/null || true)"
@@ -902,7 +902,21 @@ _ssa_log_digest() {
 # see it.
 _ssa_stage_worktree_brief() {
   local wt="$1" src="$2"
-  local dest="$wt/BRIEF.md" git_dir exclude common
+  local rel="BRIEF.md" dest git_dir exclude common suffix=0
+  # A repository may legitimately track BRIEF.md. Never replace that product
+  # file with the supervisor brief: use a separate in-worktree launch path.
+  if git -C "$wt" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
+    rel=".ssa/BRIEF.md"
+    dest="$wt/$rel"
+    while [[ -e "$dest" || -L "$dest" ]] \
+        || git -C "$wt" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; do
+      suffix=$((suffix + 1))
+      rel=".ssa/BRIEF-$suffix.md"
+      dest="$wt/$rel"
+    done
+  else
+    dest="$wt/$rel"
+  fi
   # --absolute-git-dir in a linked worktree is .git/worktrees/<id>, whose
   # info/exclude git never reads: the brief then showed up untracked in every
   # dispatch, which blocked cleanup and let `git add -A` commit it. The shared
@@ -913,9 +927,10 @@ _ssa_stage_worktree_brief() {
     || die "dispatch: cannot resolve git dir for $wt"
   exclude="$git_dir/info/exclude"
   mkdir -p "$(dirname "$exclude")"
-  if ! grep -qxF '/BRIEF.md' "$exclude" 2>/dev/null; then
-    printf '%s\n' '/BRIEF.md' >>"$exclude"
+  if ! grep -qxF "/$rel" "$exclude" 2>/dev/null; then
+    printf '%s\n' "/$rel" >>"$exclude"
   fi
+  mkdir -p "$(dirname "$dest")"
   cp "$src" "$dest" || die "dispatch: cannot copy brief into worktree"
   printf '%s' "$dest"
 }
@@ -1938,8 +1953,7 @@ _task_unsafe_reason() {
       printf 'worktree status is unreadable'
       return 0
     fi
-    # A staged brief is a launch artifact, not the worker's work.
-    if [[ -n "$(grep -v '^?? BRIEF.md$' "$st" || true)" ]]; then
+    if [[ -s "$st" ]]; then
       rm -f "$st"
       printf 'worktree has uncommitted changes'
       return 0
@@ -2726,8 +2740,9 @@ Usage: smart-subagents.sh <command> [options]
 
   dispatch --dir DIR [--worker CLI] [--background] [--resume]
       Run the worker against DIR/brief.md in the worktree. Captures logs +
-      session id. The brief is staged as <worktree>/BRIEF.md for file-ref
-      workers and removed when the run ends. With --background the worker is
+      session id. The brief is staged inside the worktree for file-ref workers
+      (normally BRIEF.md, or .ssa/BRIEF.md if BRIEF.md is tracked) and removed
+      when the run ends. With --background the worker is
       detached into its own process group, the pid lands in DIR/worker.pid, and
       a watchdog kills a run whose log and worktree both stop changing
       (SSA_STALL_SECS, default 600). --resume continues the recorded session id
