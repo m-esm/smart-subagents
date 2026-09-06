@@ -862,6 +862,11 @@ cmd_dispatch() {
     "args=${argstr} log=$log"
   echo "  last-msg: $dir/last-msg.txt ($(wc -c 2>/dev/null <"$dir/last-msg.txt" | tr -d ' ' || echo 0) bytes)"
   _ssa_log_digest "$dir" "$worker" "$log" 3 400 | sed 's/^/  /'
+  # Worker rc stays in exit-code.txt. Foreground process exit follows verify
+  # (0 pass, 1 fail, 2 inconclusive) so the parent is not the one who has to
+  # remember a second command.
+  rc=0
+  cmd_verify --dir "$dir" || rc=$?
   return "$rc"
 }
 

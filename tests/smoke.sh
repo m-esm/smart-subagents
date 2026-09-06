@@ -151,15 +151,13 @@ cat >"$codex_fail" <<'SH'
 exit 7
 SH
 chmod +x "$codex_fail"
-if CODEX_BIN="$codex_fail" "$SSA" dispatch --dir "$dispatch_task" \
-    --worker codex >/dev/null 2>&1; then
-  fail "dispatch returns worker failure"
-else
-  dispatch_rc=$?
-fi
-[[ "$dispatch_rc" == "7" ]] || fail "dispatch exit status"
+dispatch_rc=0
+CODEX_BIN="$codex_fail" "$SSA" dispatch --dir "$dispatch_task" \
+    --worker codex >/dev/null 2>&1 || dispatch_rc=$?
+[[ "$dispatch_rc" == "0" ]] || fail "dispatch exit follows verify"
 [[ "$(cat "$dispatch_task/exit-code.txt")" == "7" ]] || \
   fail "dispatch exit-code file"
+[[ -f "$dispatch_task/outcome.json" ]] || fail "dispatch wrote outcome.json"
 [[ -f "$dispatch_task/resume-unavailable.txt" ]] || \
   fail "dispatch resume marker"
 pass "dispatch captures exit code and unavailable resume"
@@ -493,7 +491,7 @@ chmod +x "$codex_429"
 cool_rc=0
 XDG_STATE_HOME="$cool_dispatch_state" CODEX_BIN="$codex_429" "$SSA" dispatch \
   --dir "$cool_task" --worker codex >"$TEST_TMP/cooldown-dispatch.txt" 2>&1 || cool_rc=$?
-[[ "$cool_rc" == "1" ]] || fail "cooldown dispatch exit status"
+[[ "$cool_rc" == "0" ]] || fail "cooldown dispatch exit status"
 grep -q 'cooldown=codex:rate-limit' "$TEST_TMP/cooldown-dispatch.txt" || \
   fail "dispatch reports the cooldown"
 grep -q 'rate-limit' "$cool_dispatch_state/smart-subagents/cooldowns.json" || \

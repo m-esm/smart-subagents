@@ -1,5 +1,5 @@
 ---
-state: promoted
+state: building
 lens: journey
 created: 2026-09-06
 metric: cmd_verify calls inside cmd_dispatch
@@ -12,7 +12,7 @@ evidence:
   - design/roadmap/evidence/2026-09-06-doctor-verify-pending.txt
   - design/roadmap/evidence/2026-09-06-finished-unverified.json
   - design/flows/brief-to-verified.json
-slices: 0/3
+slices: 1/3
 after:
 ---
 # Dispatch runs verify before it returns
@@ -27,6 +27,6 @@ After the worker process exits, dispatch runs the existing `verify --dir` path a
 
 ## Slices
 
-- [ ] Foreground `dispatch --dir DIR`: after the worker exits, call `cmd_verify`; measure command prints 1.
+- [x] Foreground `dispatch --dir DIR`: after the worker exits, call `cmd_verify`; measure command prints 1.
 - [ ] Background / watchdog path writes `outcome.json` when it writes `exit-code.txt`; a new finish does not increment `doctor` `verify:pending`.
 - [ ] Missing `verify-cmds.txt` → inconclusive (`outcome.json` present, verdict inconclusive), never silent skip.

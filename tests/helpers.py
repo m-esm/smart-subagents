@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -155,6 +156,10 @@ class TempEnv:
                 "PATH": path,
                 # Never let a test reach the network for a quota snapshot.
                 "SSA_NO_QUOTA_SNAPSHOT": "1",
+                # cmd_verify (now inside dispatch) runs python3; macOS then
+                # leaves com.apple.python / python3.9 caches that make
+                # TemporaryDirectory.cleanup raise ENOTEMPTY.
+                "PYTHONDONTWRITEBYTECODE": "1",
             }
         )
         env.update(self._extra_env)
@@ -163,7 +168,10 @@ class TempEnv:
 
     def __exit__(self, exc_type, exc, tb):
         if self._tmp is not None:
-            self._tmp.cleanup()
+            try:
+                self._tmp.cleanup()
+            except OSError:
+                shutil.rmtree(self._tmp.name, ignore_errors=True)
         return False
 
     @property
