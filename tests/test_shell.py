@@ -564,6 +564,35 @@ class VerifyTests(unittest.TestCase):
 
 
 class WatchdogTests(unittest.TestCase):
+    def test_bg_writes_outcome(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            env = dict(te.env)
+            env["CODEX_BIN"] = str(BIN_DIR / "fake-codex")
+
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "codex",
+                "--background", env=env,
+            )
+            self.assertEqual(rc, 0, err + out)
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                if all(
+                    (task_dir / name).is_file()
+                    for name in ("exit-code.txt", "outcome.json")
+                ):
+                    break
+                time.sleep(0.1)
+            else:
+                bg = (task_dir / "bg.log").read_text(errors="replace")
+                self.fail("background dispatch did not finish verification:\n" + bg)
+
+            rc, out, err = run_ssa("doctor", env=env)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("every finished task has an outcome.json", out)
+            self.assertNotIn("[warn] verify:pending", out)
+
     def test_background_dispatch_does_not_stall_after_worker_exits(self):
         # 1788154673-70654 / 1788215189-74491: grok exited, supervisor
         # recorded, then the watchdog (TERM ignored, leader=bg-run wrapper)
@@ -1074,6 +1103,9 @@ class LifecycleTests(unittest.TestCase):
             repo = make_git_repo(te.root / "repo")
             task_dir = make_task_dir(te.work_dir, repo)
             (task_dir / "exit-code.txt").write_text("0\n")
+            (task_dir / "outcome.json").write_text(
+                json.dumps({"verify": {"verdict": "pass"}}) + "\n"
+            )
             sleeper = write_script(te.root / "codex-sleep.sh", self.SLEEPER)
             env = self._bg_env(te, sleeper)
 
@@ -1082,6 +1114,8 @@ class LifecycleTests(unittest.TestCase):
                 "--background", env=env,
             )
             self.assertEqual(rc, 0, err + out)
+            self.assertFalse((task_dir / "exit-code.txt").exists())
+            self.assertFalse((task_dir / "outcome.json").exists())
             self.assertTrue(
                 self._wait_for(task_dir / "stalled.txt"),
                 "watchdog never stalled a silent worker:\n"
@@ -1091,6 +1125,41 @@ class LifecycleTests(unittest.TestCase):
             self.assertTrue(self._wait_for(task_dir / "exit-code.txt"))
             self.assertTrue(self._wait_for(task_dir / "diff-stat.txt"))
             wait_for_background_dispatch(task_dir)
+
+    def test_bg_run_fills_outcome(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            source = SSA_SH.read_text()
+            library = te.root / "smart-subagents-library.sh"
+            library.write_text(source.rsplit('\nmain "$@"', 1)[0] + "\n")
+            command = r'''
+source "$1"
+_watchdog() { :; }
+cmd_dispatch() {
+  local dir=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dir="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  echo 19 >"$dir/exit-code.txt"
+  return 19
+}
+cmd_bg_run --dir "$2" --worker codex
+'''
+            proc = subprocess.run(
+                ["bash", "-c", command, "test-bg-run", str(library), str(task_dir)],
+                env=te.env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            self.assertEqual((task_dir / "exit-code.txt").read_text(), "19\n")
+            doc = json.loads((task_dir / "outcome.json").read_text())
+            self.assertEqual(doc["verify"]["verdict"], "pass")
 
     def test_foreground_dispatch_records_a_live_worker_pid(self):
         with temp_env() as te:

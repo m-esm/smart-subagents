@@ -12,7 +12,7 @@ evidence:
   - design/roadmap/evidence/2026-09-06-doctor-verify-pending.txt
   - design/roadmap/evidence/2026-09-06-finished-unverified.json
   - design/flows/brief-to-verified.json
-slices: 1/3
+slices: 2/3
 after:
 ---
 # Dispatch runs verify before it returns
@@ -28,5 +28,5 @@ After the worker process exits, dispatch runs the existing `verify --dir` path a
 ## Slices
 
 - [x] Foreground `dispatch --dir DIR`: after the worker exits, call `cmd_verify`; measure command prints 1.
-- [ ] Background / watchdog path writes `outcome.json` when it writes `exit-code.txt`; a new finish does not increment `doctor` `verify:pending`.
+- [x] Background / watchdog path writes `outcome.json` when it writes `exit-code.txt`; a new finish does not increment `doctor` `verify:pending`.
 - [ ] Missing `verify-cmds.txt` → inconclusive (`outcome.json` present, verdict inconclusive), never silent skip.

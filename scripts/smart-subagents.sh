@@ -1047,7 +1047,8 @@ _dispatch_background() {
   # session id reads as this run's result.
   rm -f "$dir/worker.pid" "$dir/worker.pgid" "$dir/worker-start.txt" \
     "$dir/stalled.txt" "$dir/stopped.txt" "$dir/exit-code.txt" \
-    "$dir/last-msg.txt" "$dir/diff-stat.txt" "$dir/wt-status.txt"
+    "$dir/outcome.json" "$dir/last-msg.txt" "$dir/diff-stat.txt" \
+    "$dir/wt-status.txt"
   # A resume needs the id it is resuming, so that one file survives.
   [[ -n "$resume" ]] || rm -f "$dir/session-id.txt" "$dir/resume-unavailable.txt"
   if command -v setsid >/dev/null 2>&1; then
@@ -1097,6 +1098,15 @@ cmd_bg_run() {
   wd=$!
   cmd_dispatch --dir "$dir" --worker "$worker" \
     ${resume_arg[@]+"${resume_arg[@]}"} || rc=$?
+  # Foreground dispatch normally verifies before returning. Keep the detached
+  # wrapper as the final invariant owner: if dispatch wrote this run's worker
+  # result but returned before writing its verdict, verify it here rather than
+  # leaving doctor to report verify:pending. Verify rc is independent of the
+  # worker rc preserved in exit-code.txt.
+  if [[ -f "$dir/exit-code.txt" && ! -f "$dir/outcome.json" ]]; then
+    rc=0
+    cmd_verify --dir "$dir" || rc=$?
+  fi
   # The watchdog traps TERM (it must outlive a TERM aimed at this run). TERM
   # therefore never reaps it, and wait deadlocks until the stall timer fires on
   # an already-exited task. KILL is the only signal it cannot ignore.
