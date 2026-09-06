@@ -213,13 +213,15 @@ class FourthWorkerTests(unittest.TestCase):
             rc, out, err = run_ssa(
                 "dispatch", "--dir", str(task_dir), "--worker", "fakecli", env=env
             )
-            self.assertEqual(rc, 3, err)
+            self.assertEqual(rc, 0, err)
             self.assertEqual((task_dir / "exit-code.txt").read_text().strip(), "3")
             self.assertTrue((task_dir / "resume-unavailable.txt").exists())
             doc = json.loads((task_dir / "task.json").read_text())
-            self.assertEqual(doc["state"], "exited")
+            self.assertEqual(doc["state"], "verified")
             self.assertEqual(doc["attempts"][-1]["exit"], 3)
             self.assertEqual(doc["attempts"][-1]["failure_class"], "unknown")
+            outcome = json.loads((task_dir / "outcome.json").read_text())
+            self.assertEqual(outcome["verify"]["verdict"], "pass")
 
     def test_plan_round_robins_onto_the_fourth_worker(self):
         with temp_env() as te:

@@ -1121,6 +1121,22 @@ class LifecycleTests(unittest.TestCase):
             finally:
                 proc.wait(timeout=60)
 
+    def test_foreground_dispatch_runs_verify_before_return(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            env = dict(te.env)
+            env["CODEX_BIN"] = str(BIN_DIR / "fake-codex")
+
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "codex", env=env
+            )
+            self.assertEqual(rc, 0, err)
+            self.assertTrue((task_dir / "outcome.json").is_file(), out + err)
+            doc = json.loads((task_dir / "outcome.json").read_text())
+            self.assertEqual(doc["verify"]["verdict"], "pass")
+            self.assertIn("verify: verdict=", out)
+
     def test_a_reused_pid_is_not_a_live_worker(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
@@ -1164,7 +1180,7 @@ class LifecycleTests(unittest.TestCase):
             # The record follows the task instead of freezing at "reported".
             rc, out, err = run_ssa("ls", "--all", env=te.env)
             self.assertEqual(rc, 0, err)
-            self.assertRegex(out, r"exited")
+            self.assertRegex(out, r"verified")
 
     def test_gc_keeps_a_planning_panel_until_it_reports_done(self):
         with temp_env() as te:
