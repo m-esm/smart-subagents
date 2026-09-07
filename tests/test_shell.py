@@ -89,6 +89,9 @@ def make_task_dir(
         "\n".join(worker_args or []) + ("\n" if worker_args else "")
     )
     (d / "brief.md").write_text(brief_text)
+    # Dispatch now verifies before it returns. A missing cmds file is
+    # inconclusive, so fixtures that are not testing that path need one.
+    (d / "verify-cmds.txt").write_text("true\n")
     return d
 
 
@@ -546,6 +549,14 @@ class VerifyTests(unittest.TestCase):
             doc = json.loads((task_dir / "outcome.json").read_text())
             self.assertEqual(doc["verify"]["verdict"], "inconclusive")
 
+            # inconclusive: missing verify-cmds.txt is not a silent pass.
+            (task_dir / "verify-cmds.txt").unlink()
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 2, err)
+            self.assertTrue((task_dir / "outcome.json").is_file())
+            doc = json.loads((task_dir / "outcome.json").read_text())
+            self.assertEqual(doc["verify"]["verdict"], "inconclusive")
+
     def test_verify_empty_tree_with_brief_permission_denial_is_not_pass(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
@@ -561,6 +572,22 @@ class VerifyTests(unittest.TestCase):
             self.assertNotEqual(doc["verify"]["verdict"], "pass")
             self.assertEqual(doc["verify"]["verdict"], "fail")
             self.assertEqual(doc["verify"]["changed_files"], 0)
+
+    def test_dispatch_missing_verify_cmds_is_inconclusive(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "verify-cmds.txt").unlink()
+            env = dict(te.env)
+            env["CODEX_BIN"] = str(BIN_DIR / "fake-codex")
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "codex", env=env
+            )
+            self.assertEqual(rc, 2, err + out)
+            self.assertEqual((task_dir / "exit-code.txt").read_text().strip(), "0")
+            self.assertTrue((task_dir / "outcome.json").is_file())
+            doc = json.loads((task_dir / "outcome.json").read_text())
+            self.assertEqual(doc["verify"]["verdict"], "inconclusive")
 
 
 class WatchdogTests(unittest.TestCase):

@@ -2436,10 +2436,16 @@ for line in log_text.splitlines():
         brief_denied = True
         break
 
+missing_cmds = not (d / "verify-cmds.txt").exists()
+
 if not changed and brief_denied:
     verdict = "fail"
 elif new_failures or scope_ok is False or not secrets_ok:
     verdict = "fail"
+elif missing_cmds:
+    # No command list is not a skip: write a verdict so dispatch cannot
+    # return 0 just because the supervisor forgot the file.
+    verdict = "inconclusive"
 elif baseline_raw is None and any_failure:
     verdict = "inconclusive"
 else:
