@@ -1,0 +1,100 @@
+{
+  "queried_at": "2026-09-07T16:17:19Z",
+  "lens": "telemetry",
+  "ssa_work_dir": "/var/folders/xy/5_g6rfg54mxccc5v00y07sdc0000gn/T/smart-subagents",
+  "failed_aborted_stalled_events": 25,
+  "failure_class_null": 25,
+  "failure_class_set": 0,
+  "failure_class_counter": {
+    "None": 25
+  },
+  "measure": 0,
+  "tasks_with_task_id": 60,
+  "tasks_with_429_in_logs": 19,
+  "ledger_7d_verified_pass_note": "76/100 overall; events cannot say why the 24 non-passes failed",
+  "shell_aborted_event": "_ssa_event \"$dir\" --phase aborted --pid \"$pid\" --artifact \"$dir/stopped.txt\"",
+  "shell_verify_event": "_ssa_event \"$dir\" --phase \"$verdict_state\" --exit \"$rc\" --artifact \"$dir/outcome.json\"",
+  "shell_does_classify_on_worker_exit": true,
+  "samples": [
+    {
+      "dir": "1788304583-49540",
+      "seq": 9,
+      "ts": "2026-09-01T23:23:47Z",
+      "phase": "failed",
+      "worker": "codex",
+      "pid": null,
+      "exit": 1,
+      "failure_class": null
+    },
+    {
+      "dir": "1788510064-23237",
+      "seq": 6,
+      "ts": "2026-09-04T08:29:17Z",
+      "phase": "aborted",
+      "worker": "grok",
+      "pid": 23529,
+      "exit": null,
+      "failure_class": null
+    },
+    {
+      "dir": "1788512758-73379",
+      "seq": 8,
+      "ts": "2026-09-04T09:25:47Z",
+      "phase": "failed",
+      "worker": "grok",
+      "pid": null,
+      "exit": 1,
+      "failure_class": null
+    },
+    {
+      "dir": "1788539122-99177",
+      "seq": 9,
+      "ts": "2026-09-04T16:36:32Z",
+      "phase": "aborted",
+      "worker": "grok",
+      "pid": 2129,
+      "exit": null,
+      "failure_class": null
+    },
+    {
+      "dir": "1788547835-63023",
+      "seq": 6,
+      "ts": "2026-09-04T19:09:29Z",
+      "phase": "failed",
+      "worker": "grok",
+      "pid": null,
+      "exit": 1,
+      "failure_class": null
+    },
+    {
+      "dir": "1788547835-63023",
+      "seq": 7,
+      "ts": "2026-09-04T19:12:23Z",
+      "phase": "failed",
+      "worker": "grok",
+      "pid": null,
+      "exit": 1,
+      "failure_class": null
+    },
+    {
+      "dir": "1788547879-66204",
+      "seq": 8,
+      "ts": "2026-09-04T19:23:33Z",
+      "phase": "failed",
+      "worker": "grok",
+      "pid": null,
+      "exit": 1,
+      "failure_class": null
+    },
+    {
+      "dir": "1788547916-72813",
+      "seq": 6,
+      "ts": "2026-09-04T19:16:39Z",
+      "phase": "failed",
+      "worker": "grok",
+      "pid": null,
+      "exit": 1,
+      "failure_class": null
+    }
+  ]
+}
