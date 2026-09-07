@@ -35,6 +35,7 @@ make_task() {
 
 ## Structural discovery
 CGC-SKIP: fixture; route=none; evidence=characterization-test" >"$dir/brief.md"
+  printf 'true\n' >"$dir/verify-cmds.txt"
 }
 
 bash -n "$SSA" || fail "shell syntax"
@@ -588,6 +589,13 @@ ssa_ops verify --dir "$ops_dir" >"$TEST_TMP/verify-incon.txt" || verify_rc=$?
 [[ "$verify_rc" == "2" ]] || fail "verify inconclusive exit code"
 grep -q '"verdict": "inconclusive"' "$ops_dir/outcome.json" || \
   fail "verify inconclusive verdict"
+rm -f "$ops_dir/verify-cmds.txt"
+verify_rc=0
+ssa_ops verify --dir "$ops_dir" >"$TEST_TMP/verify-missing-cmds.txt" || verify_rc=$?
+[[ "$verify_rc" == "2" ]] || fail "verify missing cmds exit code"
+[[ -f "$ops_dir/outcome.json" ]] || fail "verify missing cmds wrote outcome"
+grep -q '"verdict": "inconclusive"' "$ops_dir/outcome.json" || \
+  fail "verify missing cmds is inconclusive, not a skip"
 printf 'true\n' >"$ops_dir/verify-cmds.txt"
 printf '0\ttrue\n' >"$ops_dir/baseline-results.txt"
 ssa_ops verify --dir "$ops_dir" >/dev/null || fail "verify pass again"

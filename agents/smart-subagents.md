@@ -384,7 +384,7 @@ exit code against `$DIR/baseline-results.txt`, checks the changed paths against
 |---------|-------|------|
 | `pass` | no new failure, scope clean, no secrets | 0 |
 | `fail` | a command regressed, or scope/secret gate tripped | 1 |
-| `inconclusive` | a command failed and there is no baseline to compare to | 2 |
+| `inconclusive` | a command failed and there is no baseline, or `verify-cmds.txt` is missing | 2 |
 
 `inconclusive` is never reportable as success. Either record the baseline and
 re-run, or report `partial` with the reason.
