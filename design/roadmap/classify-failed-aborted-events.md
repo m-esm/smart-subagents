@@ -1,5 +1,5 @@
 ---
-state: proposed
+state: promoted
 lens: telemetry
 created: 2026-09-07
 metric: _ssa_event aborted/verify-verdict lines that pass --failure-class
