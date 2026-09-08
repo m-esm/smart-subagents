@@ -1792,6 +1792,50 @@ class SteerTests(unittest.TestCase):
                 run_ssa("stop", "--dir", str(task_dir), env=env)
                 proc.wait(timeout=60)
 
+    def test_stop_aborted_event_has_failure_class_stopped(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            sleeper = write_script(te.root / "codex-slow.sh", "#!/bin/sh\nsleep 30\n")
+            env = self._env_with_ps_shim(
+                te,
+                extra={
+                    "CODEX_BIN": str(sleeper),
+                    "SSA_KILL_GRACE_SECS": "2",
+                },
+            )
+            proc = subprocess.Popen(
+                ["bash", str(SSA_SH), "dispatch", "--dir", str(task_dir),
+                 "--worker", "codex"],
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                self.assertTrue(self._wait_for(task_dir / "worker.pid", 20))
+                seen = ""
+                deadline = time.time() + 20
+                while time.time() < deadline:
+                    _, seen, _ = run_ssa("status", "--dir", str(task_dir), env=env)
+                    if "(running)" in seen:
+                        break
+                    time.sleep(0.2)
+                self.assertIn("(running)", seen)
+                rc, out, err = run_ssa("stop", "--dir", str(task_dir), env=env)
+                self.assertEqual(rc, 0, err + out)
+                self.assertTrue((task_dir / "stopped.txt").exists())
+                events = [
+                    json.loads(line)
+                    for line in (task_dir / "events.jsonl").read_text().splitlines()
+                    if line.strip()
+                ]
+                aborted = [e for e in events if e.get("phase") == "aborted"]
+                self.assertEqual(len(aborted), 1, events)
+                self.assertEqual(aborted[0].get("failure_class"), "stopped")
+                doc = json.loads((task_dir / "task.json").read_text())
+                self.assertEqual(doc["attempts"][-1]["failure_class"], "stopped")
+            finally:
+                run_ssa("stop", "--dir", str(task_dir), env=env)
+                proc.wait(timeout=60)
+
     def _steer_field(self, status_out):
         for line in status_out.splitlines():
             if line.startswith("steer"):
