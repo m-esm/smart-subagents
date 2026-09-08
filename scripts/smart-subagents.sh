@@ -1788,6 +1788,12 @@ with open(added_path, "w") as added:
                 continue
             if ASSET_FOLLOW.match(line[match.end():]):
                 continue
+            # 1788705992-86938: long snake_case Python names (test_…_part)
+            # measure >3.5. Restrict to lowercase letters+underscores so
+            # sk_live_ / mixed-case tokens still trip entropy.
+            tok = match.group(0)
+            if "_" in tok and re.fullmatch(r"[a-z][a-z_]*", tok):
+                continue
             entropy_matches.append(match)
         if entropy_matches:
             names.append("high-entropy-token")

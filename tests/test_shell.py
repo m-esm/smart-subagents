@@ -1537,6 +1537,34 @@ class SecretScanTests(unittest.TestCase):
             self.assertEqual(rc, 0, err + out)
             self.assertFalse((task_dir / "verify-secrets.txt").read_text().strip())
 
+    def test_snake_case_test_name_is_not_a_high_entropy_secret(self):
+        # 1788705992-86938: long Python test names tripped high-entropy-token.
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (repo / "test_flexure.py").write_text(
+                "def test_lattice_flexure_is_one_distributed_watertight_part():\n"
+            )
+
+            rc, out, err = run_ssa("scan-secrets", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertFalse((task_dir / "verify-secrets.txt").read_text().strip())
+
+    def test_underscored_token_with_digits_still_trips_entropy(self):
+        # Lowercase snake_case skip must not hide tokens that also have digits.
+        token = "flex_a7c3e91b0d2468f5e1c9a3b7d0e4f2"
+        self.assertGreaterEqual(len(token), 32)
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (repo / "leaked.txt").write_text("key=%s\n" % token)
+
+            rc, out, err = run_ssa("scan-secrets", "--dir", str(task_dir), env=te.env)
+            self.assertNotEqual(rc, 0, "underscored digit token passed the scan")
+            findings = (task_dir / "verify-secrets.txt").read_text()
+            self.assertIn("high-entropy-token", findings)
+            self.assertNotIn(token, findings)
+
     def test_verify_records_whether_gitleaks_ran(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
