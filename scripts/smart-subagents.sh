@@ -1166,8 +1166,9 @@ cmd_stop() {
   pgid="$(_read1 "$dir/worker.pgid" "$pid")"
   _kill_group "$pgid"
   echo "$(_utc) stopped by operator (pid $pid, pgid $pgid)" >>"$dir/stopped.txt"
-  _ssa_event "$dir" --phase aborted --pid "$pid" --artifact "$dir/stopped.txt"
-  _ssa_state "$dir" aborted
+  _ssa_event "$dir" --phase aborted --failure-class stopped --pid "$pid" \
+    --artifact "$dir/stopped.txt"
+  _ssa_state "$dir" aborted --failure-class stopped
   echo "stop: signalled process group $pgid for $dir"
 }
 
