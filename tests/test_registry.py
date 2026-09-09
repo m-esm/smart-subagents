@@ -456,6 +456,59 @@ class StateMachineTests(unittest.TestCase):
             for event in events:
                 self.assertTrue(event["ts"].endswith("Z"))
 
+    def test_classified_event_refuses_missing_failure_class(self):
+        with temp_env() as te:
+            d = self._dir(te)
+            for phase in self.state.CLASSIFIED_PHASES:
+                with self.assertRaises(self.state.StateError) as ctx:
+                    self.state.append_event(str(d), phase)
+                self.assertIn("failure_class", str(ctx.exception))
+                with self.assertRaises(self.state.StateError):
+                    self.state.append_event(str(d), phase, failure_class="  ")
+            self.assertEqual(self.state.read_events(str(d)), [])
+            rec = self.state.append_event(
+                str(d), "aborted", failure_class="stopped"
+            )
+            self.assertEqual(rec["failure_class"], "stopped")
+            rec = self.state.append_event(
+                str(d), "failed", failure_class="verify-fail"
+            )
+            self.assertEqual(rec["failure_class"], "verify-fail")
+            rec = self.state.append_event(
+                str(d), "stalled", failure_class="stalled"
+            )
+            self.assertEqual(rec["failure_class"], "stalled")
+            rec = self.state.append_event(str(d), "minted")
+            self.assertIsNone(rec["failure_class"])
+
+    def test_classified_event_through_the_cli_exits_nonzero(self):
+        with temp_env() as te:
+            d = self._dir(te)
+            rc, out, err = run_ssa_cli(
+                "event", "--dir", str(d), "--phase", "aborted", env=te.env
+            )
+            self.assertEqual(rc, 1, err)
+            self.assertIn("failure_class", err)
+            self.assertFalse((d / "events.jsonl").exists())
+            rc, out, err = run_ssa_cli(
+                "event",
+                "--dir",
+                str(d),
+                "--phase",
+                "aborted",
+                "--failure-class",
+                "stopped",
+                env=te.env,
+            )
+            self.assertEqual(rc, 0, err)
+            events = [
+                json.loads(line)
+                for line in (d / "events.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(len(events), 1, events)
+            self.assertEqual(events[0]["failure_class"], "stopped")
+
     def test_task_json_survives_an_interrupted_write(self):
         with temp_env() as te:
             d = self._dir(te)
