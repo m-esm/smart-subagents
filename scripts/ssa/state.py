@@ -62,6 +62,10 @@ TRANSITIONS: Dict[str, List[str]] = {
 STATES = tuple(TRANSITIONS)
 TERMINAL = tuple(s for s, nxt in TRANSITIONS.items() if not nxt)
 INITIAL = "minted"
+# Failed/aborted/stalled events are how pick() and the ledger tell a 429
+# from a verify fail from a supervisor stop. A null class is a bug in the
+# caller, not a value to persist.
+CLASSIFIED_PHASES = ("aborted", "failed", "stalled")
 
 
 class StateError(Exception):
@@ -341,6 +345,11 @@ def append_event(task_dir: str, phase: str, **fields: Any) -> dict:
     d = Path(task_dir)
     if not d.is_dir():
         raise StateError("no such task dir: %s" % task_dir)
+    klass = fields.get("failure_class")
+    if phase in CLASSIFIED_PHASES and not (
+        isinstance(klass, str) and klass.strip()
+    ):
+        raise StateError("%s event needs a failure_class" % phase)
     with lock(task_dir):
         rec = {
             "seq": _next_seq(task_dir),

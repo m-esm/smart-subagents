@@ -1,5 +1,5 @@
 ---
-state: building
+state: shipped
 lens: telemetry
 created: 2026-09-07
 metric: _ssa_event aborted/verify-verdict lines that pass --failure-class
@@ -9,8 +9,8 @@ measure: python3 -c "import pathlib,re; t=pathlib.Path('scripts/smart-subagents.
 evidence:
   - design/roadmap/evidence/2026-09-07-events-failure-class-null.json
   - design/roadmap/evidence/2026-09-07-ledger-7d-and-doctor.txt
-slices: 2/3
-after:
+slices: 3/3
+after: 2
 ---
 # Failed and aborted events must carry failure_class
 
@@ -26,4 +26,4 @@ Every failed, aborted, and stalled event carries a non-empty `failure_class` fro
 
 - [x] `_ssa_event` / `_ssa_state` for `--phase aborted` pass `--failure-class` (stop → `stopped`).
 - [x] Verify's `$verdict_state` event passes `--failure-class` derived from the verdict (`failed` → `verify-fail`).
-- [ ] Gate: the measure command prints 2. A newly finished failed or aborted task has non-null `failure_class` on that event.
+- [x] Gate: the measure command prints 2. `append_event` refuses aborted/failed/stalled with a null class, so a newly finished failed or aborted task cannot persist a null `failure_class`.
