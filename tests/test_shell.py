@@ -557,6 +557,34 @@ class VerifyTests(unittest.TestCase):
             doc = json.loads((task_dir / "outcome.json").read_text())
             self.assertEqual(doc["verify"]["verdict"], "inconclusive")
 
+    def test_verify_failed_event_has_failure_class_verify_fail(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "verify-cmds.txt").write_text("true\nfalse\n")
+            (task_dir / "baseline-results.txt").write_text("0\ttrue\n0\tfalse\n")
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 1, err + out)
+            events = [
+                json.loads(line)
+                for line in (task_dir / "events.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            failed = [e for e in events if e.get("phase") == "failed"]
+            self.assertEqual(len(failed), 1, events)
+            self.assertEqual(failed[0].get("failure_class"), "verify-fail")
+            (task_dir / "baseline-results.txt").unlink()
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 2, err + out)
+            events = [
+                json.loads(line)
+                for line in (task_dir / "events.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            inconclusive = [e for e in events if e.get("phase") == "inconclusive"]
+            self.assertEqual(len(inconclusive), 1, events)
+            self.assertEqual(inconclusive[0].get("failure_class"), "inconclusive")
+
     def test_verify_empty_tree_with_brief_permission_denial_is_not_pass(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")

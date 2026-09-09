@@ -2497,13 +2497,14 @@ if out_of_scope:
 sys.exit({"pass": 0, "fail": 1, "inconclusive": 2}[verdict])
 PY
   rm -f "$dir/verify-changed.z"
-  local verdict_state
+  local verdict_state failure_class=""
   case "$rc" in
     0) verdict_state="verified" ;;
-    1) verdict_state="failed" ;;
-    *) verdict_state="inconclusive" ;;
+    1) verdict_state="failed"; failure_class="verify-fail" ;;
+    *) verdict_state="inconclusive"; failure_class="inconclusive" ;;
   esac
   _ssa_event "$dir" --phase "$verdict_state" --exit "$rc" \
+    ${failure_class:+--failure-class "$failure_class"} \
     --artifact "$dir/outcome.json"
   _ssa_state "$dir" "$verdict_state"
   return "$rc"
