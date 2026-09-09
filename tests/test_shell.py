@@ -1550,6 +1550,23 @@ class SecretScanTests(unittest.TestCase):
             self.assertEqual(rc, 0, err + out)
             self.assertFalse((task_dir / "verify-secrets.txt").read_text().strip())
 
+    def test_js_module_specifier_is_not_a_high_entropy_secret(self):
+        # 1788858218-67059: next/dist/.../auto-implement-methods.js was
+        # high-entropy-token and set secrets_ok=False on a clean gate.
+        line = (
+            '  const { autoImplementMethods } = await import('
+            '"next/dist/server/route-modules/app-route/helpers/'
+            'auto-implement-methods.js");\n'
+        )
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (repo / "verify_user_journey.mjs").write_text(line)
+
+            rc, out, err = run_ssa("scan-secrets", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertFalse((task_dir / "verify-secrets.txt").read_text().strip())
+
     def test_underscored_token_with_digits_still_trips_entropy(self):
         # Lowercase snake_case skip must not hide tokens that also have digits.
         token = "flex_a7c3e91b0d2468f5e1c9a3b7d0e4f2"
