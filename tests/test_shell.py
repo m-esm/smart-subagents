@@ -520,12 +520,54 @@ class PlanTests(unittest.TestCase):
 
 
 class VerifyTests(unittest.TestCase):
+    def test_verify_unrun_baseline_is_inconclusive_but_empty_log_regresses(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "verify-cmds.txt").write_text("false\n")
+            (task_dir / "baseline-results.txt").write_text("0\tfalse\n")
+
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 2, err + out)
+            verify = json.loads((task_dir / "outcome.json").read_text())["verify"]
+            self.assertEqual(verify["verdict"], "inconclusive")
+            self.assertEqual(verify["new_failures"], 0)
+            self.assertIs(verify["baseline_ran"], False)
+            self.assertIsNone(verify["commands"][0]["baseline_exit"])
+            self.assertIn(
+                "verify: unrun baseline (baseline-results.txt without baseline.log)",
+                out + err,
+            )
+
+            (task_dir / "baseline.log").touch()
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 1, err + out)
+            verify = json.loads((task_dir / "outcome.json").read_text())["verify"]
+            self.assertEqual(verify["verdict"], "fail")
+            self.assertEqual(verify["new_failures"], 1)
+            self.assertIs(verify["baseline_ran"], True)
+            self.assertNotIn("unrun baseline", out + err)
+
+    def test_verify_unrun_baseline_with_green_commands_passes(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "verify-cmds.txt").write_text("true\n")
+            (task_dir / "baseline-results.txt").write_text("0\ttrue\n")
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            verify = json.loads((task_dir / "outcome.json").read_text())["verify"]
+            self.assertEqual(verify["verdict"], "pass")
+            self.assertEqual(verify["new_failures"], 0)
+            self.assertIs(verify["baseline_ran"], False)
+
     def test_verify_pass_fail_and_inconclusive(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
             task_dir = make_task_dir(te.work_dir, repo)
 
             # pass: command succeeds, baseline agrees.
+            (task_dir / "baseline.log").touch()
             (task_dir / "verify-cmds.txt").write_text("true\n")
             (task_dir / "baseline-results.txt").write_text("0\ttrue\n")
             rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
@@ -561,6 +603,7 @@ class VerifyTests(unittest.TestCase):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
             task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "baseline.log").touch()
             (task_dir / "verify-cmds.txt").write_text("true\nfalse\n")
             (task_dir / "baseline-results.txt").write_text("0\ttrue\n0\tfalse\n")
             rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
@@ -589,6 +632,7 @@ class VerifyTests(unittest.TestCase):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
             task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "baseline.log").touch()
             (task_dir / "verify-cmds.txt").write_text("true\n")
             (task_dir / "baseline-results.txt").write_text("0\ttrue\n")
             (task_dir / "stdout.log").write_text(

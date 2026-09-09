@@ -573,6 +573,7 @@ pass "ls and status render a task dir"
 
 printf 'true\n' >"$ops_dir/verify-cmds.txt"
 printf '0\ttrue\n' >"$ops_dir/baseline-results.txt"
+: >"$ops_dir/baseline.log"
 ssa_ops verify --dir "$ops_dir" >"$TEST_TMP/verify-pass.txt" || fail "verify pass exit"
 grep -q '"verdict": "pass"' "$ops_dir/outcome.json" || fail "verify pass verdict"
 grep -q '### true (exit 0)' "$ops_dir/verify-final.log" || fail "verify final log"

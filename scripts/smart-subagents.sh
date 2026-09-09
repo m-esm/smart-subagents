@@ -2388,6 +2388,10 @@ for raw in (lines("verify-results.txt") or []):
     results.append((int(code), cmd))
 
 baseline_raw = lines("baseline-results.txt")
+baseline_ran = (d / "baseline.log").is_file()
+if baseline_raw is not None and not baseline_ran:
+    print("verify: unrun baseline (baseline-results.txt without baseline.log)", file=sys.stderr)
+    baseline_raw = None
 baseline = {}
 if baseline_raw is not None:
     for raw in baseline_raw:
@@ -2471,6 +2475,7 @@ doc = {
     "schema_version": 1,
     "verify": {
         "commands": commands,
+        "baseline_ran": baseline_ran,
         "new_failures": new_failures,
         "scope_ok": scope_ok,
         # Bounded: one out-of-scope worker wrote 900 paths into this file and
@@ -2811,6 +2816,7 @@ Usage: smart-subagents.sh <command> [options]
       DIR/baseline-results.txt, check changed paths against DIR/scope.txt, run
       the secret scan, and write DIR/outcome.json. Exit 0 pass, 1 fail,
       2 inconclusive.
+      Baseline results without DIR/baseline.log are treated as an unrun baseline.
 
   cooldown --cli CLI [--clear] [--reason rate-limit|auth] [--minutes N]
       Bench a worker for every task until the cooldown expires. dispatch sets
