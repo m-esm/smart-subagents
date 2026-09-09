@@ -1672,8 +1672,12 @@ token_re = re.compile(r"[A-Za-z0-9+/=_-]{32,}")
 env_re = re.compile(r"(^|/)\.env(\..+)?$")
 # 1788547835-63023: catalog lines naming pre-existing STL/PDF files tripped
 # high-entropy because a 40-char hex stem measures 3.84.
+# 1788858218-67059: Next.js module specifiers do the same — `/` is in the
+# token class (base64), so `next/dist/server/route-modules/.../auto-implement-methods`
+# is one 71-char token at entropy 3.93. `.js` after the token is the tell,
+# same shape as the STL suffix skip.
 ASSET_FOLLOW = re.compile(
-    r"\.(?:stl|pdf|png|jpe?g|gif|webp|step|stp|3mf|obj|wrl|iges|igs|glb|gltf|bin)(?:\b|$)",
+    r"\.(?:stl|pdf|png|jpe?g|gif|webp|step|stp|3mf|obj|wrl|iges|igs|glb|gltf|bin|js|mjs|cjs|ts|tsx|jsx|mts|cts)(?:\b|$)",
     re.I,
 )
 findings = []
