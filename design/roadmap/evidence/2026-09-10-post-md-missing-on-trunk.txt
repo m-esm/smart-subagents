@@ -1,0 +1,20 @@
+measured 2026-09-10 against origin/main (this tick, before the file existed)
+
+$ git ls-remote origin refs/heads/main
+698f1093916850187bb9bb651778f26a6a285b2b	refs/heads/main
+
+$ git cat-file -e origin/main:design/roadmap/post.md; echo exit:$?
+fatal: path 'design/roadmap/post.md' does not exist in 'origin/main'
+exit:128
+
+$ git cat-file -e origin/main:design/roadmap/post.md >/dev/null 2>&1 && echo 1 || echo 0
+0
+
+Claim 1547419982768504917:PROPOSAL:post is the grammar
+r'\bPROPOSAL\s+(?P<slug>[a-z0-9][a-z0-9-]{2,70})\b'
+matching the 2026-09-10 04:34 cron line
+"this PROPOSAL post, proven by" -> slug post.
+The intended slug on that tick was verify-exit-runs-record.
+
+$ python3 -c "import re; r=re.compile(r'\\bPROPOSAL\\s+(?P<slug>[a-z0-9][a-z0-9-]{2,70})\\b'); print(r.findall('this PROPOSAL post, proven by'))"
+['post']
