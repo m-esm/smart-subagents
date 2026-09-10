@@ -43,6 +43,11 @@ per-CLI knowledge:
   name. Only claude declares one. A missing or empty file adds nothing
   beyond `env_keep`; a declared key is appended there for that dispatch
   only. The env var names live in `workers.json`.
+- `$DIR/budget.txt`: one positive decimal dollar amount. Blank lines and
+  `#` comments are ignored. Only workers whose argv template names
+  `{budget}` consume it (claude, via `budget_flags`); others ignore the
+  file. Absent or comments-only: no `--max-budget-usd`. Malformed or
+  non-positive: dispatch refuses, naming the file.
 - how a prompt reaches it: `stdin`, `arg`, or `file-ref` with a template
 - the argv template for each mode: `implement`, `plan`, `resume`
 - output handling and log format per mode
@@ -52,8 +57,8 @@ per-CLI knowledge:
 - capability priors per task kind
 
 Argv templates are arrays of tokens, never strings. The allowed placeholders are
-`{worktree} {brief} {output} {session_id} {prompt} {effort} {model} {agents} {agent}`.
-`{effort}` and `{model}` splice zero or more tokens; `{agents}` and `{agent}` are
+`{worktree} {brief} {output} {session_id} {prompt} {effort} {model} {budget} {agents} {agent}`.
+`{effort}`, `{model}` and `{budget}` splice zero or more tokens; `{agents}` and `{agent}` are
 standalone (compact session-agent JSON and the agent name); the rest are single
 values. A template naming anything else, or carrying a shell metacharacter, is
 rejected at load time. The argv goes to `execve`, never through a shell.

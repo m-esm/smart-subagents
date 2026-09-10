@@ -633,7 +633,7 @@ PY
 }
 
 _classify_failure() {
-  # RC + log tail -> rate-limit | auth | unknown | "" (the run did not fail).
+  # RC + log -> rate-limit | auth | budget-exhausted | unknown | "" (did not fail).
   # The heuristics live in ssa/adapters.py now, one implementation for the
   # shell and for anything else that needs to name a failure.
   local rc="$1" log="$2"
@@ -642,7 +642,8 @@ _classify_failure() {
 }
 
 _maybe_cooldown() {
-  # _maybe_cooldown DIR WORKER RC CLASS -> bench the worker when the log said why
+  # _maybe_cooldown DIR WORKER RC CLASS -> bench the worker when the log said why.
+  # budget-exhausted is a task ceiling, not an account problem: do not bench.
   local dir="$1" worker="$2" rc="$3" reason="${4:-}"
   [[ "$rc" != "0" ]] || return 0
   case "$reason" in
@@ -802,6 +803,7 @@ cmd_dispatch() {
     --worktree "$wt" --brief "$launch_brief" --output "$dir/last-msg.txt" \
     --args-file "$dir/worker-args.txt" \
     --limits "$dir/limits.txt" \
+    --budget "$dir/budget.txt" \
     ${resume_sid:+--session-id "$resume_sid"} \
     || die "dispatch: cannot build a $mode command for worker $worker"
 
@@ -2550,6 +2552,18 @@ gl_path = d / "verify-secrets-gitleaks.txt"
 if gl_path.exists():
     gitleaks = gl_path.read_text(errors="replace").strip() or "absent"
 
+failure_class = None
+task_file = d / "task.json"
+if task_file.exists():
+    try:
+        attempts = json.loads(task_file.read_text()).get("attempts") or []
+        if attempts:
+            klass = attempts[-1].get("failure_class")
+            if isinstance(klass, str) and klass.strip():
+                failure_class = klass.strip()
+    except Exception:
+        failure_class = None
+
 doc = {
     "schema_version": 1,
     "verify": {
@@ -2571,6 +2585,8 @@ doc = {
         "verdict": verdict,
     },
 }
+if failure_class:
+    doc["failure_class"] = failure_class
 (d / "outcome.json").write_text(json.dumps(doc, indent=2) + "\n")
 print("verify: verdict=%s new_failures=%d scope_ok=%s secrets_ok=%s changed=%d"
       % (verdict, new_failures, scope_ok, secrets_ok, len(changed)))
@@ -2681,14 +2697,20 @@ if stat.exists():
 
 verified = None
 verdict = None
+failure_class = None
 oc = d / "outcome.json"
 if oc.exists():
     try:
-        verdict = (json.loads(oc.read_text()).get("verify") or {}).get("verdict")
+        ocdoc = json.loads(oc.read_text())
+        verdict = (ocdoc.get("verify") or {}).get("verdict")
         verified = verdict == "pass"
+        klass = ocdoc.get("failure_class")
+        if isinstance(klass, str) and klass.strip():
+            failure_class = klass.strip()
     except Exception:
         verified = None
         verdict = None
+        failure_class = None
 
 # Supervisors were writing outcome=verified-pass while verify.verdict was
 # fail (task 1788304583-49540 secrets/gitleaks, 1788512758-73379 scope).
@@ -2746,6 +2768,7 @@ record = {
     "quota_before": quota("quota-before.json"),
     "quota_after": quota("quota-after.json"),
     "outcome": outcome,
+    "failure_class": failure_class,
     "retries": int(retries),
     "handoff_to": handoff or None,
     "notes": notes or None,

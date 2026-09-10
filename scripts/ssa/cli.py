@@ -97,6 +97,7 @@ def cmd_build_command(args) -> int:
         "effort": args.effort,
         "model": args.model,
         "limits": args.limits,
+        "budget": args.budget,
     }
     if args.args_file:
         try:
@@ -284,6 +285,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--limits",
         default="",
         help="path to $DIR/limits.txt (key=value caps mapped through run.env_pass)",
+    )
+    p.add_argument(
+        "--budget",
+        default="",
+        help="path to $DIR/budget.txt (positive decimal dollars; fills {budget})",
     )
     p.add_argument("--nul", action="store_true", help="NUL-separated output for the shell")
     p.set_defaults(func=cmd_build_command)

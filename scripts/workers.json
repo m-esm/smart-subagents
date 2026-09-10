@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "_note": "Single source of truth for per-CLI knowledge. A fourth worker is an entry here plus a probe function in ai-cli-usage.py, never a code fork. Point SSA_WORKERS_JSON at another file to override. Placeholders allowed in argv templates: {worktree} {brief} {output} {session_id} {prompt} {effort} {model} {agents} {agent}. {effort} and {model} splice zero or more tokens; {agents} and {agent} are standalone (compact session-agent JSON and the agent name); the rest are single values. No token may contain shell metacharacters: the argv is executed directly, never through a shell.",
+  "_note": "Single source of truth for per-CLI knowledge. A fourth worker is an entry here plus a probe function in ai-cli-usage.py, never a code fork. Point SSA_WORKERS_JSON at another file to override. Placeholders allowed in argv templates: {worktree} {brief} {output} {session_id} {prompt} {effort} {model} {budget} {agents} {agent}. {effort}, {model} and {budget} splice zero or more tokens; {agents} and {agent} are standalone (compact session-agent JSON and the agent name); the rest are single values. No token may contain shell metacharacters: the argv is executed directly, never through a shell.",
   "workers": {
     "codex": {
       "display_name": "OpenAI Codex CLI",
@@ -250,19 +250,19 @@
         "implement": [
           "-p", "{prompt}", "--output-format", "json",
           "--permission-mode", "acceptEdits",
-          "{effort}", "{model}",
+          "{effort}", "{model}", "{budget}",
           "--agents", "{agents}", "--agent", "{agent}"
         ],
         "plan": [
           "-p", "{prompt}", "--output-format", "json",
           "--permission-mode", "plan",
-          "{effort}", "{model}",
+          "{effort}", "{model}", "{budget}",
           "--agents", "{agents}", "--agent", "{agent}"
         ],
         "resume": [
           "-p", "{prompt}", "--resume", "{session_id}", "--output-format", "json",
           "--permission-mode", "acceptEdits",
-          "{effort}", "{model}",
+          "{effort}", "{model}", "{budget}",
           "--agents", "{agents}", "--agent", "{agent}"
         ]
       },
@@ -277,6 +277,7 @@
       },
       "effort_ladder": ["low", "medium", "high", "xhigh"],
       "effort_flags": ["--effort", "{effort}"],
+      "budget_flags": ["--max-budget-usd", "{budget}"],
       "models": {
         "_note": "This worker is Fable. Every difficulty pins --model fable; effort is the only rung.",
         "flag": ["--model", "{model}"],

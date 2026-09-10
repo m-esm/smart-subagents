@@ -660,6 +660,7 @@ class AdapterUnitTests(unittest.TestCase):
             (1, "please log in again", "auth"),
             (1, "segmentation fault", "unknown"),
             (1, "", "unknown"),
+            (1, "error_max_budget_usd budget_exhausted", "budget-exhausted"),
         ]
         for code, tail, expected in cases:
             with self.subTest(tail=tail):
@@ -833,6 +834,36 @@ class AdapterUnitTests(unittest.TestCase):
                             "content": "resource_exhausted"}),
             ])
             self.assertEqual(self._classify(te, text + "\n", 1), "rate-limit")
+
+    def test_claude_budget_halt_is_budget_exhausted_not_rate_limit(self):
+        halt = {
+            "type": "result",
+            "subtype": "error_max_budget_usd",
+            "is_error": True,
+            "result": None,
+            "terminal_reason": "budget_exhausted",
+            "total_cost_usd": 0.437786,
+        }
+        msg = self.adapters._error_text(halt)
+        self.assertTrue(msg, msg)
+        self.assertIn("budget", msg.lower())
+        self.assertNotEqual(
+            self.adapters.classify_failure(1, msg), "rate-limit"
+        )
+        self.assertEqual(
+            self.adapters.classify_failure(1, msg), "budget-exhausted"
+        )
+        with temp_env() as te:
+            self.assertEqual(
+                self._classify(te, json.dumps(halt) + "\n", 1),
+                "budget-exhausted",
+            )
+            # An exit-0 log is NOT a failure even with an is_error envelope:
+            # successful codex runs carry a "skills context budget" notice and
+            # must not be reclassified. A real budget halt exits 1.
+            self.assertIsNone(
+                self._classify(te, json.dumps(halt) + "\n", 0),
+            )
 
     # -- terminal errors, stderr, whole-file JSON -------------------------
 

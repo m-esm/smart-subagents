@@ -31,7 +31,12 @@ AUTH_RE = re.compile(
     r"|invalid[ _-](token|credential)|please (log ?in|sign ?in)"
     r"|token (has )?expired"
 )
-FAILURE_CLASSES = ("rate-limit", "auth", "unknown")
+# Task ceiling, not an account problem. Checked before RATE_LIMIT_RE so a
+# budget halt cannot be benched as a 429.
+BUDGET_RE = re.compile(
+    r"error_max_budget|max_budget_usd|budget_exhausted|budget.?exhausted"
+)
+FAILURE_CLASSES = ("rate-limit", "auth", "budget-exhausted", "unknown")
 
 # Where a worker puts the text of a terminal error. Only these strings are
 # classified: a tool_result full of a repo's own source is not evidence about
@@ -193,6 +198,7 @@ def agents_json(spec, ctx: Dict[str, Any]) -> str:
 
 
 _LIMIT_VALUE_RE = re.compile(r"^[0-9]+$")
+_BUDGET_VALUE_RE = re.compile(r"^[0-9]+(\.[0-9]+)?$")
 
 
 def resolve_env_extra(spec, ctx: Dict[str, Any]) -> Dict[str, str]:
@@ -243,6 +249,70 @@ def resolve_env_extra(spec, ctx: Dict[str, Any]) -> Dict[str, str]:
     return resolved
 
 
+def resolve_budget(spec, ctx: Dict[str, Any]) -> str:
+    """Positive decimal from $DIR/budget.txt, or "".
+
+    Same lexical rules as limits.txt: blank lines and # comments are not
+    directives. Absent file, or comments-only: "". Empty/whitespace-only,
+    malformed, or non-positive: AdapterError naming the file. A budget that
+    silently does not apply is worse than no budget. Workers whose argv
+    never uses {budget} ignore the file.
+    """
+    uses = any("{budget}" in tokens for tokens in spec.argv.values())
+    if not uses:
+        return ""
+    path = str(ctx.get("budget") or "")
+    if not path:
+        return ""
+    try:
+        with open(path, "r") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        raise AdapterError("%s: cannot read budget file %s: %s" % (spec.name, path, exc))
+
+    values = []
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        values.append((lineno, line))
+    if not values:
+        has_comment = any(
+            raw.strip().startswith("#") for raw in text.splitlines() if raw.strip()
+        )
+        if has_comment:
+            return ""
+        raise AdapterError(
+            "%s: %s is empty; want a positive decimal dollar amount" % (spec.name, path)
+        )
+    if len(values) != 1:
+        raise AdapterError(
+            "%s: %s has %d directives; want one positive decimal"
+            % (spec.name, path, len(values))
+        )
+    lineno, value = values[0]
+    if not _BUDGET_VALUE_RE.fullmatch(value) or float(value) <= 0:
+        raise AdapterError(
+            "%s: %s line %d value %r is not a positive decimal dollar amount"
+            % (spec.name, path, lineno, value)
+        )
+    return value
+
+
+def _budget_tokens(spec, ctx: Dict[str, Any]) -> List[str]:
+    """Tuning tokens for the {budget} slot. Zero tokens when there is no cap."""
+    value = resolve_budget(spec, ctx)
+    if not value:
+        return []
+    if not spec.budget_flags:
+        raise AdapterError(
+            "%s: no budget flag template, cannot pass %r" % (spec.name, value)
+        )
+    return [t.replace("{budget}", value) for t in spec.budget_flags]
+
+
 def build_command(worker: str, mode: str, ctx: Dict[str, Any], reg=None) -> Dict[str, Any]:
     """Registry entry + context -> {argv, stdin, cwd, env_scrub, env_keep, env_extra, ...}."""
     spec = _spec(worker, reg)
@@ -250,6 +320,7 @@ def build_command(worker: str, mode: str, ctx: Dict[str, Any], reg=None) -> Dict
     prompt = _prompt_value(spec, mode, ctx)
     effort_tokens = _effort_tokens(spec, ctx)
     model_tokens = _model_tokens(spec, ctx)
+    budget_tokens = _budget_tokens(spec, ctx) if "{budget}" in template else []
 
     scalars = {
         "worktree": str(ctx.get("worktree") or ""),
@@ -268,6 +339,9 @@ def build_command(worker: str, mode: str, ctx: Dict[str, Any], reg=None) -> Dict
             continue
         if token == "{model}":
             argv.extend(model_tokens)
+            continue
+        if token == "{budget}":
+            argv.extend(budget_tokens)
             continue
         if token == "{agents}":
             if not agents_payload:
@@ -395,11 +469,12 @@ def parse_session(worker: str, log_path: str, reg=None) -> str:
 
 
 def classify_failure(exit_code: int, log_tail: str) -> Optional[str]:
-    """rate-limit | auth | unknown | None (the run did not fail).
+    """rate-limit | auth | budget-exhausted | unknown | None (did not fail).
 
     Conservative on purpose: a wrong classification benches a healthy worker
     for every other task, so anything not clearly a limit or a credential
-    problem stays "unknown" and sets no cooldown.
+    problem stays "unknown" and sets no cooldown. A task budget halt is its
+    own class: the worker is healthy and must not be benched.
     """
     try:
         code = int(exit_code)
@@ -408,6 +483,8 @@ def classify_failure(exit_code: int, log_tail: str) -> Optional[str]:
     if code == 0:
         return None
     text = (log_tail or "").lower()
+    if BUDGET_RE.search(text):
+        return "budget-exhausted"
     if RATE_LIMIT_RE.search(text):
         return "rate-limit"
     if AUTH_RE.search(text):
@@ -422,38 +499,59 @@ def _error_text(obj: dict) -> str:
     the repo's own content passing through: a tool_result holding a grep hit
     on "test_lattices.py:429:", an assistant paragraph quoting an HTTP status,
     a UUID with "429c" in it. None of that says anything about the account.
+
+    When is_error is true and result/error carry no message (claude's
+    budget halt: result is null, error is absent), fall back to subtype
+    and terminal_reason rather than returning "". A silent failure is the
+    worst possible output of an error classifier, for any subtype.
     """
     t = str(obj.get("type") or "")
     err = obj.get("error")
+    subtype = str(obj.get("subtype") or "")
 
     def _msg(value) -> str:
         if isinstance(value, dict):
             return str(value.get("message") or "")
         return str(value or "")
 
+    def _fallback() -> str:
+        if obj.get("is_error") is not True and "error" not in subtype:
+            return ""
+        parts = [p for p in (subtype, str(obj.get("terminal_reason") or "")) if p]
+        return " ".join(parts)
+
     if t in _ERROR_TYPES:
         return (
             _msg(obj.get("message"))
             or _msg(err)
             or str(obj.get("content") or "")
+            or _fallback()
         )
     if t == "result":
-        subtype = str(obj.get("subtype") or "")
         if obj.get("is_error") is True or "error" in subtype:
             result = obj.get("result")
-            return (result if isinstance(result, str) else "") or _msg(err)
+            return (
+                (result if isinstance(result, str) else "")
+                or _msg(err)
+                or _fallback()
+            )
         return ""
     if t.startswith("item."):
         item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
         if str(item.get("type") or "") == "error":
-            return str(item.get("message") or "")
-        return ""
+            return str(item.get("message") or "") or _fallback()
+        return _fallback()
     # kimi's stream-json has no "type" on most lines; its meta frames do, and
     # only the ones that name an error are evidence (session.resume_hint is
     # a meta frame too, and it is not a failure).
     if "error" in t:
-        return _msg(obj.get("message")) or _msg(err) or str(obj.get("content") or "")
-    return ""
+        return (
+            _msg(obj.get("message"))
+            or _msg(err)
+            or str(obj.get("content") or "")
+            or _fallback()
+        )
+    return _fallback()
 
 
 def error_strings(text: str) -> List[str]:
@@ -475,6 +573,11 @@ def classify_log(exit_code: int, log_path: str, lines: int = 40) -> Optional[str
         text = ""
     has_json = any(True for _ in _iter_json_lines(text))
     if has_json:
+        # Do NOT treat an is_error envelope in an exit-0 log as a failure:
+        # 19 successful codex runs in this machine's own history carry a
+        # "skills context budget" notice, and promoting those to failures
+        # writes a bogus failure_class onto every one of them. A real claude
+        # budget halt exits 1 (verified against 2.1.267), so rc is enough.
         return classify_failure(exit_code, "\n".join(error_strings(text)))
     tail = "\n".join(text.splitlines()[-lines:])
     return classify_failure(exit_code, tail)

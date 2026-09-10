@@ -72,7 +72,12 @@ worker), `session-id.txt`, `worker.txt`, `exit-code.txt`,
 `concurrent`, `per_session`) is mapped through the worker's `run.env_pass`
 onto the scrubbed environment (on top of `run.env_keep`, which defaults to
 HOME, PATH, TMPDIR, TERM; claude also keeps USER for the macOS keychain
-lookup). A worker that declares no map ignores the file. Background runs add
+lookup). A worker that declares no map ignores the file. Optional
+`budget.txt` (one positive decimal dollar amount; blank lines and `#`
+comments ignored) becomes `--max-budget-usd` for a worker whose argv
+template names `{budget}` (claude). Absent or comments-only: no flag.
+Malformed or non-positive: dispatch refuses, naming the file. A worker
+that declares no `{budget}` slot ignores the file. Background runs add
 `worker.pid`, `worker.pgid`,
 `worker-start.txt`, and `stalled.txt` or `stopped.txt` when a run was cut short.
 `init` is transactional: a failure after the worktree exists rolls the worktree
@@ -190,6 +195,10 @@ worker "once more to check". Hand the next worker a **fresh** brief plus a
 `git diff` summary, never a resume. If a worker fails on quota and no cooldown
 was set, the log said nothing conclusive: classify it yourself and set one with
 `smart-subagents.sh cooldown --cli <cli> --reason rate-limit|auth`.
+A `budget-exhausted` class is a task ceiling (`$DIR/budget.txt`), not an
+account problem: the worker is healthy and must not be benched. `outcome.json`
+records `failure_class` so `record` / the ledger can tell a budget halt from
+an ordinary failure.
 
 Usage cache: `ai-cli-usage.py` caches ~3 minutes. Use `--fresh` after a 429 or
 login change.

@@ -30,11 +30,12 @@ FORMATS = ("jsonl", "json", "text")
 OUTPUT_MODES = ("arg", "stdout", "none")
 CWD_MODES = ("inherit", "worktree")
 
-# Placeholders an argv template may name. {effort} and {model} splice zero or
-# more tokens; {agents} and {agent} are standalone scalars (compact session
-# agent JSON and the agent name); every other placeholder is one string.
+# Placeholders an argv template may name. {effort}, {model} and {budget}
+# splice zero or more tokens; {agents} and {agent} are standalone scalars
+# (compact session agent JSON and the agent name); every other placeholder
+# is one string.
 SCALAR_PLACEHOLDERS = ("worktree", "brief", "output", "session_id", "prompt")
-LIST_PLACEHOLDERS = ("effort", "model")
+LIST_PLACEHOLDERS = ("effort", "model", "budget")
 STANDALONE_SCALARS = ("agents", "agent")
 PLACEHOLDERS = SCALAR_PLACEHOLDERS + LIST_PLACEHOLDERS + STANDALONE_SCALARS
 
@@ -92,11 +93,11 @@ def _check_token(
         if any(("{%s}" % n) in token for n in lone) and token not in [
             "{%s}" % n for n in lone
         ]:
+            names = ", ".join("{%s}" % n for n in lone)
             raise _fail(
                 where,
-                "token %d (%r) embeds a standalone placeholder; {effort}, "
-                "{model}, {agents} and {agent} must stand alone as a whole token"
-                % (index, token),
+                "token %d (%r) embeds a standalone placeholder; %s "
+                "must stand alone as a whole token" % (index, token, names),
             )
 
 
@@ -300,6 +301,13 @@ class WorkerSpec:
             _check_token("%s effort_flags" % where, token, ("effort",), i)
         if self.effort_ladder and not self.effort_flags:
             raise _fail(where, "effort_ladder is set but effort_flags is empty")
+
+        self.budget_flags = [str(t) for t in (block.get("budget_flags") or [])]
+        for i, token in enumerate(self.budget_flags):
+            _check_token("%s budget_flags" % where, token, ("budget",), i)
+        uses_budget = any("{budget}" in tokens for tokens in self.argv.values())
+        if uses_budget and not self.budget_flags:
+            raise _fail(where, "argv uses {budget} but budget_flags is empty")
 
         models = block.get("models") or {}
         if not isinstance(models, dict):

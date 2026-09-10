@@ -4,6 +4,8 @@
 Records argv, cwd and env under $HOME/.ssa-test/fake-claude/, then emits one JSON
 object shaped like `claude -p --output-format json` (a top-level session_id).
 Same control-file contract as the other fakes: $HOME/.ssa-test-control.json.
+Optional "output" is a dict printed as the JSON result object (budget-halt
+tests set subtype error_max_budget_usd / is_error true / result null).
 """
 import json
 import os
@@ -27,5 +29,9 @@ if control_path.exists():
 
 exit_code = int(control.get("exit_code", 0))
 session_id = control.get("session_id", "fake-claude-session-000000000001")
-print(json.dumps({"type": "result", "subtype": "success", "session_id": session_id}))
+output = control.get("output")
+if isinstance(output, dict):
+    print(json.dumps(output))
+else:
+    print(json.dumps({"type": "result", "subtype": "success", "session_id": session_id}))
 sys.exit(exit_code)
