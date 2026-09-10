@@ -1823,6 +1823,12 @@ with open(added_path, "w") as added:
             tok = match.group(0)
             if "_" in tok and re.fullmatch(r"[a-z][a-z_]*", tok):
                 continue
+            # 1789065672-26862: SCREAMING_SNAKE env var names
+            # (CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION measures >3.5). A minted
+            # token carries lowercase or digits-in-word, so requiring every
+            # segment to be pure uppercase keeps sk_live_/AKIA-style hits.
+            if "_" in tok and re.fullmatch(r"[A-Z]+(_[A-Z]+)+", tok):
+                continue
             # 1789023425-19036: npm registry URLs. token_re includes `/`
             # but splits on `:`/`.`, so the match is often a path slice;
             # skip when the token is a URL or sits inside http(s) on the line.
