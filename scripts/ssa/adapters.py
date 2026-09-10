@@ -513,6 +513,45 @@ def _budget_tokens(spec, ctx: Dict[str, Any]) -> List[str]:
     return [t.replace("{budget}", value) for t in spec.budget_flags]
 
 
+def resolve_kind(ctx: Dict[str, Any]) -> str:
+    """First non-comment, non-blank line of $DIR/kind.txt, or ctx['kind'].
+
+    Unknown values are returned as-is. Only `fork` is load-bearing at
+    dispatch; everything else is recommender input and is ignored here.
+    Absent file, empty, or comments-only: "".
+    """
+    path = str(ctx.get("kind_file") or "")
+    if not path:
+        return str(ctx.get("kind") or "")
+    try:
+        with open(path, "r") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        raise AdapterError("cannot read kind file %s: %s" % (path, exc))
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        return line
+    return ""
+
+
+def _fork_tokens(spec, ctx: Dict[str, Any]) -> List[str]:
+    """Tuning tokens for the {fork} slot. Zero tokens unless kind is fork.
+
+    The flag strings come from the registry's fork_flags. Workers with an
+    empty list never gain a flag they cannot use. kind.txt values other
+    than fork are ignored.
+    """
+    if resolve_kind(ctx) != "fork":
+        return []
+    if not spec.fork_flags:
+        return []
+    return list(spec.fork_flags)
+
+
 def build_command(worker: str, mode: str, ctx: Dict[str, Any], reg=None) -> Dict[str, Any]:
     """Registry entry + context -> {argv, stdin, cwd, env_scrub, env_keep, env_extra, ...}."""
     spec = _spec(worker, reg)
@@ -521,6 +560,7 @@ def build_command(worker: str, mode: str, ctx: Dict[str, Any], reg=None) -> Dict
     effort_tokens = _effort_tokens(spec, ctx)
     model_tokens = _model_tokens(spec, ctx)
     budget_tokens = _budget_tokens(spec, ctx) if "{budget}" in template else []
+    fork_tokens = _fork_tokens(spec, ctx) if "{fork}" in template else []
 
     scalars = {
         "worktree": str(ctx.get("worktree") or ""),
@@ -542,6 +582,9 @@ def build_command(worker: str, mode: str, ctx: Dict[str, Any], reg=None) -> Dict
             continue
         if token == "{budget}":
             argv.extend(budget_tokens)
+            continue
+        if token == "{fork}":
+            argv.extend(fork_tokens)
             continue
         if token == "{agents}":
             if not agents_payload:

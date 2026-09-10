@@ -99,6 +99,7 @@ def cmd_build_command(args) -> int:
         "limits": args.limits,
         "budget": args.budget,
         "effort_file": args.effort_file,
+        "kind_file": args.kind_file,
     }
     if args.args_file:
         try:
@@ -238,6 +239,7 @@ def cmd_transition(args) -> int:
         exit=args.exit_code,
         failure_class=args.failure_class,
         session_id=args.session_id,
+        parent_session=args.parent_session,
     )
     if args.quiet:
         return 0
@@ -308,6 +310,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="effort_file",
         help="path to $DIR/effort.txt (one effort rung; overrides worker-args)",
     )
+    p.add_argument(
+        "--kind-file",
+        default="",
+        dest="kind_file",
+        help="path to $DIR/kind.txt (fork is a resume modifier; other values ignored)",
+    )
     p.add_argument("--nul", action="store_true", help="NUL-separated output for the shell")
     p.set_defaults(func=cmd_build_command)
 
@@ -373,6 +381,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--exit", dest="exit_code", type=int, default=None)
     p.add_argument("--failure-class", dest="failure_class", default=None)
     p.add_argument("--session-id", dest="session_id", default=None)
+    p.add_argument("--parent-session", dest="parent_session", default=None)
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(func=cmd_transition)
     return ap

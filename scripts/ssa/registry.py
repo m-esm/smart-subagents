@@ -30,12 +30,12 @@ FORMATS = ("jsonl", "json", "text")
 OUTPUT_MODES = ("arg", "stdout", "none")
 CWD_MODES = ("inherit", "worktree")
 
-# Placeholders an argv template may name. {effort}, {model} and {budget}
-# splice zero or more tokens; {agents} and {agent} are standalone scalars
-# (compact session agent JSON and the agent name); every other placeholder
-# is one string.
+# Placeholders an argv template may name. {effort}, {model}, {budget} and
+# {fork} splice zero or more tokens; {agents} and {agent} are standalone
+# scalars (compact session agent JSON and the agent name); every other
+# placeholder is one string.
 SCALAR_PLACEHOLDERS = ("worktree", "brief", "output", "session_id", "prompt")
-LIST_PLACEHOLDERS = ("effort", "model", "budget")
+LIST_PLACEHOLDERS = ("effort", "model", "budget", "fork")
 STANDALONE_SCALARS = ("agents", "agent")
 PLACEHOLDERS = SCALAR_PLACEHOLDERS + LIST_PLACEHOLDERS + STANDALONE_SCALARS
 
@@ -308,6 +308,15 @@ class WorkerSpec:
         uses_budget = any("{budget}" in tokens for tokens in self.argv.values())
         if uses_budget and not self.budget_flags:
             raise _fail(where, "argv uses {budget} but budget_flags is empty")
+
+        self.fork_flags = [str(t) for t in (block.get("fork_flags") or [])]
+        for i, token in enumerate(self.fork_flags):
+            _check_token("%s fork_flags" % where, token, ("fork",), i)
+        uses_fork = any("{fork}" in tokens for tokens in self.argv.values())
+        if uses_fork and not self.fork_flags:
+            raise _fail(where, "argv uses {fork} but fork_flags is empty")
+        if self.fork_flags and not uses_fork:
+            raise _fail(where, "fork_flags is set but argv never uses {fork}")
 
         models = block.get("models") or {}
         if not isinstance(models, dict):

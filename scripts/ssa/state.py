@@ -288,6 +288,8 @@ def transition(task_dir: str, to: str, force: bool = False, **fields: Any) -> di
             }
             if fields.get("pid") is not None:
                 attempt["pid"] = fields["pid"]
+            if fields.get("parent_session"):
+                attempt["parent_session"] = fields["parent_session"]
             doc.setdefault("attempts", []).append(attempt)
         elif to in ("exited", "aborted", "stalled"):
             attempts = doc.get("attempts") or []
@@ -297,6 +299,8 @@ def transition(task_dir: str, to: str, force: bool = False, **fields: Any) -> di
                 for key in ("exit", "failure_class", "session_id"):
                     if fields.get(key) is not None:
                         last[key] = fields[key]
+                if fields.get("parent_session"):
+                    last["parent_session"] = fields["parent_session"]
         for key in ("verdict", "outcome", "notes"):
             if fields.get(key) is not None:
                 doc[key] = fields[key]

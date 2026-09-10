@@ -310,6 +310,23 @@ _read1() {
   printf '%s' "$v"
 }
 
+_first_directive() {
+  # First non-comment, non-blank line, trimmed. Empty when absent or comments-only.
+  local f="$1" line
+  [[ -f "$f" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -n "$line" ]] || continue
+    case "$line" in
+      \#*) continue ;;
+    esac
+    printf '%s' "$line"
+    return 0
+  done <"$f"
+  return 0
+}
+
 _mtime() {
   # BSD stat and GNU stat disagree; try both, print 0 when neither works.
   local f="$1" v=""
@@ -763,12 +780,31 @@ cmd_dispatch() {
 
   # Resume is by session id only: a worker that emitted none cannot be resumed,
   # and a handoff there needs a fresh brief instead.
-  local resume_sid=""
+  # kind.txt=fork is a modifier on resume, not a fourth mode: it requires the
+  # recorded session (the CLI accepts --fork-session with no --resume as a
+  # no-op fork of nothing) and then adds the registry's fork_flags on the
+  # resume argv template.
+  local kind="" resume_sid="" parent_sid=""
+  kind="$(_first_directive "$dir/kind.txt")"
+  if [[ "$kind" == "fork" ]]; then
+    resume_sid="$(_read1 "$dir/session-id.txt")"
+    if [[ -f "$dir/resume-unavailable.txt" || -z "$resume_sid" ]]; then
+      die "dispatch: kind.txt=fork requires a resumable session in session-id.txt"
+    fi
+    resume=1
+    mode="resume"
+  fi
   if [[ -n "$resume" ]]; then
     [[ ! -f "$dir/resume-unavailable.txt" ]] \
       || die "dispatch: $dir has no resumable session (resume-unavailable.txt)"
     resume_sid="$(_read1 "$dir/session-id.txt")"
     [[ -n "$resume_sid" ]] || die "dispatch: no session id in $dir/session-id.txt"
+  fi
+  if [[ "$kind" == "fork" && -n "$resume_sid" ]]; then
+    # Snapshot before launch. session-id.txt is overwritten from the log after
+    # the worker exits; the parent is a fact of this run, not a re-read.
+    parent_sid="$resume_sid"
+    printf '%s\n' "$parent_sid" >"$dir/parent-session.txt"
   fi
 
   if [[ -n "$background" ]]; then
@@ -807,6 +843,7 @@ cmd_dispatch() {
     --limits "$dir/limits.txt" \
     --budget "$dir/budget.txt" \
     --effort-file "$dir/effort.txt" \
+    --kind-file "$dir/kind.txt" \
     ${resume_sid:+--session-id "$resume_sid"} \
     || die "dispatch: cannot build a $mode command for worker $worker"
 
@@ -839,7 +876,8 @@ cmd_dispatch() {
   _pid_start "$wpid" >"$dir/worker-start.txt"
   wpgid="$(_pgid_of "$wpid")"
   echo "$wpgid" >"$dir/worker.pgid"
-  _ssa_state "$dir" running --worker "$worker" --pid "$wpid"
+  _ssa_state "$dir" running --worker "$worker" --pid "$wpid" \
+    ${parent_sid:+--parent-session "$parent_sid"}
   _ssa_event "$dir" --phase running --worker "$worker" --pid "$wpid"
 
   wait "$wpid" || rc=$?
@@ -854,7 +892,8 @@ cmd_dispatch() {
   echo "$rc" >"$dir/exit-code.txt"
   echo "$sid" >"$dir/session-id.txt"
   _ssa_state "$dir" exited --worker "$worker" --exit "$rc" \
-    ${failure:+--failure-class "$failure"} ${sid:+--session-id "$sid"}
+    ${failure:+--failure-class "$failure"} ${sid:+--session-id "$sid"} \
+    ${parent_sid:+--parent-session "$parent_sid"}
   _ssa_event "$dir" --phase exited --worker "$worker" --exit "$rc" \
     ${failure:+--failure-class "$failure"} --artifact "$log"
   # A 429 or a dead token is not this task's problem alone: bench the worker for
