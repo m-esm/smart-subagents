@@ -1676,8 +1676,10 @@ env_re = re.compile(r"(^|/)\.env(\..+)?$")
 # token class (base64), so `next/dist/server/route-modules/.../auto-implement-methods`
 # is one 71-char token at entropy 3.93. `.js` after the token is the tell,
 # same shape as the STL suffix skip.
+# 1789023425-19036 / 1789028987-49325: `/tmp/loop-evidence-….log` and
+# `apps/….sql` are the same suffix-after-token shape.
 ASSET_FOLLOW = re.compile(
-    r"\.(?:stl|pdf|png|jpe?g|gif|webp|step|stp|3mf|obj|wrl|iges|igs|glb|gltf|bin|js|mjs|cjs|ts|tsx|jsx|mts|cts)(?:\b|$)",
+    r"\.(?:stl|pdf|png|jpe?g|gif|webp|step|stp|3mf|obj|wrl|iges|igs|glb|gltf|bin|js|mjs|cjs|ts|tsx|jsx|mts|cts|log|sql)(?:\b|$)",
     re.I,
 )
 findings = []
@@ -1714,6 +1716,28 @@ def at_base(secret):
 
 
 at_base.cache = {}
+
+def git_object(tok):
+    """True when tok is a 40-hex object in this worktree (Parent commit:)."""
+    if not re.fullmatch(r"[0-9a-f]{40}", tok):
+        return False
+    cached = git_object.cache
+    if tok in cached:
+        return cached[tok]
+    try:
+        ran = subprocess.run(
+            ["git", "-C", wt, "cat-file", "-e", tok],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        hit = ran.returncode == 0
+    except OSError:
+        hit = False
+    cached[tok] = hit
+    return hit
+
+
+git_object.cache = {}
 
 def untracked_paths():
     """`?? path` entries from porcelain status (NUL or newline separated)."""
@@ -1798,6 +1822,21 @@ with open(added_path, "w") as added:
             # sk_live_ / mixed-case tokens still trip entropy.
             tok = match.group(0)
             if "_" in tok and re.fullmatch(r"[a-z][a-z_]*", tok):
+                continue
+            # 1789023425-19036: npm registry URLs. token_re includes `/`
+            # but splits on `:`/`.`, so the match is often a path slice;
+            # skip when the token is a URL or sits inside http(s) on the line.
+            lead = line[: match.start()]
+            if (
+                tok.startswith("http://")
+                or tok.startswith("https://")
+                or "://" in tok
+                or re.search(r"https?://\S*$", lead)
+            ):
+                continue
+            # 1789028987-49325: Parent commit: <sha> when sha is in this wt.
+            # A random hex40 API token is not an object, so it still trips.
+            if git_object(tok):
                 continue
             entropy_matches.append(match)
         if entropy_matches:

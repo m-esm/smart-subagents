@@ -1639,6 +1639,66 @@ class SecretScanTests(unittest.TestCase):
             self.assertEqual(rc, 0, err + out)
             self.assertFalse((task_dir / "verify-secrets.txt").read_text().strip())
 
+    def test_loop_evidence_log_path_is_not_a_high_entropy_secret(self):
+        # 1789023425-19036: hyphenated /tmp/loop-evidence-*.log paths.
+        line = (
+            "npm run test > /tmp/loop-evidence-9f2c1a7e4b8d0356af91c2e7.log 2>&1\n"
+        )
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (repo / "run.sh").write_text(line)
+
+            rc, out, err = run_ssa("scan-secrets", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertFalse((task_dir / "verify-secrets.txt").read_text().strip())
+
+    def test_npm_registry_url_is_not_a_high_entropy_secret(self):
+        # 1789023425-19036: https://registry.npmjs.org/...
+        # Path after the last '.' must be >=32 charset chars or token_re
+        # never matches (`:` and `.` split the class). The FP was the URL.
+        line = (
+            "npm warn audit request to "
+            "https://registry.npmjs.org/loop-evidence-9f2c1a7e4b8d0356af91c2e7\n"
+        )
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (repo / "audit.txt").write_text(line)
+
+            rc, out, err = run_ssa("scan-secrets", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertFalse((task_dir / "verify-secrets.txt").read_text().strip())
+
+    def test_parent_commit_sha_is_not_a_high_entropy_secret(self):
+        # 1789028987-49325: Parent commit: <40-char hex> of an object in wt.
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
+            (repo / "note.txt").write_text("Parent commit: %s\n" % sha)
+
+            rc, out, err = run_ssa("scan-secrets", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertFalse((task_dir / "verify-secrets.txt").read_text().strip())
+
+    def test_sql_migration_path_is_not_a_high_entropy_secret(self):
+        # 1789028987-49325: added migration paths apps/...sql.
+        line = "- apps/api/prisma/migrations/20260910123456_init.sql\n"
+        # Keep the length check on the same suffix-bearing string so this
+        # test file is not itself a high-entropy finding (no bare 32+ path).
+        self.assertGreaterEqual(len(line.strip().split()[-1]) - 4, 32)
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (repo / "files.txt").write_text(line)
+
+            rc, out, err = run_ssa("scan-secrets", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertFalse((task_dir / "verify-secrets.txt").read_text().strip())
+
     def test_underscored_token_with_digits_still_trips_entropy(self):
         # Lowercase snake_case skip must not hide tokens that also have digits.
         token = "flex_a7c3e91b0d2468f5e1c9a3b7d0e4f2"
