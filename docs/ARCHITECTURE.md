@@ -48,6 +48,12 @@ per-CLI knowledge:
   `{budget}` consume it (claude, via `budget_flags`); others ignore the
   file. Absent or comments-only: no `--max-budget-usd`. Malformed or
   non-positive: dispatch refuses, naming the file.
+- `$DIR/effort.txt`: optional one-line override of the difficulty-derived
+  effort already in `worker-args-<cli>.txt`. The accepted set is that
+  worker's `effort_ladder` in `workers.json`. Unknown values refuse
+  dispatch, naming the file, the bad value, and the ladder. Workers with
+  empty `effort_flags` (kimi) ignore the file. The rung actually launched
+  is written as `effort` on `outcome.json` and the ledger record.
 - how a prompt reaches it: `stdin`, `arg`, or `file-ref` with a template
 - the argv template for each mode: `implement`, `plan`, `resume`
 - output handling and log format per mode

@@ -112,17 +112,205 @@ def _prompt_value(spec, mode: str, ctx: Dict[str, Any]) -> Optional[str]:
     raise AdapterError("%s %s: unknown transport %r" % (spec.name, mode, transport))
 
 
+def _token_matches_effort_slot(tmpl: str, tok: str) -> bool:
+    if "{effort}" not in tmpl:
+        return tok == tmpl
+    prefix, _, suffix = tmpl.partition("{effort}")
+    if prefix and not tok.startswith(prefix):
+        return False
+    if suffix and not tok.endswith(suffix):
+        return False
+    if prefix and suffix:
+        return len(tok) >= len(prefix) + len(suffix)
+    return True
+
+
+def _effort_group_len(spec, args: List[str], i: int) -> int:
+    """Length of an effort-flag group starting at i, or 0 if none."""
+    flags = spec.effort_flags
+    if not flags or i + len(flags) > len(args):
+        return 0
+    for j, tmpl in enumerate(flags):
+        if not _token_matches_effort_slot(tmpl, args[i + j]):
+            return 0
+    return len(flags)
+
+
+def _effort_value_from_group(spec, args: List[str], i: int) -> str:
+    for j, tmpl in enumerate(spec.effort_flags):
+        if "{effort}" not in tmpl:
+            continue
+        tok = args[i + j]
+        prefix, _, suffix = tmpl.partition("{effort}")
+        val = tok
+        if prefix:
+            val = val[len(prefix) :]
+        if suffix:
+            val = val[: -len(suffix)]
+        return val
+    return ""
+
+
+def effort_rung_from_args(spec, args: List[str]) -> str:
+    """The effort rung encoded in worker-args. Last matching group wins."""
+    if not spec.effort_flags:
+        return ""
+    found = ""
+    i = 0
+    while i < len(args):
+        span = _effort_group_len(spec, args, i)
+        if span:
+            found = _effort_value_from_group(spec, args, i)
+            i += span
+            continue
+        i += 1
+    return found
+
+
+def _replace_effort_tokens(spec, args: List[str], rung: str) -> List[str]:
+    """Strip every effort group and emit exactly one pair from effort_flags."""
+    flags = spec.effort_flags
+    if not flags:
+        return list(args)
+    new_tokens = [t.replace("{effort}", rung) for t in flags]
+    out: List[str] = []
+    i = 0
+    inserted = False
+    while i < len(args):
+        span = _effort_group_len(spec, args, i)
+        if span:
+            if not inserted:
+                out.extend(new_tokens)
+                inserted = True
+            i += span
+            continue
+        out.append(args[i])
+        i += 1
+    if not inserted:
+        out = new_tokens + out
+    return out
+
+
+def resolve_effort_file(spec, ctx: Dict[str, Any]) -> Optional[str]:
+    """Rung from $DIR/effort.txt, or None if absent / no directive / unused.
+
+    Workers with empty effort_flags (kimi) ignore the file so it cannot
+    inject a flag they do not have. Unknown values raise AdapterError
+    naming the file, the bad value, and the worker's effort_ladder.
+    """
+    path = str(ctx.get("effort_file") or "")
+    if not path:
+        return None
+    try:
+        with open(path, "r") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise AdapterError("%s: cannot read effort file %s: %s" % (spec.name, path, exc))
+
+    values = []
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        values.append((lineno, line))
+    if not values:
+        has_comment = any(
+            raw.strip().startswith("#") for raw in text.splitlines() if raw.strip()
+        )
+        if has_comment:
+            return None
+        raise AdapterError(
+            "%s: %s is empty; want one effort rung from the ladder (%s)"
+            % (spec.name, path, ", ".join(spec.effort_ladder) or "none")
+        )
+    if len(values) != 1:
+        raise AdapterError(
+            "%s: %s has %d directives; want one effort rung"
+            % (spec.name, path, len(values))
+        )
+    _lineno, value = values[0]
+    if not spec.effort_flags:
+        return None
+    if spec.effort_ladder and value not in spec.effort_ladder:
+        raise AdapterError(
+            "%s: %s value %r is not on the effort ladder; accepted: %s"
+            % (spec.name, path, value, ", ".join(spec.effort_ladder) or "none")
+        )
+    return value
+
+
+def launched_effort(spec, ctx: Dict[str, Any]) -> str:
+    """The rung that will be (or was) launched, not the requested override."""
+    override = resolve_effort_file(spec, ctx)
+    if override is not None:
+        return override
+    if ctx.get("args") is not None:
+        return effort_rung_from_args(spec, [str(a) for a in ctx["args"]])
+    return str(ctx.get("effort") or "")
+
+
+def launched_effort_for_dir(dir_path: str, worker: str = "", reg=None) -> str:
+    """The rung a run actually launched with.
+
+    Prefers $DIR/effort-used.txt, which dispatch writes at launch. That file
+    is the only trustworthy answer: effort.txt is an input and may have been
+    edited since. Falls back to re-deriving for task dirs written before
+    effort-used.txt existed.
+    """
+    used = _first_line(os.path.join(dir_path, "effort-used.txt")).strip()
+    if used:
+        return used
+    worker = (worker or _first_line(os.path.join(dir_path, "worker.txt"))).strip()
+    if not worker:
+        return ""
+    try:
+        spec = _spec(worker, reg)
+    except Exception:
+        return ""
+    args_path = os.path.join(dir_path, "worker-args.txt")
+    args: List[str] = []
+    try:
+        with open(args_path, "r", errors="replace") as fh:
+            args = [ln for ln in fh.read().splitlines() if ln.strip()]
+    except OSError:
+        args = []
+    ctx = {"args": args, "effort_file": os.path.join(dir_path, "effort.txt")}
+    try:
+        return launched_effort(spec, ctx)
+    except AdapterError:
+        return effort_rung_from_args(spec, args)
+
+
+def _first_line(path: str) -> str:
+    try:
+        with open(path, "r", errors="replace") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped:
+                    return stripped
+    except OSError:
+        return ""
+    return ""
+
+
 def _effort_tokens(spec, ctx: Dict[str, Any]) -> List[str]:
     """Tuning tokens for the {effort} slot.
 
-    An explicit `args` list (what the recommender already emitted, verbatim)
-    always wins: the difficulty-to-flag mapping has exactly one owner, and it
-    is not this module. Otherwise the rung is rendered through the registry's
-    effort_flags template.
+    $DIR/effort.txt overrides the difficulty-derived value already in
+    worker-args. Absent file: the args list is passed through unchanged.
+    An override strips every existing effort group and splices exactly one
+    pair from the registry's effort_flags. Workers with empty effort_flags
+    never gain a flag they cannot use.
     """
+    override = resolve_effort_file(spec, ctx)
     if ctx.get("args") is not None:
-        return [str(a) for a in ctx["args"]]
-    rung = str(ctx.get("effort") or "")
+        args = [str(a) for a in ctx["args"]]
+        if override is None:
+            return args
+        return _replace_effort_tokens(spec, args, override)
+    rung = override if override is not None else str(ctx.get("effort") or "")
     if not rung or not spec.effort_flags:
         return []
     if spec.effort_ladder and rung not in spec.effort_ladder:

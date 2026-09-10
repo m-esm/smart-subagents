@@ -81,7 +81,7 @@ class ShippedClaudeRegistryTests(unittest.TestCase):
 
     def test_effort_ladder_includes_xhigh(self):
         spec = self.reg.get("claude")
-        self.assertEqual(spec.effort_ladder, ["low", "medium", "high", "xhigh"])
+        self.assertEqual(spec.effort_ladder, ["low", "medium", "high", "xhigh", "max"])
         self.assertEqual(spec.effort_flags, ["--effort", "{effort}"])
 
     def test_workers_list_prints_claude_as_no_write(self):

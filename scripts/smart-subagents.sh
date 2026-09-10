@@ -806,6 +806,7 @@ cmd_dispatch() {
     --args-file "$dir/worker-args.txt" \
     --limits "$dir/limits.txt" \
     --budget "$dir/budget.txt" \
+    --effort-file "$dir/effort.txt" \
     ${resume_sid:+--session-id "$resume_sid"} \
     || die "dispatch: cannot build a $mode command for worker $worker"
 
@@ -846,6 +847,10 @@ cmd_dispatch() {
   sid="$(_ssa parse-session --worker "$worker" --log "$log" 2>/dev/null || true)"
   failure="$(_classify_failure "$rc" "$log")"
 
+  # The launched effort is a fact about THIS run. effort.txt is an input a
+  # supervisor may edit before `record` runs, so re-deriving it later would
+  # put a rung in the ledger that no run ever used.
+  _ssa effort-used --dir "$dir" --worker "$worker" >"$dir/effort-used.txt" 2>/dev/null || true
   echo "$rc" >"$dir/exit-code.txt"
   echo "$sid" >"$dir/session-id.txt"
   _ssa_state "$dir" exited --worker "$worker" --exit "$rc" \
@@ -2455,12 +2460,13 @@ cmd_verify() {
   if cmd_scan_secrets --dir "$dir"; then secrets_ok=1; else secrets_ok=0; fi
 
   local rc=0
-  python3 - "$dir" "$secrets_ok" <<'PY' || rc=$?
+  python3 - "$dir" "$secrets_ok" "$SCRIPT_DIR" <<'PY' || rc=$?
 import fnmatch, json, os, sys
 from pathlib import Path
 
 d = Path(sys.argv[1])
 secrets_ok = sys.argv[2] == "1"
+scripts_dir = sys.argv[3] if len(sys.argv) > 3 else ""
 
 def lines(name):
     p = d / name
@@ -2569,8 +2575,18 @@ if task_file.exists():
     except Exception:
         failure_class = None
 
+effort = ""
+if scripts_dir:
+    sys.path.insert(0, scripts_dir)
+    try:
+        from ssa import adapters as _ssa_adapters
+        effort = _ssa_adapters.launched_effort_for_dir(str(d))
+    except Exception:
+        effort = ""
+
 doc = {
     "schema_version": 1,
+    "effort": effort,
     "verify": {
         "commands": commands,
         "baseline_ran": baseline_ran,
@@ -2648,12 +2664,13 @@ cmd_record() {
   need python3
   mkdir -p "$SSA_STATE_DIR" 2>/dev/null || true
   chmod 700 "$SSA_STATE_DIR" 2>/dev/null || true
-  python3 - "$dir" "$outcome" "$retries" "$handoff" "$notes" "$SSA_LEDGER" <<'PY'
+  python3 - "$dir" "$outcome" "$retries" "$handoff" "$notes" "$SSA_LEDGER" "$SCRIPT_DIR" <<'PY'
 import hashlib, json, os, re, sys, time
 from pathlib import Path
 
 d = Path(sys.argv[1])
 outcome, retries, handoff, notes, ledger = sys.argv[2:7]
+scripts_dir = sys.argv[7] if len(sys.argv) > 7 else ""
 
 def read1(name, default=""):
     p = d / name
@@ -2754,6 +2771,15 @@ def quota(name):
             out[cli.get("cli")] = round(float(pick["used_pct"]), 2)
     return out or None
 
+effort = ""
+if scripts_dir:
+    sys.path.insert(0, scripts_dir)
+    try:
+        from ssa import adapters as _ssa_adapters
+        effort = _ssa_adapters.launched_effort_for_dir(str(d))
+    except Exception:
+        effort = ""
+
 record = {
     "schema_version": 1,
     "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -2763,6 +2789,7 @@ record = {
     "kind": read1("kind.txt"),
     "size": read1("size.txt"),
     "difficulty": read1("difficulty.txt"),
+    "effort": effort,
     "worker_args": args,
     "exit_code": exit_code,
     "wall_seconds": wall,

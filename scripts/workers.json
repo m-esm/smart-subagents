@@ -275,7 +275,7 @@
         "keys": ["error", "result"],
         "_note": "Only read when the result object says is_error, or its subtype names an error."
       },
-      "effort_ladder": ["low", "medium", "high", "xhigh"],
+      "effort_ladder": ["low", "medium", "high", "xhigh", "max"],
       "effort_flags": ["--effort", "{effort}"],
       "budget_flags": ["--max-budget-usd", "{budget}"],
       "models": {

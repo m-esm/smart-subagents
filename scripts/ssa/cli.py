@@ -98,6 +98,7 @@ def cmd_build_command(args) -> int:
         "model": args.model,
         "limits": args.limits,
         "budget": args.budget,
+        "effort_file": args.effort_file,
     }
     if args.args_file:
         try:
@@ -244,6 +245,16 @@ def cmd_transition(args) -> int:
     return 0
 
 
+def cmd_effort_used(args) -> int:
+    """Resolve the launched rung once, at launch, so `record` cannot re-derive it."""
+    try:
+        value = adapters.launched_effort_for_dir(args.dir, args.worker)
+    except Exception:
+        value = ""
+    print(value)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="ssa", description=__doc__.splitlines()[0])
     ap.add_argument(
@@ -291,8 +302,22 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="path to $DIR/budget.txt (positive decimal dollars; fills {budget})",
     )
+    p.add_argument(
+        "--effort-file",
+        default="",
+        dest="effort_file",
+        help="path to $DIR/effort.txt (one effort rung; overrides worker-args)",
+    )
     p.add_argument("--nul", action="store_true", help="NUL-separated output for the shell")
     p.set_defaults(func=cmd_build_command)
+
+    p = sub.add_parser(
+        "effort-used",
+        help="print the effort rung a task dir's dispatch launched with",
+    )
+    p.add_argument("--dir", required=True)
+    p.add_argument("--worker", default="")
+    p.set_defaults(func=cmd_effort_used)
 
     p = sub.add_parser("parse-session", help="scrape a session id from a worker log")
     p.add_argument("--worker", required=True)
