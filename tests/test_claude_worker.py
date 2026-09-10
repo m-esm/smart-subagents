@@ -40,9 +40,13 @@ class ShippedClaudeRegistryTests(unittest.TestCase):
         self.assertEqual(spec.sandbox, "none")
         self.assertFalse(spec.write_allowed_default)
         self.assertEqual(spec.cwd_mode, "worktree")
-        # Scrubbed: the worker keeps HOME, PATH, TMPDIR and TERM only, which
-        # is everything `claude -p` needs to find its own credentials.
+        # Scrubbed: env_keep is HOME, PATH, TMPDIR, TERM, USER. USER is
+        # required for the macOS keychain lookup; without it claude -p
+        # reports "Not logged in".
         self.assertTrue(spec.env_scrub)
+        self.assertEqual(
+            spec.env_keep, ["HOME", "PATH", "TMPDIR", "TERM", "USER"]
+        )
         self.assertEqual(spec.binary_env, "CLAUDE_BIN")
 
     def test_every_difficulty_pins_model_fable(self):

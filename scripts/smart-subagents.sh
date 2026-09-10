@@ -188,7 +188,8 @@ _ssa() { python3 "$SSA_CLI_PY" "$@"; }
 # The command crosses the process boundary NUL-separated because that is the
 # only way to move a list of arbitrary strings intact on bash 3.2.
 # Fields 0-6: bin cwd stdin env_scrub output_mode write_ok sandbox.
-# Field 7: N (env pair count). Then 2N tokens of KEY, VALUE. Then argv.
+# Field 7: N (env pair count). Then 2N tokens of KEY, VALUE (env_keep from
+# the parent, then env_extra from limits.txt). Then argv.
 _BC_BIN=""; _BC_CWD=""; _BC_STDIN=""; _BC_ENV_SCRUB=""; _BC_OUTPUT_MODE=""
 _BC_WRITE_OK=""; _BC_SANDBOX=""; _BC_ENV_N=0; _BC_ENV_EXTRA=(); _BC_ARGV=()
 _ssa_build() {
@@ -234,11 +235,14 @@ _ssa_build() {
 }
 
 # Run the built command. Caller owns every redirection.
+# Scrubbed launch: env -i with only the KEY=VALUE pairs from the registry.
+# env_keep values were read from this parent environment; env_pass values
+# came from $DIR/limits.txt. Both arrived on the same NUL stream (see
+# _ssa_build). Do not hardcode names here.
 _ssa_run_worker() {
   if [[ "$_BC_ENV_SCRUB" == "1" ]]; then
     ( cd "${_BC_CWD:-.}" \
-      && env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
-        TERM="${TERM:-dumb}" ${_BC_ENV_EXTRA[@]+"${_BC_ENV_EXTRA[@]}"} \
+      && env -i ${_BC_ENV_EXTRA[@]+"${_BC_ENV_EXTRA[@]}"} \
         "$_BC_BIN" ${_BC_ARGV[@]+"${_BC_ARGV[@]}"} )
   elif [[ -n "$_BC_CWD" ]]; then
     ( cd "$_BC_CWD" && "$_BC_BIN" ${_BC_ARGV[@]+"${_BC_ARGV[@]}"} )

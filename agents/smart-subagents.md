@@ -70,8 +70,10 @@ worker), `session-id.txt`, `worker.txt`, `exit-code.txt`,
 `verify-final.log`, `outcome.json`, `outcome-record.json`, `diff-stat.txt`,
 `report.md`. Optional `limits.txt` (`key=value` caps such as `spawn_depth`,
 `concurrent`, `per_session`) is mapped through the worker's `run.env_pass`
-onto the scrubbed environment; a worker that declares no map ignores the
-file. Background runs add `worker.pid`, `worker.pgid`,
+onto the scrubbed environment (on top of `run.env_keep`, which defaults to
+HOME, PATH, TMPDIR, TERM; claude also keeps USER for the macOS keychain
+lookup). A worker that declares no map ignores the file. Background runs add
+`worker.pid`, `worker.pgid`,
 `worker-start.txt`, and `stalled.txt` or `stopped.txt` when a run was cut short.
 `init` is transactional: a failure after the worktree exists rolls the worktree
 and the `ssa/<id>` branch back, so a half-minted task never lingers.

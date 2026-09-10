@@ -46,6 +46,13 @@ _META_SEQS = ("$(", "${", "&&", "||", ">>")
 
 DEFAULT_PATH = Path(__file__).resolve().parent.parent / "workers.json"
 
+# Parent-env names a scrubbed worker keeps when run.env_keep is omitted.
+# Mirrored by adapters.scrub_env and by the shell's env -i line (via the
+# build-command NUL stream). Do not hardcode this list in those places.
+DEFAULT_ENV_KEEP = ("HOME", "PATH", "TMPDIR", "TERM")
+_ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_LIMIT_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
 
 class RegistryError(Exception):
     """A registry file that cannot be trusted to build an argv."""
@@ -142,6 +149,7 @@ class WorkerSpec:
         if self.cwd_mode not in CWD_MODES:
             raise _fail(where, "run.cwd %r not one of %s" % (self.cwd_mode, CWD_MODES))
         self.env_scrub = bool(run.get("env_scrub", False))
+        self.env_keep = self._env_keep(where, run)
         self.env_pass = self._env_pass(where, run)
 
         self.prompt: Dict[str, dict] = {}
@@ -327,6 +335,28 @@ class WorkerSpec:
                 raise _fail(where, "fit.%s is not a number" % kind_name)
 
     @staticmethod
+    def _env_keep(where: str, run: dict) -> List[str]:
+        """Parent-env names a scrubbed worker keeps. Default four when absent."""
+        if "env_keep" not in run:
+            return list(DEFAULT_ENV_KEEP)
+        raw = run.get("env_keep")
+        if not isinstance(raw, list):
+            raise _fail(where, "run.env_keep is not an array")
+        out: List[str] = []
+        seen = set()
+        for item in raw:
+            if not isinstance(item, str) or not _ENV_NAME_RE.match(item):
+                raise _fail(
+                    where,
+                    "run.env_keep item %r is not [A-Z][A-Z0-9_]*" % (item,),
+                )
+            if item in seen:
+                raise _fail(where, "run.env_keep duplicates %r" % (item,))
+            seen.add(item)
+            out.append(item)
+        return out
+
+    @staticmethod
     def _env_pass(where: str, run: dict) -> Dict[str, str]:
         """Optional map from a limits.txt key to an env var name. {} when absent."""
         raw = run.get("env_pass") or {}
@@ -334,12 +364,12 @@ class WorkerSpec:
             raise _fail(where, "run.env_pass is not an object")
         out: Dict[str, str] = {}
         for key, value in raw.items():
-            if not isinstance(key, str) or not re.match(r"^[a-z][a-z0-9_]*$", key):
+            if not isinstance(key, str) or not _LIMIT_KEY_RE.match(key):
                 raise _fail(
                     where,
                     "run.env_pass key %r is not [a-z][a-z0-9_]*" % (key,),
                 )
-            if not isinstance(value, str) or not re.match(r"^[A-Z][A-Z0-9_]*$", value):
+            if not isinstance(value, str) or not _ENV_NAME_RE.match(value):
                 raise _fail(
                     where,
                     "run.env_pass[%r] env name %r is not [A-Z][A-Z0-9_]*"

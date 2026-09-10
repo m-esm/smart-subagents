@@ -1,4 +1,4 @@
-"""$DIR/limits.txt -> scrubbed env via workers.json run.env_pass.
+"""$DIR/limits.txt -> scrubbed env via workers.json run.env_pass / env_keep.
 
 The resolved env dict is the contract, not a substring of a command line.
 A missing file, an empty file, and a worker with no env_pass all produce {}.
@@ -26,6 +26,29 @@ CLAUDE_LIMIT_VARS = {
     "per_session": "CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION",
 }
 
+# CPython on macOS re-injects these even under `env -i`. They are not a
+# scrub leak; a removed scrub would also admit SSA_TEST_LEAK and the rest
+# of the parent environment, which this set does not contain.
+PYTHON_ENV_INJECTIONS = frozenset(
+    {
+        "CPATH",
+        "LC_CTYPE",
+        "LIBRARY_PATH",
+        "MANPATH",
+        "SDKROOT",
+        "__CF_USER_TEXT_ENCODING",
+    }
+)
+
+PARENT_USER = "ssa-parent-user"
+
+
+def policy_keys(recorded):
+    """Launched env keys minus interpreter noise. Set equality of this
+    against the allowlist (plus limits.txt vars) is the scrub contract.
+    """
+    return set(recorded) - PYTHON_ENV_INJECTIONS
+
 
 class EnvPassRegistryTests(unittest.TestCase):
     @classmethod
@@ -37,7 +60,28 @@ class EnvPassRegistryTests(unittest.TestCase):
         for name in ("codex", "grok", "kimi"):
             self.assertEqual(self.reg.get(name).env_pass, {}, msg=name)
 
+    def test_claude_env_keep_includes_user(self):
+        self.assertEqual(
+            self.reg.get("claude").env_keep,
+            ["HOME", "PATH", "TMPDIR", "TERM", "USER"],
+        )
+
+    def test_grok_env_keep_defaults_to_the_four(self):
+        registry = load_ssa("registry")
+        self.assertEqual(
+            self.reg.get("grok").env_keep, list(registry.DEFAULT_ENV_KEEP)
+        )
+        self.assertFalse(self.reg.get("grok").env_scrub)
+        for name in ("codex", "kimi"):
+            self.assertEqual(
+                self.reg.get(name).env_keep,
+                list(registry.DEFAULT_ENV_KEEP),
+                msg=name,
+            )
+
     def test_scrub_env_keeps_only_the_four_base_vars(self):
+        # Deliberate pin of the no-spec default. USER in the parent must
+        # not sneak through when no worker spec is supplied.
         adapters = load_ssa("adapters")
         kept = adapters.scrub_env(
             {
@@ -45,9 +89,53 @@ class EnvPassRegistryTests(unittest.TestCase):
                 "PATH": "/p",
                 "TMPDIR": "/t",
                 "TERM": "x",
+                "USER": "should-not-pass",
                 "SSA_TEST_LEAK": "1",
                 "SECRET": "nope",
             }
+        )
+        self.assertEqual(
+            kept,
+            {"HOME": "/h", "PATH": "/p", "TMPDIR": "/t", "TERM": "x"},
+        )
+
+    def test_scrub_env_with_claude_spec_keeps_user(self):
+        adapters = load_ssa("adapters")
+        kept = adapters.scrub_env(
+            {
+                "HOME": "/h",
+                "PATH": "/p",
+                "TMPDIR": "/t",
+                "TERM": "x",
+                "USER": PARENT_USER,
+                "SSA_TEST_LEAK": "1",
+                "SECRET": "nope",
+            },
+            spec=self.reg.get("claude"),
+        )
+        self.assertEqual(
+            kept,
+            {
+                "HOME": "/h",
+                "PATH": "/p",
+                "TMPDIR": "/t",
+                "TERM": "x",
+                "USER": PARENT_USER,
+            },
+        )
+
+    def test_scrub_env_with_grok_spec_keeps_the_four(self):
+        adapters = load_ssa("adapters")
+        kept = adapters.scrub_env(
+            {
+                "HOME": "/h",
+                "PATH": "/p",
+                "TMPDIR": "/t",
+                "TERM": "x",
+                "USER": PARENT_USER,
+                "SSA_TEST_LEAK": "1",
+            },
+            spec=self.reg.get("grok"),
         )
         self.assertEqual(
             kept,
@@ -140,6 +228,34 @@ class ResolvedEnvDictTests(unittest.TestCase):
                 "spawn_depth=2\nconcurrent=1\nper_session=0\n",
             )
             self.assertEqual(built["env_extra"], {})
+            self.assertEqual(built["env_keep"], {})
+            self.assertFalse(built["env_scrub"])
+
+    def test_claude_env_keep_and_env_extra_stay_distinct(self):
+        with temp_env() as te:
+            parent = {
+                "HOME": "/h",
+                "PATH": "/p",
+                "TMPDIR": "/t",
+                "TERM": "x",
+                "USER": PARENT_USER,
+                "SSA_TEST_LEAK": "1",
+            }
+            built = self._build(
+                te.root,
+                "claude",
+                "spawn_depth=2\nconcurrent=1\nper_session=0\n",
+            )
+            # _build does not pass ctx['env']; pin via scrub_env + env_extra.
+            adapters = load_ssa("adapters")
+            keep = adapters.scrub_env(parent, spec=self.reg.get("claude"))
+            self.assertEqual(set(keep) & set(built["env_extra"]), set())
+            self.assertIn("USER", keep)
+            self.assertNotIn("USER", built["env_extra"])
+            self.assertNotIn("SSA_TEST_LEAK", keep)
+            for var in CLAUDE_LIMIT_VARS.values():
+                self.assertIn(var, built["env_extra"])
+                self.assertNotIn(var, keep)
 
 
 class LimitsDispatchTests(unittest.TestCase):
@@ -148,10 +264,25 @@ class LimitsDispatchTests(unittest.TestCase):
         env["CLAUDE_BIN"] = str(BIN_DIR / "fake-claude")
         env["SSA_ALLOW_UNSANDBOXED_WRITE"] = "1"
         env["SSA_TEST_LEAK"] = "1"
+        env["USER"] = PARENT_USER
         env.pop("CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", None)
         env.pop("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", None)
         env.pop("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION", None)
         return env
+
+    def _assert_policy_env(self, recorded, expected, parent):
+        """Launched env keys == allowlist (+ limits), values from parent/limits.
+
+        Interpreter-injected keys are subtracted so this is set equality of
+        the policy, not membership. SSA_TEST_LEAK is not in the injection
+        set, so a removed scrub still fails.
+        """
+        self.assertEqual(policy_keys(recorded), expected)
+        self.assertNotIn("SSA_TEST_LEAK", recorded)
+        for key in expected:
+            self.assertIn(key, recorded)
+        if "USER" in expected:
+            self.assertEqual(recorded["USER"], parent["USER"])
 
     def test_unknown_key_dispatch_exits_nonzero_naming_the_key(self):
         with temp_env() as te:
@@ -179,6 +310,22 @@ class LimitsDispatchTests(unittest.TestCase):
             self.assertNotEqual(rc, 0)
             self.assertIn("per_session", err)
 
+    def test_claude_dispatch_keeps_user_and_not_the_leak(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, worker_args=[])
+            env = self._claude_env(te)
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "claude",
+                env=env,
+            )
+            self.assertEqual(rc, 0, err)
+            recorded = json.loads(
+                (te.home / ".ssa-test" / "fake-claude" / "env.json").read_text()
+            )
+            spec = load_ssa("registry").load().get("claude")
+            self._assert_policy_env(recorded, set(spec.env_keep), env)
+
     def test_declared_limits_reach_the_scrubbed_process_and_parent_leak_does_not(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
@@ -186,9 +333,10 @@ class LimitsDispatchTests(unittest.TestCase):
             (task_dir / "limits.txt").write_text(
                 "spawn_depth=2\nconcurrent=1\nper_session=0\n"
             )
+            env = self._claude_env(te)
             rc, out, err = run_ssa(
                 "dispatch", "--dir", str(task_dir), "--worker", "claude",
-                env=self._claude_env(te),
+                env=env,
             )
             self.assertEqual(rc, 0, err)
             recorded = json.loads(
@@ -197,17 +345,21 @@ class LimitsDispatchTests(unittest.TestCase):
             self.assertEqual(recorded["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"], "2")
             self.assertEqual(recorded["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"], "1")
             self.assertEqual(recorded["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"], "0")
-            self.assertNotIn("SSA_TEST_LEAK", recorded)
-            for base in ("HOME", "PATH", "TMPDIR", "TERM"):
-                self.assertIn(base, recorded)
+            spec = load_ssa("registry").load().get("claude")
+            expected = set(spec.env_keep) | set(CLAUDE_LIMIT_VARS.values())
+            self._assert_policy_env(recorded, expected, env)
 
     def test_no_limits_txt_keeps_the_four_base_vars_only(self):
+        # Updated: claude's allowlist is now the four plus USER. The
+        # launched key set (minus interpreter noise) must equal that
+        # allowlist exactly, not merely contain the four.
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
             task_dir = make_task_dir(te.work_dir, repo, worker_args=[])
+            env = self._claude_env(te)
             rc, out, err = run_ssa(
                 "dispatch", "--dir", str(task_dir), "--worker", "claude",
-                env=self._claude_env(te),
+                env=env,
             )
             self.assertEqual(rc, 0, err)
             recorded = json.loads(
@@ -216,9 +368,49 @@ class LimitsDispatchTests(unittest.TestCase):
             self.assertNotIn("CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", recorded)
             self.assertNotIn("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", recorded)
             self.assertNotIn("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION", recorded)
-            self.assertNotIn("SSA_TEST_LEAK", recorded)
-            for base in ("HOME", "PATH", "TMPDIR", "TERM"):
-                self.assertIn(base, recorded)
+            spec = load_ssa("registry").load().get("claude")
+            self._assert_policy_env(recorded, set(spec.env_keep), env)
+
+    def test_kimi_dispatch_without_env_keep_keeps_the_four(self):
+        registry = load_ssa("registry")
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, worker_args=[])
+            env = dict(te.env)
+            env["KIMI_BIN"] = str(BIN_DIR / "fake-kimi")
+            env["SSA_ALLOW_KIMI_WRITE"] = "1"
+            env["SSA_TEST_LEAK"] = "1"
+            env["USER"] = PARENT_USER
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "kimi", env=env
+            )
+            self.assertEqual(rc, 0, err)
+            recorded = json.loads(
+                (te.home / ".ssa-test" / "fake-kimi" / "env.json").read_text()
+            )
+            expected = set(registry.DEFAULT_ENV_KEEP)
+            self._assert_policy_env(recorded, expected, env)
+            self.assertNotIn("USER", recorded)
+
+    def test_scrub_env_and_shell_env_i_agree_on_claude(self):
+        adapters = load_ssa("adapters")
+        spec = load_ssa("registry").load().get("claude")
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, worker_args=[])
+            env = self._claude_env(te)
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "claude",
+                env=env,
+            )
+            self.assertEqual(rc, 0, err)
+            recorded = json.loads(
+                (te.home / ".ssa-test" / "fake-claude" / "env.json").read_text()
+            )
+            kept = adapters.scrub_env(env, spec)
+            for key, value in kept.items():
+                self.assertEqual(recorded[key], value, key)
+            self.assertEqual(policy_keys(recorded), set(kept))
 
     def test_grok_dispatch_with_limits_txt_gets_no_extra_env(self):
         with temp_env() as te:

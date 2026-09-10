@@ -214,10 +214,11 @@
       "probe": "check_claude",
       "sandbox": "none",
       "write_allowed_default": false,
-      "_run_note": "env_scrub: the worker keeps HOME, PATH, TMPDIR and TERM only, plus any vars named in env_pass whose keys appear in $DIR/limits.txt. claude reads its credentials from the keychain and ~/.claude, so HOME is all it needs in -p mode. env_pass names live here, never in Python or the shell.",
+      "_run_note": "env_scrub: the worker keeps the names in env_keep (from the parent environment) plus any vars named in env_pass whose keys appear in $DIR/limits.txt. USER is required for the macOS keychain lookup; dropping it produces a 'Not logged in' run that otherwise looks like a normal failure. env_keep and env_pass names live here, never in Python or the shell.",
       "run": {
         "cwd": "worktree",
         "env_scrub": true,
+        "env_keep": ["HOME", "PATH", "TMPDIR", "TERM", "USER"],
         "env_pass": {
           "spawn_depth": "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH",
           "concurrent": "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS",

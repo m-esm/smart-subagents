@@ -1265,8 +1265,9 @@ cmd_bg_run --dir "$2" --worker codex
             repo = make_git_repo(te.root / "repo")
             task_dir = make_task_dir(te.work_dir, repo)
             sleeper = write_script(te.root / "codex-slow.sh", "#!/bin/sh\nsleep 5\n")
-            env = dict(te.env)
-            env["CODEX_BIN"] = str(sleeper)
+            env = SteerTests._env_with_ps_shim(
+                self, te, extra={"CODEX_BIN": str(sleeper)}
+            )
 
             proc = subprocess.Popen(
                 ["bash", str(SSA_SH), "dispatch", "--dir", str(task_dir),
@@ -1278,7 +1279,7 @@ cmd_bg_run --dir "$2" --worker codex
                 seen = ""
                 deadline = time.time() + 20
                 while time.time() < deadline:
-                    _, seen, _ = run_ssa("status", "--dir", str(task_dir), env=te.env)
+                    _, seen, _ = run_ssa("status", "--dir", str(task_dir), env=env)
                     if "(running)" in seen:
                         break
                     time.sleep(0.2)

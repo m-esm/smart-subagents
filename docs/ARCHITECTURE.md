@@ -35,10 +35,14 @@ per-CLI knowledge:
 - binary discovery: env var, candidate paths, PATH name
 - which quota probe reports on it, by function name
 - sandbox capability and whether writes are allowed by default
+- `run.env_keep`: names a scrubbed worker copies from the parent environment
+  onto `env -i`. Default `HOME`, `PATH`, `TMPDIR`, `TERM` when omitted.
+  claude also keeps `USER` (the macOS keychain lookup needs it; dropping it
+  produces a "Not logged in" run). Values are never stored in the registry.
 - `run.env_pass`: optional map from a `$DIR/limits.txt` key to an env var
-  name. Only claude declares one. A missing or empty file adds nothing to the
-  scrubbed `env -i` (HOME, PATH, TMPDIR, TERM); a declared key is appended
-  there for that dispatch only. The env var names live in `workers.json`.
+  name. Only claude declares one. A missing or empty file adds nothing
+  beyond `env_keep`; a declared key is appended there for that dispatch
+  only. The env var names live in `workers.json`.
 - how a prompt reaches it: `stdin`, `arg`, or `file-ref` with a template
 - the argv template for each mode: `implement`, `plan`, `resume`
 - output handling and log format per mode

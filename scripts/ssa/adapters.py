@@ -244,7 +244,7 @@ def resolve_env_extra(spec, ctx: Dict[str, Any]) -> Dict[str, str]:
 
 
 def build_command(worker: str, mode: str, ctx: Dict[str, Any], reg=None) -> Dict[str, Any]:
-    """Registry entry + context -> {argv, stdin, cwd, env_scrub, env_extra, ...}."""
+    """Registry entry + context -> {argv, stdin, cwd, env_scrub, env_keep, env_extra, ...}."""
     spec = _spec(worker, reg)
     template = spec.argv_for(mode)
     prompt = _prompt_value(spec, mode, ctx)
@@ -314,14 +314,20 @@ def build_command(worker: str, mode: str, ctx: Dict[str, Any], reg=None) -> Dict
         if not cwd:
             raise AdapterError("%s %s: run.cwd is worktree but none given" % (spec.name, mode))
 
+    parent_env = ctx.get("env")
+    # env_keep: parent-sourced allowlist. env_extra: limits.txt via env_pass.
+    # Distinct dicts so a reader does not merge the two concepts; they share
+    # one KEY VALUE stream on the way to `env -i`.
+    env_keep = scrub_env(parent_env, spec) if spec.env_scrub else {}
     return {
         "worker": spec.name,
         "mode": mode,
-        "bin": spec.resolve_binary(ctx.get("env")),
+        "bin": spec.resolve_binary(parent_env),
         "argv": argv,
         "stdin": stdin_path,
         "cwd": cwd,
         "env_scrub": spec.env_scrub,
+        "env_keep": env_keep,
         "env_extra": resolve_env_extra(spec, ctx),
         "output_mode": spec.output_mode(mode),
         "write_allowed": spec.write_allowed_default,
@@ -474,12 +480,26 @@ def classify_log(exit_code: int, log_path: str, lines: int = 40) -> Optional[str
     return classify_failure(exit_code, tail)
 
 
-def scrub_env(env: Optional[dict] = None) -> Dict[str, str]:
-    """The four variables a scrubbed worker keeps. Mirrors `env -i` in the shell."""
+# Fallbacks for names that the historical `env -i` line defaulted when
+# unset. Unknown keep names (e.g. USER) fall back to "".
+_KEEP_DEFAULTS = {"TMPDIR": "/tmp", "TERM": "dumb"}
+
+
+def scrub_env(env: Optional[dict] = None, spec=None) -> Dict[str, str]:
+    """Parent-env values a scrubbed worker keeps.
+
+    Names come from spec.env_keep, or DEFAULT_ENV_KEEP when no spec is
+    given. Values come from `env` (the parent). The shell's `env -i` line
+    applies this dict plus any env_extra (limits.txt) pairs; it does not
+    hardcode names of its own.
+    """
     env = os.environ if env is None else env
-    return {
-        "HOME": env.get("HOME", ""),
-        "PATH": env.get("PATH", ""),
-        "TMPDIR": env.get("TMPDIR", "/tmp"),
-        "TERM": env.get("TERM", "dumb"),
-    }
+    names = (
+        list(spec.env_keep)
+        if spec is not None
+        else list(registry_mod.DEFAULT_ENV_KEEP)
+    )
+    out: Dict[str, str] = {}
+    for name in names:
+        out[name] = env.get(name, _KEEP_DEFAULTS.get(name, ""))
+    return out
