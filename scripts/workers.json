@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "_note": "Single source of truth for per-CLI knowledge. A fourth worker is an entry here plus a probe function in ai-cli-usage.py, never a code fork. Point SSA_WORKERS_JSON at another file to override. Placeholders allowed in argv templates: {worktree} {brief} {output} {session_id} {prompt} {effort} {model}. {effort} and {model} splice zero or more tokens; the rest are single values. No token may contain shell metacharacters: the argv is executed directly, never through a shell.",
+  "_note": "Single source of truth for per-CLI knowledge. A fourth worker is an entry here plus a probe function in ai-cli-usage.py, never a code fork. Point SSA_WORKERS_JSON at another file to override. Placeholders allowed in argv templates: {worktree} {brief} {output} {session_id} {prompt} {effort} {model} {agents} {agent}. {effort} and {model} splice zero or more tokens; {agents} and {agent} are standalone (compact session-agent JSON and the agent name); the rest are single values. No token may contain shell metacharacters: the argv is executed directly, never through a shell.",
   "workers": {
     "codex": {
       "display_name": "OpenAI Codex CLI",
@@ -230,22 +230,31 @@
           "template": "Read the file {brief} and complete the task it describes."
         }
       },
-      "_argv_note": "No --setting-sources project: it loads the TARGET repo .claude/settings.json, whose hooks then run unsandboxed on this machine. A worker must not execute configuration it was sent to inspect.",
+      "_argv_note": "No --setting-sources project: it loads the TARGET repo .claude/settings.json, whose hooks then run unsandboxed on this machine. A worker must not execute configuration it was sent to inspect. --agents/--agent pin the session to ssa-worker so a scrubbed `claude -p` cannot load the SSA contract from disk and cannot spawn Task/Agent.",
+      "agents": {
+        "name": "ssa-worker",
+        "description": "SSA dispatched worker: {task}",
+        "prompt": "You are the dispatched worker and you are the labor. Complete the task in the brief yourself. Do not run smart-subagents.sh, do not spawn another CLI, do not delegate onward. Do not commit, do not push, do not reformat the tree.",
+        "disallowedTools": ["Task", "Agent"]
+      },
       "argv": {
         "implement": [
           "-p", "{prompt}", "--output-format", "json",
           "--permission-mode", "acceptEdits",
-          "{effort}", "{model}"
+          "{effort}", "{model}",
+          "--agents", "{agents}", "--agent", "{agent}"
         ],
         "plan": [
           "-p", "{prompt}", "--output-format", "json",
           "--permission-mode", "plan",
-          "{effort}", "{model}"
+          "{effort}", "{model}",
+          "--agents", "{agents}", "--agent", "{agent}"
         ],
         "resume": [
           "-p", "{prompt}", "--resume", "{session_id}", "--output-format", "json",
           "--permission-mode", "acceptEdits",
-          "{effort}", "{model}"
+          "{effort}", "{model}",
+          "--agents", "{agents}", "--agent", "{agent}"
         ]
       },
       "output": { "implement": "none", "plan": "stdout", "resume": "none" },

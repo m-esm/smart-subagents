@@ -31,10 +31,12 @@ OUTPUT_MODES = ("arg", "stdout", "none")
 CWD_MODES = ("inherit", "worktree")
 
 # Placeholders an argv template may name. {effort} and {model} splice zero or
-# more tokens; every other placeholder resolves to exactly one string.
+# more tokens; {agents} and {agent} are standalone scalars (compact session
+# agent JSON and the agent name); every other placeholder is one string.
 SCALAR_PLACEHOLDERS = ("worktree", "brief", "output", "session_id", "prompt")
 LIST_PLACEHOLDERS = ("effort", "model")
-PLACEHOLDERS = SCALAR_PLACEHOLDERS + LIST_PLACEHOLDERS
+STANDALONE_SCALARS = ("agents", "agent")
+PLACEHOLDERS = SCALAR_PLACEHOLDERS + LIST_PLACEHOLDERS + STANDALONE_SCALARS
 
 _PLACEHOLDER_RE = re.compile(r"\{([a-z_]+)\}")
 # The argv is handed to execve, never to a shell, so a metacharacter in a
@@ -78,14 +80,16 @@ def _check_token(
                 "token %d (%r) uses unknown placeholder {%s}; allowed: %s"
                 % (index, token, name, ", ".join(allowed)),
             )
-    if standalone_lists and any(
-        ("{%s}" % n) in token for n in LIST_PLACEHOLDERS
-    ):
-        if token not in ["{%s}" % n for n in LIST_PLACEHOLDERS]:
+    if standalone_lists:
+        lone = LIST_PLACEHOLDERS + STANDALONE_SCALARS
+        if any(("{%s}" % n) in token for n in lone) and token not in [
+            "{%s}" % n for n in lone
+        ]:
             raise _fail(
                 where,
-                "token %d (%r) embeds a list placeholder; {effort} and {model} "
-                "must stand alone as a whole token" % (index, token),
+                "token %d (%r) embeds a standalone placeholder; {effort}, "
+                "{model}, {agents} and {agent} must stand alone as a whole token"
+                % (index, token),
             )
 
 
@@ -197,6 +201,23 @@ class WorkerSpec:
         if "implement" not in self.argv:
             raise _fail(where, "argv has no implement mode")
 
+        self.agents = self._agents(where, block)
+        if self.agents is not None:
+            for mode, tokens in self.argv.items():
+                if "{agents}" not in tokens or "{agent}" not in tokens:
+                    raise _fail(
+                        where,
+                        "argv.%s has an agents block but does not pin {agents} "
+                        "and {agent}" % mode,
+                    )
+        else:
+            for mode, tokens in self.argv.items():
+                if "{agents}" in tokens or "{agent}" in tokens:
+                    raise _fail(
+                        where,
+                        "argv.%s uses {agents}/{agent} but agents is not set" % mode,
+                    )
+
         self.output: Dict[str, str] = {}
         for mode, value in (block.get("output") or {}).items():
             if mode not in MODES:
@@ -303,6 +324,35 @@ class WorkerSpec:
                 self.fit[str(kind_name)] = float(value)
             except (TypeError, ValueError):
                 raise _fail(where, "fit.%s is not a number" % kind_name)
+
+    @staticmethod
+    def _agents(where: str, block: dict) -> Optional[dict]:
+        """Optional session-agent payload. None when the worker has none."""
+        raw = block.get("agents")
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise _fail(where, "agents is not an object")
+        name = str(raw.get("name") or "")
+        if not name:
+            raise _fail(where, "agents.name is empty")
+        description = str(raw.get("description") or "")
+        prompt = str(raw.get("prompt") or "")
+        if not prompt:
+            raise _fail(where, "agents.prompt is empty")
+        tools = raw.get("disallowedTools")
+        if tools is None:
+            disallowed: List[str] = []
+        elif not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
+            raise _fail(where, "agents.disallowedTools is not an array of strings")
+        else:
+            disallowed = [str(t) for t in tools]
+        return {
+            "name": name,
+            "description": description,
+            "prompt": prompt,
+            "disallowedTools": disallowed,
+        }
 
     @staticmethod
     def _locator(where: str, block: dict, field: str, default_kind: str):

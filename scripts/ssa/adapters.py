@@ -8,6 +8,7 @@ ever started from this module, and no argv is ever handed to a shell.
 
 from __future__ import annotations
 
+import json
 import re
 import os
 from typing import Any, Dict, List, Optional
@@ -127,6 +128,70 @@ def _model_tokens(spec, ctx: Dict[str, Any]) -> List[str]:
     return [t.replace("{model}", model) for t in spec.model_flags]
 
 
+def _model_from_ctx(ctx: Dict[str, Any]) -> str:
+    """The --model value the recommender already chose, or ctx['model'].
+
+    worker-args.txt is one token per line, so `--model` and its value are
+    adjacent entries. A missing pair means the agents JSON omits `model`.
+    """
+    args = ctx.get("args")
+    if args is not None:
+        tokens = [str(a) for a in args]
+        for i, tok in enumerate(tokens):
+            if tok == "--model" and i + 1 < len(tokens):
+                return tokens[i + 1]
+            if tok.startswith("--model=") and len(tok) > 8:
+                return tok[8:]
+        return ""
+    return str(ctx.get("model") or "")
+
+
+def task_label(text: str) -> str:
+    """Brief label for the session-agent description.
+
+    First markdown heading line if the first non-empty line is a heading,
+    otherwise that first non-empty line. Newlines collapsed, trimmed to 200.
+    """
+    first = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            first = stripped
+            break
+    if first.startswith("#"):
+        first = first.lstrip("#").strip()
+    first = " ".join(first.split())
+    return first[:200]
+
+
+def _task_from_brief(brief_path: str) -> str:
+    if not brief_path:
+        return ""
+    try:
+        with open(brief_path, "r") as fh:
+            text = fh.read()
+    except OSError:
+        return ""
+    return task_label(text)
+
+
+def agents_json(spec, ctx: Dict[str, Any]) -> str:
+    """Compact `--agents` payload for a worker that declares an agents block."""
+    cfg = spec.agents
+    if not cfg:
+        return ""
+    description = cfg["description"].replace("{task}", _task_from_brief(str(ctx.get("brief") or "")))
+    body: Dict[str, Any] = {
+        "description": description,
+        "disallowedTools": list(cfg["disallowedTools"]),
+        "prompt": cfg["prompt"],
+    }
+    model = _model_from_ctx(ctx)
+    if model:
+        body["model"] = model
+    return json.dumps({cfg["name"]: body}, separators=(",", ":"), sort_keys=True)
+
+
 def build_command(worker: str, mode: str, ctx: Dict[str, Any], reg=None) -> Dict[str, Any]:
     """Registry entry + context -> {argv, stdin, cwd, env_scrub, ...}."""
     spec = _spec(worker, reg)
@@ -142,6 +207,8 @@ def build_command(worker: str, mode: str, ctx: Dict[str, Any], reg=None) -> Dict
         "session_id": str(ctx.get("session_id") or ""),
         "prompt": prompt if prompt is not None else "",
     }
+    agent_name = spec.agents["name"] if spec.agents else ""
+    agents_payload = agents_json(spec, ctx) if spec.agents else ""
 
     argv: List[str] = []
     for token in template:
@@ -150,6 +217,22 @@ def build_command(worker: str, mode: str, ctx: Dict[str, Any], reg=None) -> Dict
             continue
         if token == "{model}":
             argv.extend(model_tokens)
+            continue
+        if token == "{agents}":
+            if not agents_payload:
+                raise AdapterError(
+                    "%s %s: template needs {agents} but the worker has no agents block"
+                    % (spec.name, mode)
+                )
+            argv.append(agents_payload)
+            continue
+        if token == "{agent}":
+            if not agent_name:
+                raise AdapterError(
+                    "%s %s: template needs {agent} but the worker has no agents block"
+                    % (spec.name, mode)
+                )
+            argv.append(agent_name)
             continue
         rendered = token
         for name in registry_mod.SCALAR_PLACEHOLDERS:

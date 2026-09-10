@@ -6,6 +6,7 @@ bypassPermissions, and that a write run is refused until the unsandboxed
 override is set (same capability gate as kimi, not a kimi-named one).
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -135,6 +136,10 @@ class ClaudeWorkerArgsTests(unittest.TestCase):
 
 
 class ClaudeDispatchTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_ssa("registry").load()
+
     def test_write_dispatch_is_refused_without_unsandboxed_override(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
@@ -192,6 +197,10 @@ class ClaudeDispatchTests(unittest.TestCase):
                     "high",
                     "--model",
                     "fable",
+                    "--agents",
+                    '{"ssa-worker":{"description":"SSA dispatched worker: Complete the fixture task.","disallowedTools":["Task","Agent"],"model":"fable","prompt":"You are the dispatched worker and you are the labor. Complete the task in the brief yourself. Do not run smart-subagents.sh, do not spawn another CLI, do not delegate onward. Do not commit, do not push, do not reformat the tree."}}',
+                    "--agent",
+                    "ssa-worker",
                 ],
             )
             # --setting-sources project would load the TARGET repo's
@@ -210,6 +219,120 @@ class ClaudeDispatchTests(unittest.TestCase):
             self.assertTrue((task_dir / "write-override.txt").exists())
             self.assertEqual((task_dir / "exit-code.txt").read_text().strip(), "0")
             self.assertTrue((task_dir / "session-id.txt").read_text().strip())
+
+    def _build_claude(self, mode, brief_text, args, tmp, session_id=""):
+        adapters = load_ssa("adapters")
+        brief = tmp / "brief.md"
+        brief.write_text(brief_text)
+        ctx = {
+            "worktree": str(tmp),
+            "brief": str(brief),
+            "args": args,
+        }
+        if session_id:
+            ctx["session_id"] = session_id
+        return adapters.build_command("claude", mode, ctx, reg=self.reg)
+
+    def test_agents_json_model_comes_from_worker_args_and_is_omitted_when_absent(self):
+        with temp_env() as te:
+            built = self._build_claude(
+                "implement",
+                "Complete the fixture task.\n",
+                ["--effort", "high", "--model", "sonnet"],
+                te.root,
+            )
+            payload = json.loads(built["argv"][built["argv"].index("--agents") + 1])
+            self.assertEqual(payload["ssa-worker"]["model"], "sonnet")
+            self.assertNotEqual(payload["ssa-worker"]["model"], "fable")
+
+            built = self._build_claude(
+                "implement",
+                "Complete the fixture task.\n",
+                ["--effort", "high"],
+                te.root,
+            )
+            payload = json.loads(built["argv"][built["argv"].index("--agents") + 1])
+            self.assertNotIn("model", payload["ssa-worker"])
+
+    def test_agents_description_uses_first_heading_else_first_line_and_truncates(self):
+        with temp_env() as te:
+            built = self._build_claude(
+                "implement",
+                "# Fix the widget\n\nBody of the brief.\n",
+                ["--model", "sonnet"],
+                te.root,
+            )
+            payload = json.loads(built["argv"][built["argv"].index("--agents") + 1])
+            self.assertEqual(
+                payload["ssa-worker"]["description"],
+                "SSA dispatched worker: Fix the widget",
+            )
+
+            built = self._build_claude(
+                "implement",
+                "Just do it\n\n# Later heading is ignored\n",
+                ["--model", "sonnet"],
+                te.root,
+            )
+            payload = json.loads(built["argv"][built["argv"].index("--agents") + 1])
+            self.assertEqual(
+                payload["ssa-worker"]["description"],
+                "SSA dispatched worker: Just do it",
+            )
+
+            heading = "#" + "W" * 400
+            built = self._build_claude(
+                "implement",
+                heading + "\n\nbody\n",
+                ["--model", "sonnet"],
+                te.root,
+            )
+            payload = json.loads(built["argv"][built["argv"].index("--agents") + 1])
+            self.assertEqual(
+                payload["ssa-worker"]["description"],
+                "SSA dispatched worker: " + ("W" * 200),
+            )
+            self.assertEqual(len(payload["ssa-worker"]["description"]), 23 + 200)
+
+    def test_agents_json_disallows_task_and_agent(self):
+        with temp_env() as te:
+            built = self._build_claude(
+                "implement",
+                "Complete the fixture task.\n",
+                [],
+                te.root,
+            )
+            payload = json.loads(built["argv"][built["argv"].index("--agents") + 1])
+            self.assertEqual(
+                payload["ssa-worker"]["disallowedTools"],
+                ["Task", "Agent"],
+            )
+
+    def test_plan_mode_pins_ssa_worker_and_keeps_plan_permission(self):
+        spec = self.reg.get("claude")
+        self.assertEqual(spec.agents["name"], "ssa-worker")
+        for mode in ("implement", "plan", "resume"):
+            argv = spec.argv_for(mode)
+            self.assertIn("{agents}", argv, mode)
+            self.assertIn("--agent", argv, mode)
+            self.assertEqual(argv[argv.index("--agent") + 1], "{agent}", mode)
+        argv = spec.argv_for("plan")
+        self.assertIn("--permission-mode", argv)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+        self.assertNotIn("acceptEdits", argv)
+
+        with temp_env() as te:
+            built = self._build_claude(
+                "plan",
+                "Complete the fixture task.\n",
+                ["--effort", "high"],
+                te.root,
+            )
+            argv = built["argv"]
+            self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+            self.assertEqual(argv[argv.index("--agent") + 1], "ssa-worker")
+            self.assertIn("--agents", argv)
+            self.assertNotIn("acceptEdits", argv)
 
     def test_legacy_kimi_write_env_still_unlocks_claude(self):
         with temp_env() as te:

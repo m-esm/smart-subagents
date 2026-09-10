@@ -44,10 +44,11 @@ per-CLI knowledge:
 - capability priors per task kind
 
 Argv templates are arrays of tokens, never strings. The allowed placeholders are
-`{worktree} {brief} {output} {session_id} {prompt} {effort} {model}`. `{effort}`
-and `{model}` splice zero or more tokens; the rest are single values. A template
-naming anything else, or carrying a shell metacharacter, is rejected at load
-time. The argv goes to `execve`, never through a shell.
+`{worktree} {brief} {output} {session_id} {prompt} {effort} {model} {agents} {agent}`.
+`{effort}` and `{model}` splice zero or more tokens; `{agents}` and `{agent}` are
+standalone (compact session-agent JSON and the agent name); the rest are single
+values. A template naming anything else, or carrying a shell metacharacter, is
+rejected at load time. The argv goes to `execve`, never through a shell.
 
 `ssa/cli.py workers` prints one row per registered worker, seven tab-separated
 fields: name, display name, sandbox, write policy, probe function, resolved
