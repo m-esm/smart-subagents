@@ -1846,6 +1846,17 @@ with open(added_path, "w") as added:
             tok = match.group(0)
             if "_" in tok and re.fullmatch(r"[a-z][a-z_]*", tok):
                 continue
+            # 1789070918-80033: the same snake_case skip, but for names that
+            # carry digits (test_budget_txt_2_50_…). Require >=2 underscores
+            # and >=70% letters: minted tokens are digit- or mixed-case-dense
+            # (xoxb_1234_abcd is 57% letters, deadbeef_cafe1234 fails the
+            # letter share too), so they still trip.
+            if (
+                tok.count("_") >= 2
+                and re.fullmatch(r"[a-z][a-z0-9_]*", tok)
+                and sum(c.isalpha() for c in tok) / len(tok) >= 0.70
+            ):
+                continue
             # 1789065672-26862: SCREAMING_SNAKE env var names
             # (CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION measures >3.5). A minted
             # token carries lowercase or digits-in-word, so requiring every
