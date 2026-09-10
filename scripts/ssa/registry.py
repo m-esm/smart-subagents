@@ -407,6 +407,8 @@ class WorkerSpec:
         if not name:
             raise _fail(where, "agents.name is empty")
         description = str(raw.get("description") or "")
+        if not description:
+            raise _fail(where, "agents.description is empty")
         prompt = str(raw.get("prompt") or "")
         if not prompt:
             raise _fail(where, "agents.prompt is empty")

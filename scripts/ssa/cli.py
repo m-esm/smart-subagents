@@ -257,6 +257,12 @@ def cmd_effort_used(args) -> int:
     return 0
 
 
+def cmd_write_agents_file(args) -> int:
+    """Write `$WT/.claude/agents/ssa-worker.md` from the claude agents payload."""
+    adapters.write_worktree_claude_agent(args.dir)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="ssa", description=__doc__.splitlines()[0])
     ap.add_argument(
@@ -326,6 +332,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dir", required=True)
     p.add_argument("--worker", default="")
     p.set_defaults(func=cmd_effort_used)
+
+    p = sub.add_parser(
+        "write-agents-file",
+        help="write $WT/.claude/agents/ssa-worker.md from the claude agents payload",
+    )
+    p.add_argument("--dir", required=True)
+    p.set_defaults(func=cmd_write_agents_file)
 
     p = sub.add_parser("parse-session", help="scrape a session id from a worker log")
     p.add_argument("--worker", required=True)

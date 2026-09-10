@@ -380,21 +380,121 @@ def _task_from_brief(brief_path: str) -> str:
     return task_label(text)
 
 
-def agents_json(spec, ctx: Dict[str, Any]) -> str:
-    """Compact `--agents` payload for a worker that declares an agents block."""
+def agents_payload(spec, ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Inner `--agents` body plus `name`. Empty dict when the worker has none."""
     cfg = spec.agents
     if not cfg:
-        return ""
+        return {}
     description = cfg["description"].replace("{task}", _task_from_brief(str(ctx.get("brief") or "")))
-    body: Dict[str, Any] = {
+    payload: Dict[str, Any] = {
+        "name": cfg["name"],
         "description": description,
         "disallowedTools": list(cfg["disallowedTools"]),
         "prompt": cfg["prompt"],
     }
     model = _model_from_ctx(ctx)
     if model:
-        body["model"] = model
-    return json.dumps({cfg["name"]: body}, separators=(",", ":"), sort_keys=True)
+        payload["model"] = model
+    return payload
+
+
+def agents_json(spec, ctx: Dict[str, Any]) -> str:
+    """Compact `--agents` payload for a worker that declares an agents block."""
+    payload = agents_payload(spec, ctx)
+    if not payload:
+        return ""
+    name = payload["name"]
+    body = {k: v for k, v in payload.items() if k != "name"}
+    return json.dumps({name: body}, separators=(",", ":"), sort_keys=True)
+
+
+_MARKDOWN_FM_ORDER = (
+    "name",
+    "description",
+    "model",
+    "disallowedTools",
+    "memory",
+    "background",
+)
+
+
+def agents_markdown(payload: Dict[str, Any]) -> str:
+    """Claude Code agent file: YAML frontmatter plus prompt body.
+
+    Extra file-only keys `memory: project` and `background: true` live here
+    and must not appear in the `--agents` JSON. `disallowedTools` is a
+    JSON-style list so a YAML parse and json.loads agree on the value.
+    """
+    name = str(payload.get("name") or "")
+    description = str(payload.get("description") or "")
+    if not name:
+        raise AdapterError("agents.name is empty")
+    if not description:
+        raise AdapterError("agents.description is empty")
+    fm: Dict[str, Any] = {
+        "name": name,
+        "description": description,
+        "disallowedTools": list(payload.get("disallowedTools") or []),
+        "memory": "project",
+        "background": True,
+    }
+    if payload.get("model"):
+        fm["model"] = payload["model"]
+    lines = ["---"]
+    for key in _MARKDOWN_FM_ORDER:
+        if key not in fm:
+            continue
+        val = fm[key]
+        if isinstance(val, bool):
+            rendered = "true" if val else "false"
+        else:
+            rendered = json.dumps(val)
+        lines.append("%s: %s" % (key, rendered))
+    lines.append("---")
+    lines.append(str(payload.get("prompt") or ""))
+    return "\n".join(lines) + "\n"
+
+
+def write_agents_file(path: str, payload: Dict[str, Any]) -> None:
+    """Write a Claude Code agent markdown file. Refuses empty name/description."""
+    text = agents_markdown(payload)
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write(text)
+
+
+def write_worktree_claude_agent(task_dir: str, reg=None) -> str:
+    """Write `$WT/.claude/agents/ssa-worker.md` from the claude agents payload.
+
+    Skips (returns "") when wt.txt is missing, empty, or NOT_GIT. Model comes
+    from worker-args-claude.txt, never from another CLI's worker-args.
+    """
+    wt_file = os.path.join(task_dir, "wt.txt")
+    try:
+        with open(wt_file, "r") as fh:
+            wt = fh.read().strip()
+    except OSError:
+        return ""
+    if not wt or wt == "NOT_GIT":
+        return ""
+    args_path = os.path.join(task_dir, "worker-args-claude.txt")
+    args: List[str] = []
+    try:
+        with open(args_path, "r") as fh:
+            args = [line for line in fh.read().splitlines() if line.strip()]
+    except OSError:
+        args = []
+    brief_path = os.path.join(task_dir, "brief.md")
+    ctx: Dict[str, Any] = {
+        "args": args,
+        "brief": brief_path if os.path.isfile(brief_path) else "",
+    }
+    spec = _spec("claude", reg)
+    dest = os.path.join(wt, ".claude", "agents", "ssa-worker.md")
+    write_agents_file(dest, agents_payload(spec, ctx))
+    return dest
 
 
 _LIMIT_VALUE_RE = re.compile(r"^[0-9]+$")
@@ -570,7 +670,7 @@ def build_command(worker: str, mode: str, ctx: Dict[str, Any], reg=None) -> Dict
         "prompt": prompt if prompt is not None else "",
     }
     agent_name = spec.agents["name"] if spec.agents else ""
-    agents_payload = agents_json(spec, ctx) if spec.agents else ""
+    agents_json_text = agents_json(spec, ctx) if spec.agents else ""
 
     argv: List[str] = []
     for token in template:
@@ -587,12 +687,12 @@ def build_command(worker: str, mode: str, ctx: Dict[str, Any], reg=None) -> Dict
             argv.extend(fork_tokens)
             continue
         if token == "{agents}":
-            if not agents_payload:
+            if not agents_json_text:
                 raise AdapterError(
                     "%s %s: template needs {agents} but the worker has no agents block"
                     % (spec.name, mode)
                 )
-            argv.append(agents_payload)
+            argv.append(agents_json_text)
             continue
         if token == "{agent}":
             if not agent_name:

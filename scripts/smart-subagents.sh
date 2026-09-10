@@ -103,7 +103,22 @@ if max_u >= 0 and untracked > max_u:
         % (who, repo, untracked)
     )
     sys.exit(1)
+# Launch artifacts SSA itself writes into the worktree. They must not
+# make gc/cleanup treat a finished task as dirty. scan-secrets still
+# sees the raw porcelain (who=scan-secrets / verify-summary).
+LAUNCH_UNTRACKED = {
+    ".claude/agents/ssa-worker.md",
+}
 if dest:
+    if who in ("cleanup", "init-rollback"):
+        kept = []
+        for line in text.splitlines(True):
+            if line.startswith("??"):
+                path = line[3:].rstrip("\n")
+                if path in LAUNCH_UNTRACKED or path.endswith("/ssa-worker.md"):
+                    continue
+            kept.append(line)
+        text = "".join(kept)
     with open(dest, "w") as out:
         out.write(text)
 sys.exit(0)
@@ -496,8 +511,13 @@ cmd_init() {
   echo "$size" >"$dir/size.txt"
   echo "$difficulty" >"$dir/difficulty.txt"
   echo "$kind" >"$dir/kind.txt"
-  git -C "$repo" rev-parse HEAD >"$dir/base-sha.txt"
-  git -C "$repo" rev-parse --abbrev-ref HEAD >"$dir/repo-branch.txt"
+  if git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$repo" rev-parse HEAD >"$dir/base-sha.txt"
+    git -C "$repo" rev-parse --abbrev-ref HEAD >"$dir/repo-branch.txt"
+  else
+    : >"$dir/base-sha.txt"
+    : >"$dir/repo-branch.txt"
+  fi
 
   _ssa_state "$dir" minted
   _ssa_event "$dir" --phase minted
@@ -582,6 +602,12 @@ PY
 
   _ssa_state "$dir" picked
   _ssa_event "$dir" --phase picked --artifact "$dir/pick.json"
+
+  # Always write the Claude agent file so a later --worker claude override
+  # finds it. Skip when there is no worktree (wt.txt is NOT_GIT).
+  if [[ -n "$wt" ]]; then
+    _ssa write-agents-file --dir "$dir" || die "init: cannot write claude agent file"
+  fi
 
   # Success: disarm the rollback.
   trap - EXIT
@@ -2133,6 +2159,10 @@ _cleanup_apply() {
   wt="$(_read1 "$dir/wt.txt")"
   id="$(_read1 "$dir/task-id.txt" "$(basename "$dir")")"
   if [[ -n "$repo" && -d "$repo" && -n "$wt" && "$wt" != "NOT_GIT" ]]; then
+    # Launch artifact: git worktree remove without --force refuses untracked
+    # files, which would leave the ssa/ branch behind.
+    rm -f "$wt/.claude/agents/ssa-worker.md"
+    rmdir "$wt/.claude/agents" "$wt/.claude" >/dev/null 2>&1 || true
     if [[ -n "$force" ]]; then
       git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
     else
