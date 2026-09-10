@@ -1,0 +1,16 @@
+source: https://github.blog/changelog/2026-07-02-copilot-agent-session-streaming-is-now-in-public-preview/
+fetched_at: 2026-09-10T01:33:00Z
+bytes: 104184
+
+Comparable product: GitHub Copilot agent session / usage records.
+
+Key claims on the page (plain extract):
+- "GitHub automatically streams all session data for your enterprise to that endpoint."
+- "This gives you direct visibility into agent session activity (e.g., prompts, responses, and tool calls)"
+- REST: GET /enterprises/{enterprise}/copilot/usage-records
+- Enable: Copilot Usage Records Streaming and Copilot Usage Records API
+
+Contrast with SSA: verify writes outcome.json, then a second supervisor command
+`smart-subagents.sh record --dir DIR --outcome ...` is required to append the
+GOAL.md ledger line. Copilot does not wait for a human to run a second record
+command after the agent session ends.

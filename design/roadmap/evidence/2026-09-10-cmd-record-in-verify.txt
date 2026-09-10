@@ -1,0 +1,18 @@
+queried_at: 2026-09-10T01:33:13Z
+
+=== measure: cmd_record inside cmd_verify ===
+0
+
+=== measure: cmd_record inside cmd_dispatch ===
+0
+
+=== ledger --days 7 ===
+ledger: last 7d, 69 dispatch(es)
+WORKER     DISPATCH  VERIFIED-PASS   MEAN RETRY   QUOTA USED %
+-                 5             0%         0.00           0.0%
+codex            46            76%         0.00         460.0%
+grok             18            83%         0.11           0.0%
+
+=== GOAL.md claim ===
+6:- dispatch verified-pass rate: `bash scripts/smart-subagents.sh ledger --days 7` (the outcome ledger `record` appends after each verify) - today: unknown, no outcomes recorded on this checkout; target: 90% verified pass
+8:- briefs that needed a retry because the worker asked a question or stopped early, from the same ledger - today: unknown; target: under 10%

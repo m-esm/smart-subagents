@@ -1,0 +1,55 @@
+{
+  "queried_at": "2026-09-10T01:33:13Z",
+  "workdir_note": "TMPDIR/smart-subagents task dirs; no repo paths",
+  "finished_with_exit_code": 23,
+  "with_outcome_json": 23,
+  "with_outcome_record_json": 16,
+  "outcome_without_record": 7,
+  "outcome_and_record": 16,
+  "unrecorded_task_ids": [
+    "1788855981-30870",
+    "1788863349-30630",
+    "1788920345-9482",
+    "1788943938-9063",
+    "1788966281-12703",
+    "1788994001-9567",
+    "1788994982-46712"
+  ],
+  "unrecorded": [
+    {
+      "task_id": "1788855981-30870",
+      "worker": "codex",
+      "verify_verdict": "pass"
+    },
+    {
+      "task_id": "1788863349-30630",
+      "worker": "codex",
+      "verify_verdict": "pass"
+    },
+    {
+      "task_id": "1788920345-9482",
+      "worker": "codex",
+      "verify_verdict": "fail"
+    },
+    {
+      "task_id": "1788943938-9063",
+      "worker": "codex",
+      "verify_verdict": "pass"
+    },
+    {
+      "task_id": "1788966281-12703",
+      "worker": "codex",
+      "verify_verdict": "inconclusive"
+    },
+    {
+      "task_id": "1788994001-9567",
+      "worker": "codex",
+      "verify_verdict": "pass"
+    },
+    {
+      "task_id": "1788994982-46712",
+      "worker": "codex",
+      "verify_verdict": "fail"
+    }
+  ]
+}
