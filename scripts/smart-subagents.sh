@@ -187,13 +187,15 @@ _ssa() { python3 "$SSA_CLI_PY" "$@"; }
 # _ssa_build WORKER MODE [args...] -> fills _BC_* for one worker invocation.
 # The command crosses the process boundary NUL-separated because that is the
 # only way to move a list of arbitrary strings intact on bash 3.2.
+# Fields 0-6: bin cwd stdin env_scrub output_mode write_ok sandbox.
+# Field 7: N (env pair count). Then 2N tokens of KEY, VALUE. Then argv.
 _BC_BIN=""; _BC_CWD=""; _BC_STDIN=""; _BC_ENV_SCRUB=""; _BC_OUTPUT_MODE=""
-_BC_WRITE_OK=""; _BC_SANDBOX=""; _BC_ARGV=()
+_BC_WRITE_OK=""; _BC_SANDBOX=""; _BC_ENV_N=0; _BC_ENV_EXTRA=(); _BC_ARGV=()
 _ssa_build() {
   local worker="$1" mode="$2"; shift 2
-  local tok n=0 tmp
+  local tok n=0 tmp env_n=0 pending_key=""
   _BC_BIN=""; _BC_CWD=""; _BC_STDIN=""; _BC_ENV_SCRUB=""; _BC_OUTPUT_MODE=""
-  _BC_WRITE_OK=""; _BC_SANDBOX=""; _BC_ARGV=()
+  _BC_WRITE_OK=""; _BC_SANDBOX=""; _BC_ENV_N=0; _BC_ENV_EXTRA=(); _BC_ARGV=()
   tmp="$(mktemp "${TMPDIR:-/tmp}/ssa-build.XXXXXX")"
   if ! _ssa build-command --worker "$worker" --mode "$mode" --nul "$@" >"$tmp"; then
     rm -f "$tmp"
@@ -208,12 +210,27 @@ _ssa_build() {
       4) _BC_OUTPUT_MODE="$tok" ;;
       5) _BC_WRITE_OK="$tok" ;;
       6) _BC_SANDBOX="$tok" ;;
-      *) _BC_ARGV+=("$tok") ;;
+      7)
+        _BC_ENV_N="$tok"
+        env_n="$tok"
+        ;;
+      *)
+        if (( n < 8 + 2 * env_n )); then
+          if (( (n - 8) % 2 == 0 )); then
+            pending_key="$tok"
+          else
+            _BC_ENV_EXTRA+=("${pending_key}=${tok}")
+          fi
+        else
+          _BC_ARGV+=("$tok")
+        fi
+        ;;
     esac
     n=$(( n + 1 ))
   done <"$tmp"
   rm -f "$tmp"
-  (( n >= 7 )) || return 1
+  [[ "$_BC_ENV_N" =~ ^[0-9]+$ ]] || return 1
+  (( n >= 8 + 2 * _BC_ENV_N )) || return 1
 }
 
 # Run the built command. Caller owns every redirection.
@@ -221,7 +238,8 @@ _ssa_run_worker() {
   if [[ "$_BC_ENV_SCRUB" == "1" ]]; then
     ( cd "${_BC_CWD:-.}" \
       && env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
-        TERM="${TERM:-dumb}" "$_BC_BIN" ${_BC_ARGV[@]+"${_BC_ARGV[@]}"} )
+        TERM="${TERM:-dumb}" ${_BC_ENV_EXTRA[@]+"${_BC_ENV_EXTRA[@]}"} \
+        "$_BC_BIN" ${_BC_ARGV[@]+"${_BC_ARGV[@]}"} )
   elif [[ -n "$_BC_CWD" ]]; then
     ( cd "$_BC_CWD" && "$_BC_BIN" ${_BC_ARGV[@]+"${_BC_ARGV[@]}"} )
   else
@@ -779,6 +797,7 @@ cmd_dispatch() {
   _ssa_build "$worker" "$mode" \
     --worktree "$wt" --brief "$launch_brief" --output "$dir/last-msg.txt" \
     --args-file "$dir/worker-args.txt" \
+    --limits "$dir/limits.txt" \
     ${resume_sid:+--session-id "$resume_sid"} \
     || die "dispatch: cannot build a $mode command for worker $worker"
 

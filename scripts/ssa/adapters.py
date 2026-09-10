@@ -192,8 +192,59 @@ def agents_json(spec, ctx: Dict[str, Any]) -> str:
     return json.dumps({cfg["name"]: body}, separators=(",", ":"), sort_keys=True)
 
 
+_LIMIT_VALUE_RE = re.compile(r"^[0-9]+$")
+
+
+def resolve_env_extra(spec, ctx: Dict[str, Any]) -> Dict[str, str]:
+    """Map $DIR/limits.txt through the worker's env_pass.
+
+    Returns the resolved env dict (env var name -> value). Empty when the
+    worker declares no env_pass, the file is absent, or it has no directives.
+    Unknown keys and non-integer values raise AdapterError: silently dropping
+    a typo'd limit is the failure that makes a cap look applied when it is not.
+    """
+    env_pass = spec.env_pass
+    if not env_pass:
+        return {}
+    path = str(ctx.get("limits") or "")
+    if not path:
+        return {}
+    try:
+        with open(path, "r") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise AdapterError("%s: cannot read limits file: %s" % (spec.name, exc))
+
+    accepted = ", ".join(sorted(env_pass))
+    resolved: Dict[str, str] = {}
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise AdapterError(
+                "%s: limits.txt line %d is not key=value" % (spec.name, lineno)
+            )
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if key not in env_pass:
+            raise AdapterError(
+                "%s: unknown limits key %r; accepted: %s"
+                % (spec.name, key, accepted or "(none)")
+            )
+        if not _LIMIT_VALUE_RE.fullmatch(value):
+            raise AdapterError(
+                "%s: limits key %r value %r is not a non-negative integer"
+                % (spec.name, key, value)
+            )
+        resolved[env_pass[key]] = value
+    return resolved
+
+
 def build_command(worker: str, mode: str, ctx: Dict[str, Any], reg=None) -> Dict[str, Any]:
-    """Registry entry + context -> {argv, stdin, cwd, env_scrub, ...}."""
+    """Registry entry + context -> {argv, stdin, cwd, env_scrub, env_extra, ...}."""
     spec = _spec(worker, reg)
     template = spec.argv_for(mode)
     prompt = _prompt_value(spec, mode, ctx)
@@ -271,6 +322,7 @@ def build_command(worker: str, mode: str, ctx: Dict[str, Any], reg=None) -> Dict
         "stdin": stdin_path,
         "cwd": cwd,
         "env_scrub": spec.env_scrub,
+        "env_extra": resolve_env_extra(spec, ctx),
         "output_mode": spec.output_mode(mode),
         "write_allowed": spec.write_allowed_default,
         "sandbox": spec.sandbox,

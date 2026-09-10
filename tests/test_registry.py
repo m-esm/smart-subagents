@@ -375,6 +375,17 @@ class RegistryValidationTests(unittest.TestCase):
             self.assertEqual(rc, 1, out)
             self.assertIn("error.kind", err)
 
+    def test_env_pass_env_name_must_be_an_uppercase_identifier(self):
+        with temp_env() as te:
+            rc, out, err = self._validate(
+                te,
+                lambda doc: doc["workers"]["fakecli"]["run"].__setitem__(
+                    "env_pass", {"spawn_depth": "not-an-env"}
+                ),
+            )
+            self.assertEqual(rc, 1, out)
+            self.assertIn("run.env_pass", err)
+
     def test_stdin_transport_may_not_also_pass_the_prompt_as_an_argument(self):
         with temp_env() as te:
             def mutate(doc):

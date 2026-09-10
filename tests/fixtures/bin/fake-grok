@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fake grok CLI for characterization tests.
 
-Records its own argv and cwd under $HOME/.ssa-test/fake-grok/, then emits a
+Records its own argv, cwd and env under $HOME/.ssa-test/fake-grok/, then emits a
 JSON line that mimics `grok --output-format streaming-messages-json` closely
 enough for the session-id scraper to find (or not find) `sessionId`.
 
@@ -17,6 +17,7 @@ recorder = home / ".ssa-test" / "fake-grok"
 recorder.mkdir(parents=True, exist_ok=True)
 (recorder / "argv.txt").write_text("\n".join(sys.argv[1:]) + ("\n" if sys.argv[1:] else ""))
 (recorder / "cwd.txt").write_text(os.getcwd() + "\n")
+(recorder / "env.json").write_text(json.dumps(dict(os.environ), sort_keys=True) + "\n")
 
 control_path = home / ".ssa-test-control.json"
 control = {}

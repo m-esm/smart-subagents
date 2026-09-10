@@ -68,7 +68,10 @@ Artifacts under `$DIR/`: `brief.md`, `usage.json`, `pick.json`, `stdout.log`
 worker), `session-id.txt`, `worker.txt`, `exit-code.txt`,
 `verify-cmds.txt`, `baseline.log`, `baseline-results.txt`, `scope.txt`,
 `verify-final.log`, `outcome.json`, `outcome-record.json`, `diff-stat.txt`,
-`report.md`. Background runs add `worker.pid`, `worker.pgid`,
+`report.md`. Optional `limits.txt` (`key=value` caps such as `spawn_depth`,
+`concurrent`, `per_session`) is mapped through the worker's `run.env_pass`
+onto the scrubbed environment; a worker that declares no map ignores the
+file. Background runs add `worker.pid`, `worker.pgid`,
 `worker-start.txt`, and `stalled.txt` or `stopped.txt` when a run was cut short.
 `init` is transactional: a failure after the worktree exists rolls the worktree
 and the `ssa/<id>` branch back, so a half-minted task never lingers.

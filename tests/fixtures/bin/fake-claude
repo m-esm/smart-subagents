@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fake Claude Code CLI for characterization tests.
 
-Records argv and cwd under $HOME/.ssa-test/fake-claude/, then emits one JSON
+Records argv, cwd and env under $HOME/.ssa-test/fake-claude/, then emits one JSON
 object shaped like `claude -p --output-format json` (a top-level session_id).
 Same control-file contract as the other fakes: $HOME/.ssa-test-control.json.
 """
@@ -15,6 +15,7 @@ recorder = home / ".ssa-test" / "fake-claude"
 recorder.mkdir(parents=True, exist_ok=True)
 (recorder / "argv.txt").write_text("\n".join(sys.argv[1:]) + ("\n" if sys.argv[1:] else ""))
 (recorder / "cwd.txt").write_text(os.getcwd() + "\n")
+(recorder / "env.json").write_text(json.dumps(dict(os.environ), sort_keys=True) + "\n")
 
 control_path = home / ".ssa-test-control.json"
 control = {}

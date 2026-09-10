@@ -142,6 +142,7 @@ class WorkerSpec:
         if self.cwd_mode not in CWD_MODES:
             raise _fail(where, "run.cwd %r not one of %s" % (self.cwd_mode, CWD_MODES))
         self.env_scrub = bool(run.get("env_scrub", False))
+        self.env_pass = self._env_pass(where, run)
 
         self.prompt: Dict[str, dict] = {}
         prompt = _require(where, block, "prompt", (dict,))
@@ -324,6 +325,28 @@ class WorkerSpec:
                 self.fit[str(kind_name)] = float(value)
             except (TypeError, ValueError):
                 raise _fail(where, "fit.%s is not a number" % kind_name)
+
+    @staticmethod
+    def _env_pass(where: str, run: dict) -> Dict[str, str]:
+        """Optional map from a limits.txt key to an env var name. {} when absent."""
+        raw = run.get("env_pass") or {}
+        if not isinstance(raw, dict):
+            raise _fail(where, "run.env_pass is not an object")
+        out: Dict[str, str] = {}
+        for key, value in raw.items():
+            if not isinstance(key, str) or not re.match(r"^[a-z][a-z0-9_]*$", key):
+                raise _fail(
+                    where,
+                    "run.env_pass key %r is not [a-z][a-z0-9_]*" % (key,),
+                )
+            if not isinstance(value, str) or not re.match(r"^[A-Z][A-Z0-9_]*$", value):
+                raise _fail(
+                    where,
+                    "run.env_pass[%r] env name %r is not [A-Z][A-Z0-9_]*"
+                    % (key, value),
+                )
+            out[key] = value
+        return out
 
     @staticmethod
     def _agents(where: str, block: dict) -> Optional[dict]:

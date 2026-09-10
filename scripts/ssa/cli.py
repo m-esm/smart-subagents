@@ -96,6 +96,7 @@ def cmd_build_command(args) -> int:
         "prompt": args.prompt,
         "effort": args.effort,
         "model": args.model,
+        "limits": args.limits,
     }
     if args.args_file:
         try:
@@ -108,9 +109,15 @@ def cmd_build_command(args) -> int:
         ctx["args"] = list(args.arg)
     built = adapters.build_command(args.worker, args.mode, ctx, reg=reg)
     if args.nul:
-        # Header fields in a fixed order, then argv. The shell reads this with
-        # `read -r -d ''`, which is the only bash 3.2 safe way to move a list
-        # of arbitrary strings across a process boundary.
+        # Header fields in a fixed order, then env pairs, then argv. The shell
+        # reads this with `read -r -d ''`, which is the only bash 3.2 safe way
+        # to move a list of arbitrary strings across a process boundary.
+        # Fields 0-6 are the original scalars; field 7 is the number of env
+        # pairs N; then 2N tokens of KEY, VALUE; then argv.
+        env_extra = built.get("env_extra") or {}
+        pairs: list = []
+        for key in sorted(env_extra):
+            pairs.extend([key, str(env_extra[key])])
         fields = [
             built["bin"],
             built["cwd"],
@@ -119,9 +126,10 @@ def cmd_build_command(args) -> int:
             built["output_mode"],
             "1" if built["write_allowed"] else "0",
             built["sandbox"],
+            str(len(env_extra)),
         ]
         out = sys.stdout
-        for value in fields + built["argv"]:
+        for value in fields + pairs + built["argv"]:
             out.write(value)
             out.write("\0")
         out.flush()
@@ -266,6 +274,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--args-file",
         default="",
         help="file of pre-computed tuning tokens, one per line (worker-args.txt)",
+    )
+    p.add_argument(
+        "--limits",
+        default="",
+        help="path to $DIR/limits.txt (key=value caps mapped through run.env_pass)",
     )
     p.add_argument("--nul", action="store_true", help="NUL-separated output for the shell")
     p.set_defaults(func=cmd_build_command)
