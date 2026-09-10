@@ -6,6 +6,9 @@ object shaped like `claude -p --output-format json` (a top-level session_id).
 Same control-file contract as the other fakes: $HOME/.ssa-test-control.json.
 Optional "output" is a dict printed as the JSON result object (budget-halt
 tests set subtype error_max_budget_usd / is_error true / result null).
+Optional "stderr" is written to stderr. When it is set and "output" is not a
+dict, stdout is empty: that is the real dead-session resume (exit 1, a bare
+"No conversation found with session ID: ..." line, no JSON envelope).
 """
 import json
 import os
@@ -29,9 +32,15 @@ if control_path.exists():
 
 exit_code = int(control.get("exit_code", 0))
 session_id = control.get("session_id", "fake-claude-session-000000000001")
+stderr = control.get("stderr")
+if stderr is not None:
+    text = str(stderr)
+    if text and not text.endswith("\n"):
+        text += "\n"
+    sys.stderr.write(text)
 output = control.get("output")
 if isinstance(output, dict):
     print(json.dumps(output))
-else:
+elif stderr is None:
     print(json.dumps({"type": "result", "subtype": "success", "session_id": session_id}))
 sys.exit(exit_code)

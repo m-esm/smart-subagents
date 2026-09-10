@@ -633,9 +633,10 @@ PY
 }
 
 _classify_failure() {
-  # RC + log -> rate-limit | auth | budget-exhausted | unknown | "" (did not fail).
-  # The heuristics live in ssa/adapters.py now, one implementation for the
-  # shell and for anything else that needs to name a failure.
+  # RC + log -> rate-limit | auth | budget-exhausted | session-missing |
+  # unknown | "" (did not fail). The heuristics live in ssa/adapters.py now,
+  # one implementation for the shell and for anything else that needs to name
+  # a failure.
   local rc="$1" log="$2"
   [[ -f "$log" ]] || return 0
   _ssa classify --exit "$rc" --log "$log" 2>/dev/null || true
@@ -644,6 +645,7 @@ _classify_failure() {
 _maybe_cooldown() {
   # _maybe_cooldown DIR WORKER RC CLASS -> bench the worker when the log said why.
   # budget-exhausted is a task ceiling, not an account problem: do not bench.
+  # session-missing is a stale id in the task dir: the worker is healthy, do not bench.
   local dir="$1" worker="$2" rc="$3" reason="${4:-}"
   [[ "$rc" != "0" ]] || return 0
   case "$reason" in
@@ -855,6 +857,9 @@ cmd_dispatch() {
   _maybe_cooldown "$dir" "$worker" "$rc" "$failure"
   if [[ -z "$sid" ]]; then
     echo "worker did not emit a resumable session id" >"$dir/resume-unavailable.txt"
+  fi
+  if [[ "$rc" != "0" && "$failure" == "session-missing" ]]; then
+    echo "no conversation found with session ID" >"$dir/resume-unavailable.txt"
   fi
   # The staged brief is a launch path, not part of the change: remove it before
   # anything reads the tree, so it can never reach a diff or a `git add -A`.

@@ -36,7 +36,19 @@ AUTH_RE = re.compile(
 BUDGET_RE = re.compile(
     r"error_max_budget|max_budget_usd|budget_exhausted|budget.?exhausted"
 )
-FAILURE_CLASSES = ("rate-limit", "auth", "budget-exhausted", "unknown")
+# Stale session id, not a credential problem. Checked before AUTH_RE so a
+# message like "no conversation found, please log in" does not bench the
+# worker: the worker is healthy and the task dir holds a dead id.
+SESSION_MISSING_RE = re.compile(
+    r"no conversation found|session not found|no session found"
+)
+FAILURE_CLASSES = (
+    "rate-limit",
+    "auth",
+    "budget-exhausted",
+    "session-missing",
+    "unknown",
+)
 
 # Where a worker puts the text of a terminal error. Only these strings are
 # classified: a tool_result full of a repo's own source is not evidence about
@@ -469,12 +481,14 @@ def parse_session(worker: str, log_path: str, reg=None) -> str:
 
 
 def classify_failure(exit_code: int, log_tail: str) -> Optional[str]:
-    """rate-limit | auth | budget-exhausted | unknown | None (did not fail).
+    """rate-limit | auth | budget-exhausted | session-missing | unknown | None.
 
     Conservative on purpose: a wrong classification benches a healthy worker
     for every other task, so anything not clearly a limit or a credential
-    problem stays "unknown" and sets no cooldown. A task budget halt is its
-    own class: the worker is healthy and must not be benched.
+    problem stays "unknown" and sets no cooldown. A task budget halt and a
+    missing session id are their own classes: the worker is healthy and must
+    not be benched. session-missing is checked before auth so a stale-id
+    message that also says "please log in" is not treated as a dead token.
     """
     try:
         code = int(exit_code)
@@ -487,6 +501,8 @@ def classify_failure(exit_code: int, log_tail: str) -> Optional[str]:
         return "budget-exhausted"
     if RATE_LIMIT_RE.search(text):
         return "rate-limit"
+    if SESSION_MISSING_RE.search(text):
+        return "session-missing"
     if AUTH_RE.search(text):
         return "auth"
     return "unknown"
@@ -559,6 +575,17 @@ def error_strings(text: str) -> List[str]:
     return [msg for obj in _iter_json_lines(text) if (msg := _error_text(obj))]
 
 
+def _is_json_line(line: str) -> bool:
+    """True when this log line is a JSON object (so not stderr text)."""
+    stripped = line.strip()
+    if not stripped.startswith("{"):
+        return False
+    try:
+        return isinstance(json.loads(stripped), dict)
+    except ValueError:
+        return False
+
+
 def classify_log(exit_code: int, log_path: str, lines: int = 40) -> Optional[str]:
     """Classify a run from its log: error envelopes first, raw tail only if none.
 
@@ -578,7 +605,17 @@ def classify_log(exit_code: int, log_path: str, lines: int = 40) -> Optional[str
         # "skills context budget" notice, and promoting those to failures
         # writes a bogus failure_class onto every one of them. A real claude
         # budget halt exits 1 (verified against 2.1.267), so rc is enough.
-        return classify_failure(exit_code, "\n".join(error_strings(text)))
+        msgs = error_strings(text)
+        if msgs:
+            return classify_failure(exit_code, "\n".join(msgs))
+        # A structured log is read structurally, but stderr is in the same
+        # file and is never JSON. When the run failed and no JSON line
+        # explains why, the non-JSON lines are the only evidence there is:
+        # a dead-session resume that still printed a normal envelope would
+        # otherwise classify as unknown. Only reached on a nonzero exit, so
+        # a successful run's stray output still says nothing.
+        plain = [ln for ln in text.splitlines() if not _is_json_line(ln)]
+        return classify_failure(exit_code, "\n".join(plain[-lines:]))
     tail = "\n".join(text.splitlines()[-lines:])
     return classify_failure(exit_code, tail)
 
