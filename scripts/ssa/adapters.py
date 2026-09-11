@@ -579,7 +579,7 @@ def _check_limit_value(spec_name: str, key: str, value: str) -> None:
                     % (spec_name, key, value, seq)
                 )
         return
-    if key == "subagent_model_force":
+    if key in ("subagent_model_force", "agent_teams"):
         if value != "1":
             raise AdapterError(
                 "%s: limits key %r value %r must be exactly 1"

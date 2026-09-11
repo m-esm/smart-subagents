@@ -224,7 +224,8 @@
           "concurrent": "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS",
           "per_session": "CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION",
           "subagent_model": "CLAUDE_CODE_SUBAGENT_MODEL",
-          "subagent_model_force": "CLAUDE_CODE_SUBAGENT_MODEL_FORCE"
+          "subagent_model_force": "CLAUDE_CODE_SUBAGENT_MODEL_FORCE",
+          "agent_teams": "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
         }
       },
       "prompt": {

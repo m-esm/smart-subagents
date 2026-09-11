@@ -5,6 +5,7 @@ A missing file, an empty file, and a worker with no env_pass all produce {}.
 """
 
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ from helpers import (  # noqa: E402
     BIN_DIR,
     load_ssa,
     make_git_repo,
+    read_argv_file,
     run_ssa,
     temp_env,
 )
@@ -30,10 +32,14 @@ CLAUDE_ENV_PASS = {
     **CLAUDE_LIMIT_VARS,
     "subagent_model": "CLAUDE_CODE_SUBAGENT_MODEL",
     "subagent_model_force": "CLAUDE_CODE_SUBAGENT_MODEL_FORCE",
+    "agent_teams": "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
 }
 
 PARENT_SUBAGENT_MODEL = "parent-leak-model"
 PARENT_SUBAGENT_FORCE = "parent-leak-force"
+PARENT_AGENT_TEAMS = "parent-leak-teams"
+AGENT_TEAMS_ENV = "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
+_SEND_MESSAGE_WORD = re.compile(r"\bSendMessage\b")
 
 # CPython on macOS re-injects these even under `env -i`. They are not a
 # scrub leak; a removed scrub would also admit SSA_TEST_LEAK and the rest
@@ -68,6 +74,7 @@ class EnvPassRegistryTests(unittest.TestCase):
         self.assertEqual(self.reg.get("claude").env_pass, CLAUDE_ENV_PASS)
         self.assertIn("subagent_model", self.reg.get("claude").env_pass)
         self.assertIn("subagent_model_force", self.reg.get("claude").env_pass)
+        self.assertIn("agent_teams", self.reg.get("claude").env_pass)
         self.assertEqual(
             self.reg.get("claude").env_pass["subagent_model"],
             "CLAUDE_CODE_SUBAGENT_MODEL",
@@ -75,6 +82,10 @@ class EnvPassRegistryTests(unittest.TestCase):
         self.assertEqual(
             self.reg.get("claude").env_pass["subagent_model_force"],
             "CLAUDE_CODE_SUBAGENT_MODEL_FORCE",
+        )
+        self.assertEqual(
+            self.reg.get("claude").env_pass["agent_teams"],
+            AGENT_TEAMS_ENV,
         )
         for name in ("codex", "grok", "kimi"):
             self.assertEqual(self.reg.get(name).env_pass, {}, msg=name)
@@ -277,6 +288,19 @@ class ResolvedEnvDictTests(unittest.TestCase):
                 self._build(te.root, "claude", "subagent_model_force=true\n")
             self.assertIn("subagent_model_force", str(caught.exception))
 
+    def test_agent_teams_must_be_exactly_one(self):
+        with temp_env() as te:
+            built = self._build(te.root, "claude", "agent_teams=1\n")
+            self.assertEqual(
+                built["env_extra"],
+                {AGENT_TEAMS_ENV: "1"},
+            )
+            with self.assertRaises(self.adapters.AdapterError) as caught:
+                self._build(te.root, "claude", "agent_teams=true\n")
+            msg = str(caught.exception)
+            self.assertIn("agent_teams", msg)
+            self.assertNotIn("unknown limits key", msg)
+
     def test_grok_with_limits_txt_gets_empty_env_extra(self):
         with temp_env() as te:
             built = self._build(
@@ -327,7 +351,25 @@ class LimitsDispatchTests(unittest.TestCase):
         env.pop("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION", None)
         env["CLAUDE_CODE_SUBAGENT_MODEL"] = PARENT_SUBAGENT_MODEL
         env["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"] = PARENT_SUBAGENT_FORCE
+        env[AGENT_TEAMS_ENV] = PARENT_AGENT_TEAMS
         return env
+
+    def _agents_payload(self, argv):
+        return json.loads(argv[argv.index("--agents") + 1])
+
+    def _assert_no_send_message(self, *texts):
+        for text in texts:
+            self.assertIsNone(
+                _SEND_MESSAGE_WORD.search(text),
+                "SendMessage in payload/argv: %r" % text[:200],
+            )
+
+    def _assert_b1_agents(self, argv):
+        payload = self._agents_payload(argv)
+        worker = payload["ssa-worker"]
+        self.assertEqual(worker["disallowedTools"], ["Task", "Agent"])
+        self._assert_no_send_message(json.dumps(payload), "\n".join(argv))
+        return payload
 
     def _assert_policy_env(self, recorded, expected, parent):
         """Launched env keys == allowlist (+ limits), values from parent/limits.
@@ -429,6 +471,7 @@ class LimitsDispatchTests(unittest.TestCase):
             self.assertNotIn("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION", recorded)
             self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL", recorded)
             self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL_FORCE", recorded)
+            self.assertNotIn(AGENT_TEAMS_ENV, recorded)
             spec = load_ssa("registry").load().get("claude")
             self._assert_policy_env(recorded, set(spec.env_keep), env)
 
@@ -498,6 +541,102 @@ class LimitsDispatchTests(unittest.TestCase):
             self.assertNotIn("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION", recorded)
             self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL", recorded)
             self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL_FORCE", recorded)
+            self.assertNotIn(AGENT_TEAMS_ENV, recorded)
+
+    def test_agent_teams_one_passes_env_absent_omits(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, worker_args=[])
+            (task_dir / "limits.txt").write_text("agent_teams=1\n")
+            env = self._claude_env(te)
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "claude",
+                env=env,
+            )
+            self.assertEqual(rc, 0, err)
+            recorder = te.home / ".ssa-test" / "fake-claude"
+            self.assertTrue((recorder / "argv.txt").exists())
+            recorded = json.loads((recorder / "env.json").read_text())
+            self.assertEqual(recorded[AGENT_TEAMS_ENV], "1")
+            self.assertNotEqual(recorded.get(AGENT_TEAMS_ENV), PARENT_AGENT_TEAMS)
+            argv = read_argv_file(recorder / "argv.txt")
+            self._assert_b1_agents(argv)
+
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, worker_args=[])
+            self.assertFalse((task_dir / "limits.txt").exists())
+            env = self._claude_env(te)
+            self.assertEqual(env[AGENT_TEAMS_ENV], PARENT_AGENT_TEAMS)
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "claude",
+                env=env,
+            )
+            self.assertEqual(rc, 0, err)
+            recorded = json.loads(
+                (te.home / ".ssa-test" / "fake-claude" / "env.json").read_text()
+            )
+            self.assertNotIn(AGENT_TEAMS_ENV, recorded)
+
+    def test_agent_teams_unknown_value_refuses_nonzero(self):
+        for bad in ("true", "0"):
+            with temp_env() as te:
+                repo = make_git_repo(te.root / "repo")
+                task_dir = make_task_dir(te.work_dir, repo, worker_args=[])
+                (task_dir / "limits.txt").write_text("agent_teams=%s\n" % bad)
+                rc, out, err = run_ssa(
+                    "dispatch", "--dir", str(task_dir), "--worker", "claude",
+                    env=self._claude_env(te),
+                )
+                self.assertNotEqual(rc, 0, bad)
+                self.assertIn("agent_teams", err)
+                self.assertNotIn("unknown limits key", err)
+                self.assertFalse(
+                    (te.home / ".ssa-test" / "fake-claude" / "argv.txt").exists(),
+                    bad,
+                )
+
+    def test_agent_teams_does_not_leak_to_grok(self):
+        spec = load_ssa("registry").load().get("grok")
+        self.assertNotIn("agent_teams", spec.env_pass)
+        self.assertEqual(spec.env_pass, {})
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, worker_args=[])
+            (task_dir / "limits.txt").write_text(
+                "agent_teams=1\nspawn_depth=2\nconcurrent=1\nper_session=0\n"
+            )
+            env = dict(te.env)
+            env["GROK_BIN"] = str(BIN_DIR / "fake-grok")
+            env["SSA_TEST_LEAK"] = "1"
+            env.pop(AGENT_TEAMS_ENV, None)
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "grok", env=env
+            )
+            self.assertEqual(rc, 0, err)
+            recorded = json.loads(
+                (te.home / ".ssa-test" / "fake-grok" / "env.json").read_text()
+            )
+            self.assertNotIn(AGENT_TEAMS_ENV, recorded)
+
+    def test_agent_teams_does_not_lift_disallowed_tools_or_emit_task_agent(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, worker_args=[])
+            (task_dir / "limits.txt").write_text("agent_teams=1\n")
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "claude",
+                env=self._claude_env(te),
+            )
+            self.assertEqual(rc, 0, err)
+            argv = read_argv_file(
+                te.home / ".ssa-test" / "fake-claude" / "argv.txt"
+            )
+            payload = self._assert_b1_agents(argv)
+            self.assertEqual(
+                payload["ssa-worker"]["disallowedTools"],
+                ["Task", "Agent"],
+            )
 
     def test_empty_subagent_model_dispatch_exits_nonzero_naming_the_key(self):
         with temp_env() as te:
