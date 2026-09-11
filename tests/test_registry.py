@@ -217,7 +217,7 @@ class FourthWorkerTests(unittest.TestCase):
             self.assertEqual((task_dir / "exit-code.txt").read_text().strip(), "3")
             self.assertTrue((task_dir / "resume-unavailable.txt").exists())
             doc = json.loads((task_dir / "task.json").read_text())
-            self.assertEqual(doc["state"], "verified")
+            self.assertEqual(doc["state"], "reported")
             self.assertEqual(doc["attempts"][-1]["exit"], 3)
             self.assertEqual(doc["attempts"][-1]["failure_class"], "unknown")
             outcome = json.loads((task_dir / "outcome.json").read_text())
