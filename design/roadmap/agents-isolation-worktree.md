@@ -1,5 +1,5 @@
 ---
-state: proposed
+state: promoted
 lens: outside-in
 created: 2026-09-11
 metric: isolation keys written into claude ssa-worker agents markdown or --agents payload
