@@ -1,5 +1,5 @@
 ---
-state: promoted
+state: building
 lens: outside-in
 created: 2026-09-11
 metric: isolation keys written into claude ssa-worker agents markdown or --agents payload
@@ -8,7 +8,7 @@ target: 1
 measure: python3 -c "import pathlib,re,json; ad=pathlib.Path('scripts/ssa/adapters.py').read_text(); w=json.loads(pathlib.Path('scripts/workers.json').read_text()); order=ad[ad.find('_MARKDOWN_FM_ORDER'):ad.find('def agents_markdown')]; md=ad[ad.find('def agents_markdown'):ad.find('def write_agents_file')]; pay=ad[ad.find('def agents_payload'):ad.find('def agents_json')]; print(int('isolation' in order or 'isolation' in md or 'isolation' in pay or 'isolation' in w['workers']['claude']['agents']))"
 evidence:
   - design/roadmap/evidence/2026-09-11-agents-isolation-worktree.txt
-slices: 0/2
+slices: 1/2
 after:
 ---
 # Pin isolation: worktree on the Claude ssa-worker agent
@@ -29,5 +29,5 @@ Without `isolation: worktree` on the pinned agent, Claude's own enforcement (cwd
 
 ## Slices
 
-- [ ] `agents_markdown` writes `isolation: worktree`; measure prints 1.
+- [x] `agents_markdown` writes `isolation: worktree`; measure prints 1.
 - [ ] `test_agents_file.py` asserts the parsed frontmatter has `isolation == "worktree"`; `--agents` JSON still omits it if that is the current Claude JSON contract, with a comment pointing at the docs.

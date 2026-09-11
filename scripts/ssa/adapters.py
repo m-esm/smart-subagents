@@ -470,15 +470,17 @@ _MARKDOWN_FM_ORDER = (
     "disallowedTools",
     "memory",
     "background",
+    "isolation",
 )
 
 
 def agents_markdown(payload: Dict[str, Any]) -> str:
     """Claude Code agent file: YAML frontmatter plus prompt body.
 
-    Extra file-only keys `memory: project` and `background: true` live here
-    and must not appear in the `--agents` JSON. `disallowedTools` is a
-    JSON-style list so a YAML parse and json.loads agree on the value.
+    Extra file-only keys `memory: project`, `background: true`, and
+    `isolation: worktree` live here and must not appear in the `--agents`
+    JSON. `disallowedTools` is a JSON-style list so a YAML parse and
+    json.loads agree on the value.
     """
     name = str(payload.get("name") or "")
     description = str(payload.get("description") or "")
@@ -492,6 +494,7 @@ def agents_markdown(payload: Dict[str, Any]) -> str:
         "disallowedTools": list(payload.get("disallowedTools") or []),
         "memory": "project",
         "background": True,
+        "isolation": "worktree",
     }
     if payload.get("model"):
         fm["model"] = payload["model"]
