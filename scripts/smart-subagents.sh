@@ -777,6 +777,115 @@ sys.exit(0)
 PY
 }
 
+# kind.txt=fanout: write $DIR/harness.js that fans N child task dirs via
+# `smart-subagents.sh dispatch --dir`, then return. Not a worker argv mode,
+# not an auto-run, not Task/Agent. Cap is limits.txt concurrent else 20.
+_ssa_emit_fanout_harness() {
+  local dir="$1"
+  need python3
+  python3 - "$dir" "$SSA_SELF" <<'PY'
+import json
+import os
+import sys
+
+dir_path, ssa_self = sys.argv[1], sys.argv[2]
+fanout_path = os.path.join(dir_path, "fanout.txt")
+limits_path = os.path.join(dir_path, "limits.txt")
+harness_path = os.path.join(dir_path, "harness.js")
+
+
+def fail(msg):
+    sys.stderr.write("smart-subagents: dispatch: %s\n" % msg)
+    sys.exit(1)
+
+
+if not os.path.isfile(fanout_path):
+    fail("missing fanout.txt")
+
+dirs = []
+with open(fanout_path) as fh:
+    for lineno, raw in enumerate(fh, 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if not os.path.isabs(line):
+            fail("fanout.txt line %d is not an absolute path: %s" % (lineno, line))
+        dirs.append(line)
+
+if not dirs:
+    fail("fanout.txt empty (N=0)")
+
+cap = 20
+if os.path.isfile(limits_path):
+    with open(limits_path) as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key, value = key.strip(), value.strip()
+            if key != "concurrent":
+                continue
+            if value == "0" or (value.isdigit() and int(value) == 0):
+                fail("limits.txt concurrent=0")
+            if not value.isdigit() or int(value) < 1:
+                fail("limits.txt concurrent=%s is not a positive integer" % value)
+            cap = int(value)
+
+js = """'use strict';
+const {spawn} = require('child_process');
+
+const SSA = %s;
+const DIRS = %s;
+const CAP = %d;
+
+function dispatchDir(dir) {
+  return new Promise(function (resolve) {
+    const child = spawn('bash', [SSA, 'dispatch', '--dir', dir], {stdio: 'inherit'});
+    child.on('close', function (code) { resolve(code == null ? 1 : code); });
+    child.on('error', function () { resolve(1); });
+  });
+}
+
+function main() {
+  let failed = 0;
+  let next = 0;
+  const running = new Set();
+
+  function launch() {
+    if (next >= DIRS.length) return;
+    const dir = DIRS[next++];
+    const p = dispatchDir(dir).then(function (code) {
+      running.delete(p);
+      if (code !== 0) failed = 1;
+    });
+    running.add(p);
+  }
+
+  function pump() {
+    while (running.size < CAP && next < DIRS.length) launch();
+    if (running.size === 0) {
+      process.exit(failed);
+      return;
+    }
+    Promise.race(running).then(pump);
+  }
+
+  pump();
+}
+
+main();
+""" % (json.dumps(ssa_self), json.dumps(dirs), cap)
+
+with open(harness_path, "w") as out:
+    out.write(js)
+print(
+    "smart-subagents: fanout n=%d cap=%d harness=%s"
+    % (len(dirs), cap, harness_path)
+)
+PY
+}
+
 cmd_dispatch() {
   local dir="" worker="" background="" mode="implement" resume=""
   while [[ $# -gt 0 ]]; do
@@ -794,6 +903,23 @@ cmd_dispatch() {
   if [[ -n "$src_repo" && -d "$src_repo" ]]; then
     _ssa_git_status_porcelain_uall "$src_repo" "" "dispatch"
   fi
+
+  # kind.txt=fanout is a dispatch-side kind, not a worker argv mode: emit
+  # harness.js and return before the "no worker" die and before _ssa_build.
+  # kind.txt=fork is a modifier on resume, not a fourth mode.
+  local kind="" resume_sid="" parent_sid=""
+  kind="$(_first_directive "$dir/kind.txt")"
+  if [[ "$kind" == "fanout" ]]; then
+    local brief="$dir/brief.md"
+    [[ -f "$brief" ]] || die "dispatch: missing $brief"
+    _ssa_require_structural "$dir" "$brief"
+    local wt
+    wt="$(cat "$dir/wt.txt" 2>/dev/null || true)"
+    [[ -n "$wt" && -d "$wt" ]] || die "dispatch: missing worktree ($dir/wt.txt)"
+    _ssa_emit_fanout_harness "$dir"
+    return 0
+  fi
+
   worker="${worker:-$(cat "$dir/worker.txt" 2>/dev/null || true)}"
   [[ -n "$worker" ]] || die "dispatch: no worker"
   local brief="$dir/brief.md"
@@ -810,8 +936,6 @@ cmd_dispatch() {
   # recorded session (the CLI accepts --fork-session with no --resume as a
   # no-op fork of nothing) and then adds the registry's fork_flags on the
   # resume argv template.
-  local kind="" resume_sid="" parent_sid=""
-  kind="$(_first_directive "$dir/kind.txt")"
   if [[ "$kind" == "fork" ]]; then
     resume_sid="$(_read1 "$dir/session-id.txt")"
     if [[ -f "$dir/resume-unavailable.txt" || -z "$resume_sid" ]]; then

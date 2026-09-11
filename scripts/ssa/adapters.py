@@ -704,8 +704,9 @@ def _budget_tokens(spec, ctx: Dict[str, Any]) -> List[str]:
 def resolve_kind(ctx: Dict[str, Any]) -> str:
     """First non-comment, non-blank line of $DIR/kind.txt, or ctx['kind'].
 
-    Unknown values are returned as-is. Only `fork` is load-bearing at
-    dispatch; everything else is recommender input and is ignored here.
+    Unknown values are returned as-is. `fork` splices argv at build time.
+    `fanout` is a dispatch-side kind the shell handles before _ssa_build;
+    it does not splice argv. Everything else is recommender input.
     Absent file, empty, or comments-only: "".
     """
     path = str(ctx.get("kind_file") or "")
