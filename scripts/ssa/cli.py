@@ -257,6 +257,25 @@ def cmd_effort_used(args) -> int:
     return 0
 
 
+def cmd_model_used(args) -> int:
+    """Resolve the launched model once, at launch, so `record` cannot re-derive it.
+
+    Also writes $DIR/model-downgraded.txt when FORCE-without-MODEL or the
+    worker log reports a silent subagent-model swap. The file is the signal;
+    this does not change the exit code or bench the worker.
+    """
+    try:
+        adapters.maybe_mark_model_downgrade(args.dir, args.worker)
+    except Exception:
+        pass
+    try:
+        value = adapters.launched_model_for_dir(args.dir, args.worker)
+    except Exception:
+        value = ""
+    print(value)
+    return 0
+
+
 def cmd_write_agents_file(args) -> int:
     """Write `$WT/.claude/agents/ssa-worker.md` from the claude agents payload."""
     adapters.write_worktree_claude_agent(args.dir)
@@ -332,6 +351,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dir", required=True)
     p.add_argument("--worker", default="")
     p.set_defaults(func=cmd_effort_used)
+
+    p = sub.add_parser(
+        "model-used",
+        help="print the model a task dir's dispatch launched with",
+    )
+    p.add_argument("--dir", required=True)
+    p.add_argument("--worker", default="")
+    p.set_defaults(func=cmd_model_used)
 
     p = sub.add_parser(
         "write-agents-file",

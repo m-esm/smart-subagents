@@ -42,6 +42,14 @@ BUDGET_RE = re.compile(
 SESSION_MISSING_RE = re.compile(
     r"no conversation found|session not found|no session found"
 )
+# Live Claude Code 2.1.267 strings. The assigned phrase "requested subagent
+# model is restricted" is not in that binary and must not match.
+MODEL_DOWNGRADE_RE = re.compile(
+    r"ignored: CLAUDE_CODE_SUBAGENT_MODEL_FORCE is set"
+    r"|is restricted by your organization's settings"
+)
+ENV_SUBAGENT_MODEL = "CLAUDE_CODE_SUBAGENT_MODEL"
+ENV_SUBAGENT_MODEL_FORCE = "CLAUDE_CODE_SUBAGENT_MODEL_FORCE"
 FAILURE_CLASSES = (
     "rate-limit",
     "auth",
@@ -283,6 +291,53 @@ def launched_effort_for_dir(dir_path: str, worker: str = "", reg=None) -> str:
         return effort_rung_from_args(spec, args)
 
 
+def launched_model(spec, ctx: Dict[str, Any]) -> str:
+    """The model that will be (or was) launched, not a later re-read of inputs.
+
+    Prefers CLAUDE_CODE_SUBAGENT_MODEL from the resolved env_extra (limits.txt
+    mapped through env_pass). Else the --model value already in worker-args.
+    """
+    try:
+        extra = resolve_env_extra(spec, ctx)
+    except AdapterError:
+        extra = {}
+    if ENV_SUBAGENT_MODEL in extra:
+        return extra[ENV_SUBAGENT_MODEL]
+    return _model_from_ctx(ctx)
+
+
+def launched_model_for_dir(dir_path: str, worker: str = "", reg=None) -> str:
+    """The model a run actually launched with.
+
+    Prefers $DIR/model-used.txt, which dispatch writes at launch. That file
+    is the only trustworthy answer: limits.txt is an input and may have been
+    edited since. Falls back to re-deriving for task dirs written before
+    model-used.txt existed.
+    """
+    used = _first_line(os.path.join(dir_path, "model-used.txt")).strip()
+    if used:
+        return used
+    worker = (worker or _first_line(os.path.join(dir_path, "worker.txt"))).strip()
+    if not worker:
+        return ""
+    try:
+        spec = _spec(worker, reg)
+    except Exception:
+        return ""
+    args_path = os.path.join(dir_path, "worker-args.txt")
+    args: List[str] = []
+    try:
+        with open(args_path, "r", errors="replace") as fh:
+            args = [ln for ln in fh.read().splitlines() if ln.strip()]
+    except OSError:
+        args = []
+    ctx = {"args": args, "limits": os.path.join(dir_path, "limits.txt")}
+    try:
+        return launched_model(spec, ctx)
+    except AdapterError:
+        return _model_from_ctx({"args": args})
+
+
 def _first_line(path: str) -> str:
     try:
         with open(path, "r", errors="replace") as fh:
@@ -499,6 +554,43 @@ def write_worktree_claude_agent(task_dir: str, reg=None) -> str:
 
 _LIMIT_VALUE_RE = re.compile(r"^[0-9]+$")
 _BUDGET_VALUE_RE = re.compile(r"^[0-9]+(\.[0-9]+)?$")
+def _check_limit_value(spec_name: str, key: str, value: str) -> None:
+    """Validate one limits.txt value. Raises AdapterError naming the key."""
+    if key == "subagent_model":
+        if not value:
+            raise AdapterError(
+                "%s: limits key %r value is empty" % (spec_name, key)
+            )
+        if any(ch.isspace() for ch in value):
+            raise AdapterError(
+                "%s: limits key %r value %r contains whitespace"
+                % (spec_name, key, value)
+            )
+        for ch in registry_mod._META_CHARS:
+            if ch in value:
+                raise AdapterError(
+                    "%s: limits key %r value %r contains the shell metacharacter %r"
+                    % (spec_name, key, value, ch)
+                )
+        for seq in registry_mod._META_SEQS:
+            if seq in value:
+                raise AdapterError(
+                    "%s: limits key %r value %r contains the shell sequence %r"
+                    % (spec_name, key, value, seq)
+                )
+        return
+    if key == "subagent_model_force":
+        if value != "1":
+            raise AdapterError(
+                "%s: limits key %r value %r must be exactly 1"
+                % (spec_name, key, value)
+            )
+        return
+    if not _LIMIT_VALUE_RE.fullmatch(value):
+        raise AdapterError(
+            "%s: limits key %r value %r is not a non-negative integer"
+            % (spec_name, key, value)
+        )
 
 
 def resolve_env_extra(spec, ctx: Dict[str, Any]) -> Dict[str, str]:
@@ -506,7 +598,7 @@ def resolve_env_extra(spec, ctx: Dict[str, Any]) -> Dict[str, str]:
 
     Returns the resolved env dict (env var name -> value). Empty when the
     worker declares no env_pass, the file is absent, or it has no directives.
-    Unknown keys and non-integer values raise AdapterError: silently dropping
+    Unknown keys and illegal values raise AdapterError: silently dropping
     a typo'd limit is the failure that makes a cap look applied when it is not.
     """
     env_pass = spec.env_pass
@@ -540,11 +632,7 @@ def resolve_env_extra(spec, ctx: Dict[str, Any]) -> Dict[str, str]:
                 "%s: unknown limits key %r; accepted: %s"
                 % (spec.name, key, accepted or "(none)")
             )
-        if not _LIMIT_VALUE_RE.fullmatch(value):
-            raise AdapterError(
-                "%s: limits key %r value %r is not a non-negative integer"
-                % (spec.name, key, value)
-            )
+        _check_limit_value(spec.name, key, value)
         resolved[env_pass[key]] = value
     return resolved
 
@@ -917,11 +1005,11 @@ def _is_json_line(line: str) -> bool:
         return False
 
 
-def classify_log(exit_code: int, log_path: str, lines: int = 40) -> Optional[str]:
-    """Classify a run from its log: error envelopes first, raw tail only if none.
+def _classify_evidence(log_path: str, lines: int = 40) -> str:
+    """The text classify_log searches: error envelopes first, then non-JSON stderr.
 
-    A structured log is read structurally. Falling back to the raw tail for a
-    JSON log is what let a grep hit set a 24 h cooldown on a healthy worker.
+    Never a random grep hit inside a tool_result: those are JSON lines that
+    error_strings skips unless they are a terminal error envelope.
     """
     text = ""
     try:
@@ -938,7 +1026,7 @@ def classify_log(exit_code: int, log_path: str, lines: int = 40) -> Optional[str
         # budget halt exits 1 (verified against 2.1.267), so rc is enough.
         msgs = error_strings(text)
         if msgs:
-            return classify_failure(exit_code, "\n".join(msgs))
+            return "\n".join(msgs)
         # A structured log is read structurally, but stderr is in the same
         # file and is never JSON. When the run failed and no JSON line
         # explains why, the non-JSON lines are the only evidence there is:
@@ -946,9 +1034,60 @@ def classify_log(exit_code: int, log_path: str, lines: int = 40) -> Optional[str
         # otherwise classify as unknown. Only reached on a nonzero exit, so
         # a successful run's stray output still says nothing.
         plain = [ln for ln in text.splitlines() if not _is_json_line(ln)]
-        return classify_failure(exit_code, "\n".join(plain[-lines:]))
-    tail = "\n".join(text.splitlines()[-lines:])
-    return classify_failure(exit_code, tail)
+        return "\n".join(plain[-lines:])
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def classify_log(exit_code: int, log_path: str, lines: int = 40) -> Optional[str]:
+    """Classify a run from its log: error envelopes first, raw tail only if none.
+
+    A structured log is read structurally. Falling back to the raw tail for a
+    JSON log is what let a grep hit set a 24 h cooldown on a healthy worker.
+    """
+    return classify_failure(exit_code, _classify_evidence(log_path, lines))
+
+
+def maybe_mark_model_downgrade(dir_path: str, worker: str = "", reg=None) -> bool:
+    """Write $DIR/model-downgraded.txt when FORCE-without-MODEL or a log warning.
+
+    The file existing is the signal. Does not bench the worker, does not
+    change exit code, does not change failure_class. Returns True when the
+    file is present after this call (written or already there).
+    """
+    path = os.path.join(dir_path, "model-downgraded.txt")
+    reason = ""
+    worker = (worker or _first_line(os.path.join(dir_path, "worker.txt"))).strip()
+    extra: Dict[str, str] = {}
+    if worker:
+        try:
+            spec = _spec(worker, reg)
+            extra = resolve_env_extra(
+                spec, {"limits": os.path.join(dir_path, "limits.txt")}
+            )
+        except Exception:
+            extra = {}
+    if ENV_SUBAGENT_MODEL_FORCE in extra and ENV_SUBAGENT_MODEL not in extra:
+        reason = (
+            "FORCE-without-MODEL: CLAUDE_CODE_SUBAGENT_MODEL_FORCE is set "
+            "without CLAUDE_CODE_SUBAGENT_MODEL; CLI falls back to the main "
+            "session model"
+        )
+    if not reason:
+        evidence = _classify_evidence(os.path.join(dir_path, "stdout.log"))
+        if MODEL_DOWNGRADE_RE.search(evidence or ""):
+            reason = (
+                "worker log reported a subagent model override "
+                "(CLAUDE_CODE_SUBAGENT_MODEL_FORCE or org restriction)"
+            )
+    if not reason:
+        return os.path.isfile(path)
+    if not os.path.isfile(path):
+        try:
+            with open(path, "w") as fh:
+                fh.write(reason + "\n")
+        except OSError:
+            return False
+    return True
 
 
 # Fallbacks for names that the historical `env -i` line defaulted when

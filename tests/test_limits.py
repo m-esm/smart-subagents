@@ -26,6 +26,15 @@ CLAUDE_LIMIT_VARS = {
     "per_session": "CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION",
 }
 
+CLAUDE_ENV_PASS = {
+    **CLAUDE_LIMIT_VARS,
+    "subagent_model": "CLAUDE_CODE_SUBAGENT_MODEL",
+    "subagent_model_force": "CLAUDE_CODE_SUBAGENT_MODEL_FORCE",
+}
+
+PARENT_SUBAGENT_MODEL = "parent-leak-model"
+PARENT_SUBAGENT_FORCE = "parent-leak-force"
+
 # CPython on macOS re-injects these even under `env -i`. They are not a
 # scrub leak; a removed scrub would also admit SSA_TEST_LEAK and the rest
 # of the parent environment, which this set does not contain.
@@ -56,7 +65,17 @@ class EnvPassRegistryTests(unittest.TestCase):
         cls.reg = load_ssa("registry").load()
 
     def test_claude_env_pass_names_live_in_the_registry(self):
-        self.assertEqual(self.reg.get("claude").env_pass, CLAUDE_LIMIT_VARS)
+        self.assertEqual(self.reg.get("claude").env_pass, CLAUDE_ENV_PASS)
+        self.assertIn("subagent_model", self.reg.get("claude").env_pass)
+        self.assertIn("subagent_model_force", self.reg.get("claude").env_pass)
+        self.assertEqual(
+            self.reg.get("claude").env_pass["subagent_model"],
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+        )
+        self.assertEqual(
+            self.reg.get("claude").env_pass["subagent_model_force"],
+            "CLAUDE_CODE_SUBAGENT_MODEL_FORCE",
+        )
         for name in ("codex", "grok", "kimi"):
             self.assertEqual(self.reg.get(name).env_pass, {}, msg=name)
 
@@ -220,6 +239,44 @@ class ResolvedEnvDictTests(unittest.TestCase):
                 self._build(te.root, "claude", "spawn_depth=two\n")
             self.assertIn("spawn_depth", str(caught.exception))
 
+    def test_subagent_model_accepts_a_model_id(self):
+        with temp_env() as te:
+            built = self._build(te.root, "claude", "subagent_model=haiku\n")
+            self.assertEqual(
+                built["env_extra"],
+                {"CLAUDE_CODE_SUBAGENT_MODEL": "haiku"},
+            )
+            built = self._build(
+                te.root, "claude", "subagent_model=claude-haiku-4-5-20251001\n"
+            )
+            self.assertEqual(
+                built["env_extra"]["CLAUDE_CODE_SUBAGENT_MODEL"],
+                "claude-haiku-4-5-20251001",
+            )
+
+    def test_empty_subagent_model_raises_naming_the_key(self):
+        with temp_env() as te:
+            with self.assertRaises(self.adapters.AdapterError) as caught:
+                self._build(te.root, "claude", "subagent_model=\n")
+            self.assertIn("subagent_model", str(caught.exception))
+
+    def test_whitespace_subagent_model_raises_naming_the_key(self):
+        with temp_env() as te:
+            with self.assertRaises(self.adapters.AdapterError) as caught:
+                self._build(te.root, "claude", "subagent_model=hai ku\n")
+            self.assertIn("subagent_model", str(caught.exception))
+
+    def test_subagent_model_force_must_be_exactly_one(self):
+        with temp_env() as te:
+            built = self._build(te.root, "claude", "subagent_model_force=1\n")
+            self.assertEqual(
+                built["env_extra"],
+                {"CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1"},
+            )
+            with self.assertRaises(self.adapters.AdapterError) as caught:
+                self._build(te.root, "claude", "subagent_model_force=true\n")
+            self.assertIn("subagent_model_force", str(caught.exception))
+
     def test_grok_with_limits_txt_gets_empty_env_extra(self):
         with temp_env() as te:
             built = self._build(
@@ -268,6 +325,8 @@ class LimitsDispatchTests(unittest.TestCase):
         env.pop("CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", None)
         env.pop("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", None)
         env.pop("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION", None)
+        env["CLAUDE_CODE_SUBAGENT_MODEL"] = PARENT_SUBAGENT_MODEL
+        env["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"] = PARENT_SUBAGENT_FORCE
         return env
 
     def _assert_policy_env(self, recorded, expected, parent):
@@ -368,6 +427,8 @@ class LimitsDispatchTests(unittest.TestCase):
             self.assertNotIn("CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", recorded)
             self.assertNotIn("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", recorded)
             self.assertNotIn("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION", recorded)
+            self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL", recorded)
+            self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL_FORCE", recorded)
             spec = load_ssa("registry").load().get("claude")
             self._assert_policy_env(recorded, set(spec.env_keep), env)
 
@@ -435,6 +496,38 @@ class LimitsDispatchTests(unittest.TestCase):
             self.assertNotIn("CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", recorded)
             self.assertNotIn("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", recorded)
             self.assertNotIn("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION", recorded)
+            self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL", recorded)
+            self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL_FORCE", recorded)
+
+    def test_empty_subagent_model_dispatch_exits_nonzero_naming_the_key(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, worker_args=[])
+            (task_dir / "limits.txt").write_text("subagent_model=\n")
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "claude",
+                env=self._claude_env(te),
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn("subagent_model", err)
+            self.assertFalse(
+                (te.home / ".ssa-test" / "fake-claude" / "argv.txt").exists()
+            )
+
+    def test_whitespace_subagent_model_dispatch_exits_nonzero_naming_the_key(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, worker_args=[])
+            (task_dir / "limits.txt").write_text("subagent_model=hai ku\n")
+            rc, out, err = run_ssa(
+                "dispatch", "--dir", str(task_dir), "--worker", "claude",
+                env=self._claude_env(te),
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn("subagent_model", err)
+            self.assertFalse(
+                (te.home / ".ssa-test" / "fake-claude" / "argv.txt").exists()
+            )
 
 
 if __name__ == "__main__":

@@ -911,10 +911,13 @@ cmd_dispatch() {
   sid="$(_ssa parse-session --worker "$worker" --log "$log" 2>/dev/null || true)"
   failure="$(_classify_failure "$rc" "$log")"
 
-  # The launched effort is a fact about THIS run. effort.txt is an input a
-  # supervisor may edit before `record` runs, so re-deriving it later would
-  # put a rung in the ledger that no run ever used.
+  # The launched effort and model are facts about THIS run. effort.txt and
+  # limits.txt are inputs a supervisor may edit before `record` runs, so
+  # re-deriving them later would put a rung or model in the ledger that no
+  # run ever used. model-used also marks model-downgraded.txt when FORCE
+  # was set without MODEL or the log reported a silent swap.
   _ssa effort-used --dir "$dir" --worker "$worker" >"$dir/effort-used.txt" 2>/dev/null || true
+  _ssa model-used --dir "$dir" --worker "$worker" >"$dir/model-used.txt" 2>/dev/null || true
   echo "$rc" >"$dir/exit-code.txt"
   echo "$sid" >"$dir/session-id.txt"
   _ssa_state "$dir" exited --worker "$worker" --exit "$rc" \
@@ -2645,17 +2648,24 @@ if task_file.exists():
         failure_class = None
 
 effort = ""
+model = ""
+model_downgraded = False
 if scripts_dir:
     sys.path.insert(0, scripts_dir)
     try:
         from ssa import adapters as _ssa_adapters
         effort = _ssa_adapters.launched_effort_for_dir(str(d))
+        model = _ssa_adapters.launched_model_for_dir(str(d))
+        model_downgraded = (d / "model-downgraded.txt").is_file()
     except Exception:
         effort = ""
+        model = ""
+        model_downgraded = False
 
 doc = {
     "schema_version": 1,
     "effort": effort,
+    "model": model,
     "verify": {
         "commands": commands,
         "baseline_ran": baseline_ran,
@@ -2677,6 +2687,8 @@ doc = {
 }
 if failure_class:
     doc["failure_class"] = failure_class
+if model_downgraded:
+    doc["model_downgraded"] = True
 (d / "outcome.json").write_text(json.dumps(doc, indent=2) + "\n")
 print("verify: verdict=%s new_failures=%d scope_ok=%s secrets_ok=%s changed=%d"
       % (verdict, new_failures, scope_ok, secrets_ok, len(changed)))
@@ -2841,13 +2853,19 @@ def quota(name):
     return out or None
 
 effort = ""
+model = ""
+model_downgraded = False
 if scripts_dir:
     sys.path.insert(0, scripts_dir)
     try:
         from ssa import adapters as _ssa_adapters
         effort = _ssa_adapters.launched_effort_for_dir(str(d))
+        model = _ssa_adapters.launched_model_for_dir(str(d))
+        model_downgraded = (d / "model-downgraded.txt").is_file()
     except Exception:
         effort = ""
+        model = ""
+        model_downgraded = False
 
 record = {
     "schema_version": 1,
@@ -2859,6 +2877,7 @@ record = {
     "size": read1("size.txt"),
     "difficulty": read1("difficulty.txt"),
     "effort": effort,
+    "model": model,
     "worker_args": args,
     "exit_code": exit_code,
     "wall_seconds": wall,
@@ -2875,6 +2894,8 @@ record = {
     "notes": notes or None,
     "route": read1("route.txt") or None,
 }
+if model_downgraded:
+    record["model_downgraded"] = True
 
 (d / "outcome-record.json").write_text(json.dumps(record, indent=2) + "\n")
 path = Path(ledger)
