@@ -1,5 +1,5 @@
 ---
-state: proposed
+state: promoted
 lens: spec-gap
 created: 2026-09-10
 metric: cmd_record calls inside cmd_verify
