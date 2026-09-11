@@ -2833,6 +2833,15 @@ PY
     ${failure_class:+--failure-class "$failure_class"} \
     --artifact "$dir/outcome.json"
   _ssa_state "$dir" "$verdict_state"
+  # Ledger row is part of verify, not a second supervisor verb. Mapping is
+  # pass→verified-pass, fail→rejected, else partial. Verify's own rc is kept
+  # even if record fails; worker rc stays in exit-code.txt.
+  local rec_outcome=partial
+  case "$rc" in
+    0) rec_outcome=verified-pass ;;
+    1) rec_outcome=rejected ;;
+  esac
+  cmd_record --dir "$dir" --outcome "$rec_outcome" || true
   return "$rc"
 }
 

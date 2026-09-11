@@ -1347,9 +1347,10 @@ cmd_bg_run --dir "$2" --worker codex
             record = json.loads((task_dir / "task.json").read_text())
             self.assertTrue(record.get("desync"))
             # The record follows the task instead of freezing at "reported".
+            # Verify now appends the ledger row, so the run ends reported.
             rc, out, err = run_ssa("ls", "--all", env=te.env)
             self.assertEqual(rc, 0, err)
-            self.assertRegex(out, r"verified")
+            self.assertRegex(out, r"reported")
 
     def test_gc_keeps_a_planning_panel_until_it_reports_done(self):
         with temp_env() as te:
