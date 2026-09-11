@@ -1,0 +1,16 @@
+measured 2026-09-11 against worktree HEAD 9574fde (origin/main)
+
+$ python3 -c "import pathlib,re,json; ad=pathlib.Path('scripts/ssa/adapters.py').read_text(); w=json.loads(pathlib.Path('scripts/workers.json').read_text()); order=ad[ad.find('_MARKDOWN_FM_ORDER'):ad.find('def agents_markdown')]; md=ad[ad.find('def agents_markdown'):ad.find('def write_agents_file')]; pay=ad[ad.find('def agents_payload'):ad.find('def agents_json')]; print('FM_ORDER_isolation', int('isolation' in order)); print('markdown_fn_isolation', len(re.findall(r'\\bisolation\\b', md))); print('payload_fn_isolation', len(re.findall(r'\\bisolation\\b', pay))); print('workers_agents_isolation', int('isolation' in w['workers']['claude']['agents'])); print('MEASURE', int('isolation' in order or 'isolation' in md or 'isolation' in pay or 'isolation' in w['workers']['claude']['agents']))"
+FM_ORDER_isolation 0
+markdown_fn_isolation 0
+payload_fn_isolation 0
+workers_agents_isolation 0
+MEASURE 0
+
+$ python3 -c "import json; from pathlib import Path; a=json.loads(Path('scripts/workers.json').read_text())['workers']['claude']['agents']; print(sorted(a.keys()))"
+['description', 'disallowedTools', 'name', 'prompt']
+
+Official docs fetched 2026-09-11:
+- https://code.claude.com/docs/en/worktrees : "Subagents can run in their own worktrees so parallel edits don’t conflict. Ask Claude to “use worktrees for your agents”, or make the isolation permanent for a custom subagent by adding isolation: worktree to its frontmatter."
+- https://code.claude.com/docs/en/sub-agents : "To give the subagent an isolated copy of the repository instead, set isolation: worktree. A subagent with isolation: worktree runs its Bash and PowerShell commands inside its worktree. A command whose working directory resolves to your main checkout instead, for example because the worktree directory was removed while the subagent was running, fails with an error."
+- Same page lists isolation among --agents JSON frontmatter fields: description, tools, disallowedTools, model, permissionMode, mcpServers, hooks, maxTurns, skills, initialPrompt, memory, effort, background, and isolation.
