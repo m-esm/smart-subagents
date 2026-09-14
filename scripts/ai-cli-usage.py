@@ -353,15 +353,22 @@ def _jwt_payload(tok: str) -> dict:
 
 
 def _keychain_claude_creds() -> Optional[dict]:
-    try:
-        raw = subprocess.check_output(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-        return json.loads(raw)
-    except Exception:
-        return None
+    # Several keychain items share the service name; without -a the first
+    # match is not the login item and -w prints nothing (seen 2026-09-15).
+    accounts = [os.environ.get("USER") or "", ""]
+    for acct in accounts:
+        cmd = ["security", "find-generic-password", "-s", "Claude Code-credentials"]
+        if acct:
+            cmd += ["-a", acct]
+        cmd.append("-w")
+        try:
+            raw = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL).strip()
+            d = json.loads(raw)
+            if isinstance(d, dict) and "claudeAiOauth" in d:
+                return d
+        except Exception:
+            continue
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -851,10 +858,17 @@ def check_grok() -> CliStatus:
         }
         scode, subs = _http_json("https://grok.com/rest/subscriptions", headers)
         bcode, billing = _http_json("https://cli-chat-proxy.grok.com/v1/billing", headers)
+        # ?format=credits is the shape the CLI's /usage reads: the weekly
+        # pool shared by every Grok product (creditUsagePercent, productUsage,
+        # currentPeriod). The bare endpoint is the legacy monthly credit meter
+        # and reads monthlyLimit 0 on every subscription seen so far.
+        ccode, credits = _http_json(
+            "https://cli-chat-proxy.grok.com/v1/billing?format=credits", headers
+        )
         ucode, user = _http_json("https://cli-chat-proxy.grok.com/v1/user", headers)
-        return scode, subs, bcode, billing, ucode, user
+        return scode, subs, bcode, billing, ucode, user, ccode, credits
 
-    scode, subs, bcode, billing, ucode, user = probe(entry["key"])
+    scode, subs, bcode, billing, ucode, user, ccode, credits = probe(entry["key"])
     if 401 in (scode, bcode, ucode):
         payload = _grok_oidc_refresh(entry)
         if payload:
@@ -867,7 +881,7 @@ def check_grok() -> CliStatus:
                 entry = _grok_pick_entry(auth) or entry
             except Exception:
                 pass
-        scode, subs, bcode, billing, ucode, user = probe(entry["key"])
+        scode, subs, bcode, billing, ucode, user, ccode, credits = probe(entry["key"])
 
     active_tiers = []
     if scode == 200 and isinstance(subs, dict):
@@ -886,7 +900,8 @@ def check_grok() -> CliStatus:
 
     if bcode == 200 and isinstance(billing, dict):
         user_dict = user if (ucode == 200 and isinstance(user, dict)) else None
-        return parse_grok_usage(billing, user_dict, st)
+        credits_dict = credits if (ccode == 200 and isinstance(credits, dict)) else None
+        return parse_grok_usage(billing, user_dict, st, credits=credits_dict)
 
     if ucode == 200 and isinstance(user, dict):
         st.available = bool(user.get("hasGrokCodeAccess"))
@@ -908,14 +923,61 @@ def check_grok() -> CliStatus:
 
 
 def parse_grok_usage(
-    billing: dict, user: Optional[dict] = None, st: Optional[CliStatus] = None
+    billing: dict,
+    user: Optional[dict] = None,
+    st: Optional[CliStatus] = None,
+    credits: Optional[dict] = None,
 ) -> CliStatus:
     """Pure: turn a Grok CLI billing payload (+ optional /user) into a CliStatus.
 
     `billing` may nest its fields under "config" or carry them at the root;
-    both shapes are handled the same way. No network.
+    both shapes are handled the same way. `credits` is the
+    `/v1/billing?format=credits` payload: when it carries
+    `creditUsagePercent` it is the weekly pool every Grok product spends
+    from and it wins over the monthly meter. No network.
     """
     st = st if st is not None else CliStatus(cli="grok", available=True)
+    ccfg = (credits or {}).get("config") or (credits or {})
+    pool_pct = _num(st, ccfg.get("creditUsagePercent"), "creditUsagePercent")
+    if pool_pct is not None:
+        period = ccfg.get("currentPeriod") or {}
+        start, end = period.get("start") or ccfg.get("billingPeriodStart"), period.get("end") or ccfg.get("billingPeriodEnd")
+        start_ts, end_ts = _parse_iso(str(start or "")), _parse_iso(str(end or ""))
+        products = {
+            str(p.get("product")): p.get("usagePercent")
+            for p in (ccfg.get("productUsage") or [])
+            if isinstance(p, dict)
+        }
+        st.available = True
+        st.windows.append(
+            Window(
+                name="weekly_pool",
+                used_pct=pool_pct,
+                remaining_pct=100.0 - pool_pct,
+                used=None,
+                limit=None,
+                remaining=None,
+                unit="percent",
+                resets_at=end,
+                resets_in_hours=_hours_until(end),
+                severity=_severity(pool_pct),
+                note="shared by every Grok product; per product: " + json.dumps(products, sort_keys=True),
+                period_seconds=((end_ts - start_ts) if (start_ts and end_ts and end_ts > start_ts) else None),
+            )
+        )
+        st.extras["product_usage_pct"] = products
+        st.extras["on_demand_used"] = ((ccfg.get("onDemandUsed") or {}).get("val"))
+        st.score = max(0.0, 100.0 - pool_pct)
+        st.eligible = pool_pct < 99.5
+        if not st.eligible:
+            st.skip_reason = "Grok weekly pool exhausted"
+        if user is not None:
+            st.extras["has_grok_code_access"] = user.get("hasGrokCodeAccess")
+            if user.get("hasGrokCodeAccess") is False:
+                st.eligible = False
+                st.skip_reason = "hasGrokCodeAccess=false"
+                st.score = 0.0
+        return st
     cfg = billing.get("config") or billing
     limit_v = ((cfg.get("monthlyLimit") or {}).get("val"))
     used_v = ((cfg.get("used") or {}).get("val"))
@@ -960,7 +1022,13 @@ def parse_grok_usage(
             st.skip_reason = "Grok monthly CLI credits exhausted"
     else:
         # No credit meter to read. Same answer as every other provider.
+        # SuperGrok Pro returns monthlyLimit 0 (2026-09-15: used=63 on a 0
+        # limit) and grok.com/rest/rate-limits answers 403
+        # "cannot be performed by OAuth2 token users", so the plan's real
+        # rate windows are not reachable from a CLI token at all.
         _mark_missing_usage(st)
+        st.extras["cli_credits_used"] = used_f
+        st.extras["monthly_limit"] = limit_f
 
     if user is not None:
         st.extras["has_grok_code_access"] = user.get("hasGrokCodeAccess")

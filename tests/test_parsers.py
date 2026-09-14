@@ -283,6 +283,38 @@ class GrokParserTests(unittest.TestCase):
         # The window itself is still recorded with its real (healthy) numbers.
         self.assertAlmostEqual(by_name(st.windows, "monthly_cli_credits").used_pct, 1.0)
 
+    def test_weekly_pool_wins_over_zero_monthly_limit(self):
+        # 2026-09-15: SuperGrok Pro reads monthlyLimit 0 on /v1/billing but
+        # /v1/billing?format=credits carries the weekly pool every Grok
+        # product spends from. That pool is the meter.
+        fx = load_fixture_json("grok", "weekly_pool.json")
+        st = self.m.parse_grok_usage(fx["billing"], fx["user"], credits=fx["credits"])
+        w = by_name(st.windows, "weekly_pool")
+        self.assertAlmostEqual(w.used_pct, 61.0)
+        self.assertEqual(w.resets_at, "2026-09-17T18:14:24.963126+00:00")
+        self.assertAlmostEqual(w.period_seconds, 7 * 86400)
+        self.assertEqual(st.extras["product_usage_pct"], {"GrokBuild": 60.0, "GrokChat": 1.0})
+        self.assertTrue(st.eligible)
+        self.assertAlmostEqual(st.score, 39.0)
+        self.assertEqual(st.skip_reason, "")
+
+    def test_weekly_pool_without_percent_falls_back_to_monthly_guard(self):
+        # An account with Grok Code access and no subscription: the credits
+        # payload has a period but no creditUsagePercent, so the old
+        # zero-limit guard still applies and nothing is recommended.
+        fx = load_fixture_json("grok", "weekly_pool_empty.json")
+        st = self.m.parse_grok_usage(fx["billing"], fx["user"], credits=fx["credits"])
+        self.assertEqual(st.windows, [])
+        self.assertFalse(st.eligible)
+        self.assertEqual(st.skip_reason, "usage data missing")
+
+    def test_weekly_pool_exhausted_is_not_eligible(self):
+        fx = load_fixture_json("grok", "weekly_pool.json")
+        fx["credits"]["config"]["creditUsagePercent"] = 99.6
+        st = self.m.parse_grok_usage(fx["billing"], fx["user"], credits=fx["credits"])
+        self.assertFalse(st.eligible)
+        self.assertEqual(st.skip_reason, "Grok weekly pool exhausted")
+
     def test_no_user_payload_skips_access_check(self):
         fx = load_fixture_json("grok", "no_user.json")
         st = self.m.parse_grok_usage(fx["billing"], fx["user"])

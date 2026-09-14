@@ -1,0 +1,6 @@
+{
+  "_note": "An xAI account with Grok Code access but no subscription (2026-09-15): format=credits has a period and no creditUsagePercent.",
+  "billing": {"config": {"monthlyLimit": {"val": 0}, "used": {"val": 0}, "onDemandCap": {"val": 0}, "billingPeriodStart": "2026-09-01T00:00:00+00:00", "billingPeriodEnd": "2026-10-01T00:00:00+00:00"}},
+  "credits": {"config": {"currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY", "start": "2026-09-12T00:00:00+00:00", "end": "2026-09-19T00:00:00+00:00"}, "onDemandCap": {"val": 0}, "onDemandUsed": {"val": 0}, "isUnifiedBillingUser": true, "prepaidBalance": {"val": 0}, "billingPeriodStart": "2026-09-12T00:00:00+00:00", "billingPeriodEnd": "2026-09-19T00:00:00+00:00"}},
+  "user": {"email": "user@example.com", "hasGrokCodeAccess": true}
+}
