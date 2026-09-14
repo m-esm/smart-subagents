@@ -1,0 +1,26 @@
+# Sources backlog (written by ~/.hermes/scripts/ssa-source-scan.py, weekly)
+
+One row per new public source on Claude Code subagent practice. A row is done when the
+practice it describes is a shipped, sourced roadmap proposal (the GOAL.md metric) or the
+row is struck through with a one-line reason. Do not edit rows by hand; strike or ship.
+- [ ] 2026-09-15 Show HN: Bestie, a coding agent that respects you https://github.com/jolexxa/bestie (HN 5 pts)
+- [ ] 2026-09-15 wshobson/agents: Multi-harness agentic plugin marketplace for Claude Code, Codex, Cursor, OpenCod https://github.com/wshobson/agents (GitHub 39652 stars)
+- [ ] 2026-09-15 VoltAgent/awesome-claude-code-subagents: A collection of 100+ specialized Claude Code subagents covering a wid https://github.com/VoltAgent/awesome-claude-code-subagents (GitHub 25073 stars)
+- [ ] 2026-09-15 davepoon/buildwithclaude: A single hub to find Claude Skills, Agents, Commands, Hooks, Plugins, and Market https://github.com/davepoon/buildwithclaude (GitHub 3456 stars)
+- [ ] 2026-09-15 deusyu/translate-book: Agent skill for Codex, Claude Code, and OpenClaw that translates entire books (P https://github.com/deusyu/translate-book (GitHub 1845 stars)
+- [ ] 2026-09-15 hoangsonww/Claude-Code-Agent-Monitor: 🚀 A real-time monitoring dashboard for Claude Code & Codex, built with S https://github.com/hoangsonww/Claude-Code-Agent-Monitor (GitHub 998 stars)
+- [ ] 2026-09-15 Ark0N/Codeman: Self-hosted mission control for AI coding agents: run Claude Code, OpenCode, Pi, https://github.com/Ark0N/Codeman (GitHub 755 stars)
+- [ ] 2026-09-15 QuintinShaw/pi-dynamic-workflows: Claude Code–style dynamic workflows for Pi: code-mode subagents with real mo https://github.com/QuintinShaw/pi-dynamic-workflows (GitHub 522 stars)
+- [ ] 2026-09-15 dongbeixiaohuo/writing-agent: 🚀 一个基于 Claude Code (Skills + Subagents) 的“去AI味”全栈写作系统。不仅防套路，更通过专属规则强制注入人类观点与细节，搭 https://github.com/dongbeixiaohuo/writing-agent (GitHub 416 stars)
+- [ ] 2026-09-15 michael-denyer/pstack-claude: Claude Code, Codex, OpenCode, Gemini, and Prime Agent versions of Poteto's pstac https://github.com/michael-denyer/pstack-claude (GitHub 389 stars)
+- [ ] 2026-09-15 phiat/claude-esp: Stream Claude Code's hidden output (thinking, tool calls, subagents) to a separa https://github.com/phiat/claude-esp (GitHub 153 stars)
+- [ ] 2026-09-15 ZSeven-W/dsh-crew: DeepSeek Harness (DSH) plugin: dispatch work to DSH agents from Claude Code / Co https://github.com/ZSeven-W/dsh-crew (GitHub 146 stars)
+- [ ] 2026-09-15 ayush-that/sub-agents.directory: 🐒 Sub-Agents Directory is a curated collection of 100+ sub-agent prompts and  https://github.com/ayush-that/sub-agents.directory (GitHub 144 stars)
+- [ ] 2026-09-15 openma-ai/open-managed-agents: Self-host AI agents with Claude Managed Agents and OpenAI Agents API support. S https://github.com/openma-ai/open-managed-agents (GitHub 276 stars)
+- [ ] 2026-09-15 AaronRoeF/claude-code-patterns: Field-tested Claude Code patterns & anti-patterns for personal agents — an AI  https://github.com/AaronRoeF/claude-code-patterns (GitHub 123 stars)
+- [ ] 2026-09-15 Socialpranker/agentburn: Which 5-hour window took you out — and where the money goes. Local profiler for https://github.com/Socialpranker/agentburn (GitHub 119 stars)
+- [ ] 2026-09-15 minetechnic2012-lang/claude-ops-inspector: Subagent Verification for Claude AI Code Networks 2026 https://github.com/minetechnic2012-lang/claude-ops-inspector (GitHub 116 stars)
+- [ ] 2026-09-15 ringlochid/oh-my-subagents: Local subagent orchestration for Codex and Claude, with persistent task state, r https://github.com/ringlochid/oh-my-subagents (GitHub 97 stars)
+- [ ] 2026-09-15 simota/agent-skills: 90 specialist AI agents + 3 project-local extensions for Claude Code / Codex CLI https://github.com/simota/agent-skills (GitHub 78 stars)
+- [ ] 2026-09-15 griffinwork40/agent-afk: The coding agent you don’t have to watch. Start a task and walk away. AFK builds https://github.com/griffinwork40/agent-afk (GitHub 56 stars)
+- [ ] 2026-09-15 Claude Code release notes mention subagents (read the newest entries) https://docs.anthropic.com/en/release-notes/claude-code (Anthropic docs)
