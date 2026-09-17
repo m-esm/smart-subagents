@@ -13,8 +13,11 @@ and where the task is in its lifecycle.
     python3 scripts/ssa/cli.py event --dir D --phase P [--exit N ...]
     python3 scripts/ssa/cli.py state --dir D
     python3 scripts/ssa/cli.py transition --dir D --to STATE
+    python3 scripts/ssa/cli.py jev classify|lint --brief PATH   (advisory)
+    python3 scripts/ssa/cli.py jev probe
 
 Exit codes: 0 ok, 1 refused (bad registry, illegal transition, unknown worker).
+jev: 0 ok, 1 lint found missing elements, 2 Jev unavailable (callers fall back).
 """
 
 from __future__ import annotations
@@ -27,12 +30,12 @@ from pathlib import Path
 
 if __package__ in (None, ""):  # invoked as a path, not as -m ssa.cli
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from ssa import adapters, digest as digest_mod, registry as registry_mod, state  # type: ignore
+    from ssa import adapters, digest as digest_mod, jev as jev_mod, registry as registry_mod, state  # type: ignore
     from ssa.registry import RegistryError  # type: ignore
     from ssa.adapters import AdapterError  # type: ignore
     from ssa.state import StateError  # type: ignore
 else:
-    from . import adapters, digest as digest_mod, registry as registry_mod, state
+    from . import adapters, digest as digest_mod, jev as jev_mod, registry as registry_mod, state
     from .registry import RegistryError
     from .adapters import AdapterError
     from .state import StateError
@@ -282,6 +285,35 @@ def cmd_write_agents_file(args) -> int:
     return 0
 
 
+def cmd_jev(args) -> int:
+    """Typed judgments about a brief. Always prints one JSON object."""
+    try:
+        if args.action == "probe":
+            out = jev_mod.ask(
+                {"text": "The deploy failed with exit code 1."},
+                {"failed": {"type": "noul", "instructions": "Does `text` report a failure?"}},
+            )
+            ok = float(out["answers"]["failed"]["noul"]) > 0.5
+            print(json.dumps({"available": True, "ok": ok, "model": out.get("model")}))
+            return 0 if ok else 1
+        text = sys.stdin.read() if args.brief == "-" else Path(args.brief).read_text()
+        if not text.strip():
+            print(json.dumps(jev_mod.unavailable("brief is empty")))
+            return 2
+        if args.action == "classify":
+            print(json.dumps(jev_mod.classify_brief(text)))
+            return 0
+        result = jev_mod.lint_brief(text)
+        print(json.dumps(result))
+        return 0 if result["ok"] else 1
+    except jev_mod.JevUnavailable as exc:
+        print(json.dumps(jev_mod.unavailable(str(exc))))
+        return 2
+    except OSError as exc:
+        print(json.dumps(jev_mod.unavailable("cannot read brief: %s" % exc)))
+        return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="ssa", description=__doc__.splitlines()[0])
     ap.add_argument(
@@ -424,6 +456,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--parent-session", dest="parent_session", default=None)
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(func=cmd_transition)
+    p = sub.add_parser("jev", help="advisory typed judgments about a brief (TypeSafe Jev)")
+    p.add_argument("action", choices=["classify", "lint", "probe"])
+    p.add_argument("--brief", default="-", help="brief file, or - for stdin")
+    p.set_defaults(func=cmd_jev)
+
     return ap
 
 

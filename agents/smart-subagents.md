@@ -63,6 +63,21 @@ DIR="${SSA_WORK_DIR:-${TMPDIR:-/tmp}/smart-subagents}/$TASK_ID"
 mkdir -m 700 -p "$DIR"   # briefs and worker logs stay private
 ```
 
+**Classify from the parent's task text, do not guess.** When a TypeSafe key
+is present, one call returns both axes and the kind, each with a confidence:
+
+```bash
+printf '%s' "$PARENT_TASK_TEXT" | bash "$SSA" jev classify
+# {"size":"small","difficulty":"hard","kind":"impl","confidence":{...},
+#  "low_confidence":[],"flags":"--size small --difficulty hard --kind impl"}
+```
+
+Pass `flags` to `init` / `pick`. A name under `low_confidence` is yours to
+decide; everything else you take as given unless the repo contradicts it (a
+"rename" that turns out to cross a public API is not trivial). Always pass
+`--kind`: a ledger full of `default` teaches the fit table nothing. Exit 2 is
+"Jev unavailable": classify by hand as before.
+
 Artifacts under `$DIR/`: `brief.md`, `usage.json`, `pick.json`, `stdout.log`
 (disk only, see Phase 4), `last-msg.txt` (the worker's final message, every
 worker), `session-id.txt`, `worker.txt`, `exit-code.txt`,
@@ -568,6 +583,17 @@ Never claim success you did not verify. Never discard partial work. Never commit
 unless the parent brief explicitly required it; leave the worktree for the parent.
 
 ---
+
+## Brief lint (Jev, advisory)
+
+`dispatch` lints `$DIR/brief.md` against the Phase 3 contract by itself and
+writes `$DIR/brief-lint.json`; a warning on stderr names what is missing
+(`goal`, `scope_in`, `scope_out`, `acceptance`, `verify`, `workdir`). It never
+blocks. When it warns, fix the brief before the run rather than after a wasted
+one: `bash "$SSA" jev lint --dir "$DIR"` re-checks in about a second. A
+`needs_answers` warning means the brief leaves a decision open that the worker
+cannot ask about; decide it in the brief. Jev reads literally and can be wrong:
+if you can point at the line that satisfies an element, dispatch anyway.
 
 ## Parent brief quality gate
 

@@ -140,6 +140,26 @@ flowchart TB
 
 Formulas, thresholds and the ledger loop: [docs/ROUTING.md](docs/ROUTING.md).
 
+### Classifying and linting a brief (optional, TypeSafe Jev)
+
+Size, difficulty and kind steer quota floors, reasoning effort and the learned
+fit table, and until now the supervisor picked them by eye (and left `kind` at
+`default`, which starves the fit table). With a [TypeSafe](https://docs.typesafe.ai)
+key, `jev classify` answers all three from the task text in one call of about a
+second, and `jev lint` checks a brief against the brief contract before a
+worker burns a run on it. Jev is a non-generative model that returns calibrated
+probabilities, so the output is thresholded by code, not parsed from prose:
+
+```bash
+bash scripts/smart-subagents.sh jev classify --brief brief.md
+bash scripts/smart-subagents.sh jev lint --dir "$DIR"     # exit 1 names what is missing
+```
+
+Both are advisory and fail open: no key, no network or `SSA_JEV=0` exits 2 and
+the supervisor decides as before. `dispatch` runs the lint itself and only
+warns. The option keys are derived from `BASE_FLOOR`, `DIFFICULTY` and the fit
+table; `tests/test_jev.py` fails when they drift.
+
 ### Planning is a panel, not a guess
 
 Ask for a plan and you get one opinion with unknown blind spots. `plan` fans the goal out to N
@@ -292,6 +312,9 @@ agent runs this loop for you.
 | `SSA_DEADLINE_SECS` | off | Absolute ceiling on a background run |
 | `SSA_LEDGER` | `$XDG_STATE_HOME/smart-subagents/outcomes.jsonl` | Outcome ledger path |
 | `SSA_NO_QUOTA_SNAPSHOT` | unset | Skip the post-dispatch quota snapshot (offline machines, tests) |
+| `TYPESAFE_API_KEY` | unset, else `$XDG_CONFIG_HOME/typesafe/env` | Enables the advisory Jev judgments: `jev classify`, `jev lint` and the dispatch brief preflight. Without a key they are skipped and nothing else changes |
+| `SSA_JEV` | `1` | `0` turns every Jev call off (the test suite sets it) |
+| `SSA_JEV_MODEL` | `jev-latest` | Pin `jev-1.13.0` to freeze the model behind the judgments |
 | `CODEX_BIN` / `GROK_BIN` / `KIMI_BIN` / `CLAUDE_BIN` | auto-detected | Override worker binary paths. The variable name per worker comes from its registry entry, so a new worker declares its own |
 
 ## Architecture

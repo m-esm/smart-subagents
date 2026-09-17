@@ -886,6 +886,43 @@ print(
 PY
 }
 
+# Advisory brief-contract lint by TypeSafe's Jev (scripts/ssa/jev.py). Writes
+# DIR/brief-lint.json and names missing elements on stderr. Never blocks a
+# dispatch and never fails it: no key, no network and SSA_JEV=0 are all silent.
+_ssa_jev_lint() {
+  local dir="$1" brief="$2" out rc=0
+  [[ "${SSA_JEV:-1}" != "0" ]] || return 0
+  out="$(_ssa jev lint --brief "$brief" 2>/dev/null)" || rc=$?
+  [[ "$rc" -ne 2 && -n "$out" ]] || return 0
+  printf '%s\n' "$out" >"$dir/brief-lint.json" 2>/dev/null || true
+  if [[ "$rc" -eq 1 ]]; then
+    echo "smart-subagents: brief lint (advisory): missing $(printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(", ".join(d.get("missing", [])))' 2>/dev/null || echo '?'); see $dir/brief-lint.json" >&2
+  fi
+  return 0
+}
+
+cmd_jev() {
+  local action="${1:-}" brief="-" dir=""
+  [[ -n "$action" ]] || die "jev: classify|lint|preflight|probe required"
+  shift || true
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --brief) brief="${2:-}"; shift 2 ;;
+      --dir) dir="${2:-}"; shift 2 ;;
+      *) die "jev: unknown arg $1" ;;
+    esac
+  done
+  [[ -z "$dir" ]] || brief="$dir/brief.md"
+  case "$action" in
+    classify|lint|probe) _ssa jev "$action" --brief "$brief" ;;
+    preflight)
+      [[ -n "$dir" && -f "$dir/brief.md" ]] || die "jev preflight: --dir with a brief.md required"
+      _ssa_jev_lint "$dir" "$dir/brief.md"
+      ;;
+    *) die "jev: unknown action $action" ;;
+  esac
+}
+
 cmd_dispatch() {
   local dir="" worker="" background="" mode="implement" resume=""
   while [[ $# -gt 0 ]]; do
@@ -929,6 +966,7 @@ cmd_dispatch() {
   wt="$(cat "$dir/wt.txt" 2>/dev/null || true)"
   [[ -n "$wt" && -d "$wt" ]] || die "dispatch: missing worktree ($dir/wt.txt)"
   _ssa_bind_worker_args "$dir" "$worker" || die "dispatch: worker-args do not match $worker"
+  [[ -n "$resume" ]] || _ssa_jev_lint "$dir" "$brief"
 
   # Resume is by session id only: a worker that emitted none cannot be resumed,
   # and a handoff there needs a fresh brief instead.
@@ -2498,6 +2536,15 @@ PY
     _doc_row warn auth:claude "no security(1) on this platform, cannot check"
   fi
 
+  # Jev is advisory; its absence never stops a dispatch. Existence only.
+  if [[ "${SSA_JEV:-1}" == "0" ]]; then
+    _doc_row ok jev "disabled by SSA_JEV=0"
+  elif [[ -n "${TYPESAFE_API_KEY:-}" || -s "${XDG_CONFIG_HOME:-$HOME/.config}/typesafe/env" ]]; then
+    _doc_row ok jev "TypeSafe key present, brief classify and lint available"
+  else
+    _doc_row warn jev "no TYPESAFE_API_KEY, brief classify and lint are skipped"
+  fi
+
   local cache_dir cache_file perms age
   cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/smart-subagents"
   cache_file="$cache_dir/ai-cli-usage.json"
@@ -3230,6 +3277,17 @@ Usage: smart-subagents.sh <command> [options]
   scan-secrets --dir DIR
       Scan added lines and newly added environment files for secrets.
 
+  jev classify|lint [--brief FILE | --dir DIR]      jev probe
+      Advisory typed judgments about a brief from TypeSafe's Jev model, one
+      JSON object on stdout. classify returns size, difficulty and kind with a
+      confidence each, plus the flags line for init/pick; a name listed under
+      low_confidence is the supervisor's call. lint checks the brief contract
+      (goal, scope in and out, acceptance criteria, verify commands, absolute
+      workdir) and exits 1 naming what is missing. dispatch runs the same lint
+      by itself (jev preflight --dir DIR): it writes DIR/brief-lint.json, warns
+      on stderr, always exits 0 and never blocks. From classify and lint, exit 2 means
+      Jev was unavailable (no key, no network, SSA_JEV=0) and nothing was judged.
+
 Task record:
   Each task dir carries task.json (authoritative: state, class, attempts) and
   events.jsonl (append-only, one line per lifecycle point). The lifecycle is
@@ -3253,6 +3311,9 @@ Env:
   SSA_DEADLINE_SECS               absolute run deadline (default 0, off)
   SSA_KILL_GRACE_SECS             seconds between TERM and KILL (default 10)
   SSA_NO_QUOTA_SNAPSHOT=1         skip the post-dispatch quota snapshot
+  SSA_JEV=0                       turn off every Jev call (classify, lint, dispatch preflight)
+  SSA_JEV_MODEL                   Jev model name (default jev-latest; pin jev-1.13.0 to freeze)
+  TYPESAFE_API_KEY                TypeSafe key; else read from $XDG_CONFIG_HOME/typesafe/env
   SSA_LEDGER                      outcome ledger path
                                   (default: $XDG_STATE_HOME/smart-subagents/outcomes.jsonl)
   SSA_SHORT_HORIZON_HOURS         reset horizon that makes short-window quota free (default 4)
@@ -3283,6 +3344,7 @@ main() {
     doctor) cmd_doctor "$@" ;;
     plan) cmd_plan "$@" ;;
     scan-secrets) cmd_scan_secrets "$@" ;;
+    jev) cmd_jev "$@" ;;
     verify-summary|summary) cmd_verify_summary "$@" ;;
     diff) cmd_diff "$@" ;;
     help|-h|--help) cmd_help ;;

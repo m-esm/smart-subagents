@@ -9,6 +9,7 @@ trap 'rm -rf "$TEST_TMP"' EXIT
 export PYTHONPYCACHEPREFIX="$TEST_TMP/pycache"
 # Smoke never touches the network: the post-dispatch quota snapshot is off.
 export SSA_NO_QUOTA_SNAPSHOT=1
+export SSA_JEV=0
 
 pass() { echo "PASS $1"; }
 fail() { echo "FAIL $1" >&2; exit 1; }

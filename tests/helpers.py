@@ -156,6 +156,7 @@ class TempEnv:
                 "PATH": path,
                 # Never let a test reach the network for a quota snapshot.
                 "SSA_NO_QUOTA_SNAPSHOT": "1",
+                "SSA_JEV": "0",  # never spend a developer's real TypeSafe key
                 # cmd_verify (now inside dispatch) runs python3; macOS then
                 # leaves com.apple.python / python3.9 caches that make
                 # TemporaryDirectory.cleanup raise ENOTEMPTY.

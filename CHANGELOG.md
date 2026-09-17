@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.5
+
+- New `jev classify|lint|preflight|probe`: advisory typed judgments about a
+  brief from TypeSafe's Jev model (`scripts/ssa/jev.py`, stdlib only). classify
+  returns size, difficulty and kind with a confidence each plus the flags line
+  for `init`/`pick`; lint checks the brief contract and names what is missing.
+  Of three past briefs with a recorded class it matched two exactly (the third
+  read medium/hard against a recorded large/routine) and it filled `kind`,
+  which all three had left at `default`.
+- `dispatch` lints the brief before a fresh run, writes `brief-lint.json` and
+  warns on stderr. It never blocks, and a resume is not linted.
+- Everything fails open: no key, no network, a 4xx/5xx, a timeout or `SSA_JEV=0`
+  exits 2 and changes nothing. One retry on 429/529. `doctor` reports whether a
+  key is present (existence only).
+- Option keys are derived from `BASE_FLOOR`, `DIFFICULTY` and `FIT`;
+  `tests/test_jev.py` is the drift gate and runs against a local fake endpoint,
+  so the suite never reaches TypeSafe (`SSA_JEV=0` in the test env).
+
 ## 0.3.4
 
 Five-lens audit of SSA (context bounds, process lifecycle, log parsing,
