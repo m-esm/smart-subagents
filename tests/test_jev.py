@@ -22,7 +22,30 @@ from ssa import jev  # noqa: E402
 GOOD_BRIEF = (
     "Workdir: /Users/dev/proj/audio. Implement a ring buffer in src/ring.go.\n"
     "Do not touch the public API.\nAcceptance: go test passes.\nVerify: go test ./...\n"
+    "\n## Structural discovery\nCGC-SKIP: fixture; route=none; evidence=unit-test\n"
 )
+
+FLIPPED = """diff --git a/src/scene.py b/src/scene.py
+--- a/src/scene.py
++++ b/src/scene.py
+@@ -1,2 +1,2 @@
+-NODES = ("scoop",)
++NODES = ("scoop", "spare")
+diff --git a/tests/test_scene.py b/tests/test_scene.py
+--- a/tests/test_scene.py
++++ b/tests/test_scene.py
+@@ -4,3 +4,3 @@
+     def test_spare_is_not_a_body(self):
+-        self.assertNotIn("spare", NODES)
++        self.assertIn("spare", NODES)
+diff --git a/tests/test_new.py b/tests/test_new.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_new.py
+@@ -0,0 +1,2 @@
++def test_added():
++    assert True
+"""
 
 
 class FakeJev:
@@ -145,6 +168,32 @@ class Classify(unittest.TestCase):
         got = json.loads(out)
         self.assertEqual((got["size"], got["kind"]), ("medium", "default"))
         self.assertEqual(got["low_confidence"], ["kind", "size"])
+        self.assertEqual(got["runner_up"], {"size": "large"})
+
+    def test_difficulty_has_a_stricter_bar_and_names_its_rival(self):
+        # Measured: hard at 0.72 raised the quota floor and left a task with no
+        # eligible worker, while routine dispatched. 0.72 clears the general
+        # 0.5 bar, so difficulty carries its own.
+        fake = FakeJev(
+            {
+                "size": {"confidence": 0.72, "probabilities": {"2": 0.72, "1": 0.28}},
+                "difficulty": {"confidence": 0.72, "probabilities": {"2": 0.72, "1": 0.28}},
+                "kind": {"choice": "debug", "confidence": 1.0},
+            }
+        )
+        try:
+            with temp_env() as te:
+                rc, out, _ = run_ssa(
+                    "jev", "classify", "--brief", "-", env=jev_env(te, fake), input_text=GOOD_BRIEF
+                )
+        finally:
+            fake.close()
+        self.assertEqual(rc, 0)
+        got = json.loads(out)
+        self.assertEqual(got["difficulty"], "hard")
+        self.assertEqual(got["low_confidence"], ["difficulty"])
+        self.assertEqual(got["runner_up"], {"difficulty": "routine"})
+        self.assertGreater(jev.LOW_CONFIDENCE_BY["difficulty"], jev.LOW_CONFIDENCE)
 
 
 class Lint(unittest.TestCase):
@@ -172,8 +221,126 @@ class Lint(unittest.TestCase):
             fake.close()
         self.assertEqual(rc, 1)
         got = json.loads(out)
-        self.assertEqual(got["missing"], ["acceptance", "workdir"])
+        self.assertEqual(got["missing"], ["acceptance", "workdir", "structural"])
         self.assertTrue(any(w.startswith("needs_answers") for w in got["warnings"]))
+
+    def test_lint_names_the_section_dispatch_would_refuse_over(self):
+        # A brief that lints clean must be a brief that dispatches: the
+        # structural gate is code in dispatch, so lint checks it in code too.
+        bare = GOOD_BRIEF.split("\n## Structural")[0]
+        for text, legacy, want in (
+            (bare, None, ["structural"]),
+            (bare + "\n## Structural discovery\n", None, ["structural"]),
+            (bare, "1", []),
+            (GOOD_BRIEF, None, []),
+        ):
+            fake = FakeJev(all_yes())
+            try:
+                with temp_env() as te:
+                    extra = {"SSA_STRUCTURAL_LEGACY": legacy} if legacy else {}
+                    _rc, out, _ = run_ssa("jev", "lint", env=jev_env(te, fake, **extra), input_text=text)
+            finally:
+                fake.close()
+            self.assertEqual(json.loads(out)["missing"], want, text[-40:])
+
+
+class Review(unittest.TestCase):
+    """Post-run diff review: only existing test files, advisory, fails open."""
+
+    def test_flags_a_flipped_assertion_and_sends_only_test_hunks(self):
+        fake = FakeJev({"inverts_assertion": {"noul": 0.94}, "loosens_threshold": {"noul": 0.1}})
+        try:
+            with temp_env() as te:
+                rc, out, _ = run_ssa("jev", "review", env=jev_env(te, fake), input_text=FLIPPED)
+        finally:
+            fake.close()
+        self.assertEqual(rc, 1, out)
+        got = json.loads(out)
+        self.assertEqual(got["flags"], ["inverts_assertion"])
+        self.assertEqual(got["files"], ["tests/test_scene.py"])
+        sent = fake.requests[0]["body"]
+        self.assertIn("assertNotIn", sent["state"]["diff"])
+        self.assertNotIn("src/scene.py", sent["state"]["diff"])
+        self.assertNotIn("test_new.py", sent["state"]["diff"])
+        self.assertEqual(set(sent["questions"]), set(jev.REVIEW_QUESTIONS))
+
+    def test_clean_test_diff_exits_0(self):
+        fake = FakeJev({qid: {"noul": 0.03} for qid in jev.REVIEW_QUESTIONS})
+        try:
+            with temp_env() as te:
+                rc, out, _ = run_ssa("jev", "review", env=jev_env(te, fake), input_text=FLIPPED)
+        finally:
+            fake.close()
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(json.loads(out)["reviewed"])
+
+    def test_no_existing_test_touched_means_no_call(self):
+        src_only = FLIPPED.split("diff --git a/tests/test_scene.py")[0]
+        fake = FakeJev()
+        try:
+            with temp_env() as te:
+                rc, out, _ = run_ssa("jev", "review", env=jev_env(te, fake), input_text=src_only)
+        finally:
+            fake.close()
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(json.loads(out)["reviewed"])
+        self.assertEqual(fake.requests, [])
+
+    def test_test_paths(self):
+        for path, want in (
+            ("tests/test_cable.py", True), ("pkg/ring_test.go", True), ("web/a.spec.ts", True),
+            ("src/__tests__/x.js", True), ("src/contest/x.py", False), ("latest/run.py", False),
+        ):
+            self.assertEqual(bool(jev.TEST_PATH_RE.search(path)), want, path)
+
+
+class VerifyReview(unittest.TestCase):
+    """_ssa_jev_review: records, folds into outcome.json, warns, never fails."""
+
+    def make_task(self, te):
+        from helpers import make_git_repo
+
+        repo = make_git_repo(
+            te.root / "repo", {"tests/test_scene.py": "def test_x():\n    assert 'spare' not in NODES\n"}
+        )
+        (repo / "tests" / "test_scene.py").write_text("def test_x():\n    assert 'spare' in NODES\n")
+        task = te.root / "task"
+        task.mkdir()
+        (task / "wt.txt").write_text(str(repo) + "\n")
+        import subprocess
+
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+        (task / "base-sha.txt").write_text(sha + "\n")
+        (task / "outcome.json").write_text(json.dumps({"verify": {"verdict": "pass"}}))
+        return task
+
+    def test_warns_and_folds_into_the_outcome_without_touching_the_verdict(self):
+        fake = FakeJev({"inverts_assertion": {"noul": 0.91}})
+        try:
+            with temp_env() as te:
+                task = self.make_task(te)
+                rc, _out, err = run_ssa("jev", "review", "--dir", str(task), env=jev_env(te, fake))
+                self.assertEqual(rc, 0, err)
+                self.assertIn("inverts_assertion=0.91 in tests/test_scene.py", err)
+                doc = json.loads((task / "outcome.json").read_text())
+                self.assertEqual(doc["verify"]["verdict"], "pass")
+                self.assertEqual(doc["jev_review"]["flags"], ["inverts_assertion"])
+        finally:
+            fake.close()
+
+    def test_silent_when_jev_is_off_or_down(self):
+        down = FakeJev(status=503)
+        try:
+            with temp_env() as te:
+                task = self.make_task(te)
+                for env in (te.env, jev_env(te, down)):
+                    rc, _out, err = run_ssa("jev", "review", "--dir", str(task), env=env)
+                    self.assertEqual(rc, 0, err)
+                    self.assertEqual(err.strip(), "")
+                    self.assertFalse((task / "diff-review.json").exists())
+                    self.assertNotIn("jev_review", json.loads((task / "outcome.json").read_text()))
+        finally:
+            down.close()
 
 
 class FailOpen(unittest.TestCase):

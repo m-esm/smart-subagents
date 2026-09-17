@@ -901,9 +901,39 @@ _ssa_jev_lint() {
   return 0
 }
 
+# Advisory review of what the worker did to EXISTING tests, by Jev. A green
+# verify proves the commands pass, not that a test was fixed rather than bent:
+# a worker once turned assertNotIn into assertIn and called the test stale.
+# Writes DIR/diff-review.json, folds it into outcome.json as "jev_review" and
+# names the flags on stderr. Never changes the verdict; every failure is silent.
+_ssa_jev_review() {
+  local dir="$1" wt base out rv=0
+  [[ "${SSA_JEV:-1}" != "0" ]] || return 0
+  wt="$(_read1 "$dir/wt.txt")"; base="$(_read1 "$dir/base-sha.txt")"
+  [[ -n "$wt" && -d "$wt" && -n "$base" ]] || return 0
+  out="$(git -C "$wt" diff "$base" 2>/dev/null | _ssa jev review --brief - 2>/dev/null)" || rv=$?
+  [[ "$rv" -ne 2 && -n "$out" ]] || return 0
+  printf '%s\n' "$out" >"$dir/diff-review.json" 2>/dev/null || true
+  python3 - "$dir" <<'PY' 2>/dev/null || true
+import json, sys
+from pathlib import Path
+d = Path(sys.argv[1])
+review = json.loads((d / "diff-review.json").read_text())
+oc = d / "outcome.json"
+if oc.is_file():
+    doc = json.loads(oc.read_text())
+    doc["jev_review"] = {k: review.get(k) for k in ("reviewed", "ok", "flags", "scores", "files")}
+    oc.write_text(json.dumps(doc, indent=2) + "\n")
+PY
+  if [[ "$rv" -eq 1 ]]; then
+    echo "smart-subagents: diff review (advisory): $(printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(", ".join("%s=%.2f" % (f, d["scores"][f]) for f in d.get("flags", [])) + " in " + ", ".join(d.get("files", [])))' 2>/dev/null || echo '?'); read those hunks before integrating, see $dir/diff-review.json" >&2
+  fi
+  return 0
+}
+
 cmd_jev() {
   local action="${1:-}" brief="-" dir=""
-  [[ -n "$action" ]] || die "jev: classify|lint|preflight|probe required"
+  [[ -n "$action" ]] || die "jev: classify|lint|review|preflight|probe required"
   shift || true
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -915,6 +945,14 @@ cmd_jev() {
   [[ -z "$dir" ]] || brief="$dir/brief.md"
   case "$action" in
     classify|lint|probe) _ssa jev "$action" --brief "$brief" ;;
+    review)
+      if [[ -n "$dir" ]]; then
+        _ssa_jev_review "$dir"
+        [[ ! -f "$dir/diff-review.json" ]] || cat "$dir/diff-review.json"
+      else
+        _ssa jev review --brief "$brief"
+      fi
+      ;;
     preflight)
       [[ -n "$dir" && -f "$dir/brief.md" ]] || die "jev preflight: --dir with a brief.md required"
       _ssa_jev_lint "$dir" "$dir/brief.md"
@@ -2870,6 +2908,7 @@ if out_of_scope:
 sys.exit({"pass": 0, "fail": 1, "inconclusive": 2}[verdict])
 PY
   rm -f "$dir/verify-changed.z"
+  _ssa_jev_review "$dir"
   local verdict_state failure_class=""
   case "$rc" in
     0) verdict_state="verified" ;;
@@ -3278,6 +3317,7 @@ Usage: smart-subagents.sh <command> [options]
       Scan added lines and newly added environment files for secrets.
 
   jev classify|lint [--brief FILE | --dir DIR]      jev probe
+  jev review [--brief DIFF | --dir DIR]
       Advisory typed judgments about a brief from TypeSafe's Jev model, one
       JSON object on stdout. classify returns size, difficulty and kind with a
       confidence each, plus the flags line for init/pick; a name listed under
@@ -3287,6 +3327,14 @@ Usage: smart-subagents.sh <command> [options]
       by itself (jev preflight --dir DIR): it writes DIR/brief-lint.json, warns
       on stderr, always exits 0 and never blocks. From classify and lint, exit 2 means
       Jev was unavailable (no key, no network, SSA_JEV=0) and nothing was judged.
+      difficulty moves the quota floor, so it is listed under low_confidence
+      below 0.8 (0.5 for the rest) and runner_up names the rival level. lint
+      also reports a missing Structural discovery section as `structural`, in
+      code, so a brief that lints clean is one dispatch accepts.
+      review judges the hunks of EXISTING test files in a unified diff:
+      inverts_assertion, loosens_threshold, disables_test. verify runs it by
+      itself, writes DIR/diff-review.json, folds it into outcome.json as
+      jev_review and warns on stderr. It never changes the verdict.
 
 Task record:
   Each task dir carries task.json (authoritative: state, class, attempts) and

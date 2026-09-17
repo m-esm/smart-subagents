@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.6
+
+Three gaps measured on one real dispatch (six red tests, verified-pass):
+
+- `verify` now asks Jev whether the worker bent EXISTING tests: flipped an
+  assertion, loosened a numeric check, or disabled a test. Only test-file
+  hunks that lost a line are sent. Result in `diff-review.json` and
+  `outcome.json` `jev_review`, warning on stderr, verdict untouched. The run
+  that prompted it passed verify while turning `assertNotIn` into `assertIn`
+  on a test that encoded a user decision. `jev review --dir|--brief` runs it
+  by hand.
+- `jev lint` reports a missing `## Structural discovery` section as
+  `structural`, checked in code. Before this a brief scored 0.97+ on every
+  element and `dispatch` refused it one step later.
+- `difficulty` gets its own low-confidence bar (0.8, the rest stay 0.5) and
+  `runner_up` names the rival level. `hard` at 0.72 had raised the quota floor
+  to "no eligible worker" unflagged while `routine` dispatched.
+- One retry on 503 as well as 429/529.
+
 ## 0.3.5
 
 - New `jev classify|lint|preflight|probe`: advisory typed judgments about a

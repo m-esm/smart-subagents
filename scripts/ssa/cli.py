@@ -14,6 +14,7 @@ and where the task is in its lifecycle.
     python3 scripts/ssa/cli.py state --dir D
     python3 scripts/ssa/cli.py transition --dir D --to STATE
     python3 scripts/ssa/cli.py jev classify|lint --brief PATH   (advisory)
+    python3 scripts/ssa/cli.py jev review --brief DIFF          (advisory, a unified diff)
     python3 scripts/ssa/cli.py jev probe
 
 Exit codes: 0 ok, 1 refused (bad registry, illegal transition, unknown worker).
@@ -303,6 +304,10 @@ def cmd_jev(args) -> int:
         if args.action == "classify":
             print(json.dumps(jev_mod.classify_brief(text)))
             return 0
+        if args.action == "review":
+            result = jev_mod.review_diff(text)
+            print(json.dumps(result))
+            return 0 if result["ok"] else 1
         result = jev_mod.lint_brief(text)
         print(json.dumps(result))
         return 0 if result["ok"] else 1
@@ -457,8 +462,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(func=cmd_transition)
     p = sub.add_parser("jev", help="advisory typed judgments about a brief (TypeSafe Jev)")
-    p.add_argument("action", choices=["classify", "lint", "probe"])
-    p.add_argument("--brief", default="-", help="brief file, or - for stdin")
+    p.add_argument("action", choices=["classify", "lint", "review", "probe"])
+    p.add_argument("--brief", default="-", help="brief file (a unified diff for review), or - for stdin")
     p.set_defaults(func=cmd_jev)
 
     return ap
