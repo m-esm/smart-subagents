@@ -305,7 +305,11 @@ def cmd_jev(args) -> int:
             print(json.dumps(jev_mod.classify_brief(text)))
             return 0
         if args.action == "review":
-            result = jev_mod.review_diff(text)
+            report = ""
+            path = getattr(args, "report", "") or ""
+            if path:
+                report = Path(path).read_text()
+            result = jev_mod.review_diff(text, report=report)
             print(json.dumps(result))
             return 0 if result["ok"] else 1
         result = jev_mod.lint_brief(text)
@@ -464,6 +468,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("jev", help="advisory typed judgments about a brief (TypeSafe Jev)")
     p.add_argument("action", choices=["classify", "lint", "review", "probe"])
     p.add_argument("--brief", default="-", help="brief file (a unified diff for review), or - for stdin")
+    p.add_argument("--report", default="", help="worker last-msg.txt for review claim questions")
     p.set_defaults(func=cmd_jev)
 
     return ap

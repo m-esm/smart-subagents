@@ -158,13 +158,16 @@ bash scripts/smart-subagents.sh jev lint --dir "$DIR"     # exit 1 names what is
 `difficulty` is the label that moves the quota floor (a wrong `hard` can leave
 a task with no eligible worker), so it lands in `low_confidence` below 0.8
 where the other two use 0.5, and `runner_up` names the level it nearly was.
-`lint` checks two facts in code, not with the model: an absolute workdir and
-the `## Structural discovery` section `dispatch` refuses a brief without.
+`flags` (and `init --brief`) already downshift that shaky label so dispatch
+uses `routine` when `hard` is only 0.72. `lint` checks two facts in code, not
+with the model: an absolute workdir and the `## Structural discovery` section
+`dispatch` refuses a brief without.
 
 A green `verify` proves the commands pass, not that a test was fixed rather
 than bent to fit. `verify` therefore sends the hunks of EXISTING test files
-to Jev and asks three literal questions: was an assertion flipped to its
-opposite, was a numeric check loosened, was a test disabled. Flags land in
+to Jev (and the worker's `last-msg.txt`) and asks whether an assertion was
+flipped, a numeric check loosened, a test disabled, or the report dismissed
+a user-encoded test / claimed a change the diff lacks. Flags land in
 `diff-review.json` and in `outcome.json` under `jev_review`, with a warning on
 stderr. The verdict never changes; a flag means read those hunks yourself.
 

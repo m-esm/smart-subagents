@@ -477,14 +477,35 @@ _init_rollback() {
   exit "$rc"
 }
 
+# Apply classify JSON on stdin. Unset axes take `effective` (downshifted
+# low-confidence scores). Explicit --size/--difficulty/--kind win.
+_ssa_apply_classify() {
+  python3 -c '
+import json, sys
+cls = json.load(sys.stdin)
+size, diff, kind = sys.argv[4], sys.argv[5], sys.argv[6]
+if cls.get("available"):
+    eff = cls.get("effective") or {}
+    if sys.argv[1] != "1":
+        size = eff.get("size") or cls.get("size") or size
+    if sys.argv[2] != "1":
+        diff = eff.get("difficulty") or cls.get("difficulty") or diff
+    if sys.argv[3] != "1":
+        kind = eff.get("kind") or cls.get("kind") or kind
+print(size, diff, kind)
+' "$@"
+}
+
 cmd_init() {
-  local repo="" size="medium" preferred="" difficulty="routine" kind="default"
+  local repo="" size="medium" preferred="" difficulty="routine" kind="default" brief=""
+  local size_set=0 difficulty_set=0 kind_set=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --repo) repo="${2:-}"; shift 2 ;;
-      --size) size="${2:-}"; shift 2 ;;
-      --difficulty) difficulty="${2:-}"; shift 2 ;;
-      --kind) kind="${2:-}"; shift 2 ;;
+      --size) size="${2:-}"; size_set=1; shift 2 ;;
+      --difficulty) difficulty="${2:-}"; difficulty_set=1; shift 2 ;;
+      --kind) kind="${2:-}"; kind_set=1; shift 2 ;;
+      --brief) brief="${2:-}"; shift 2 ;;
       --prefer) preferred="${2:-}"; shift 2 ;;
       *) die "init: unknown arg $1" ;;
     esac
@@ -508,6 +529,15 @@ cmd_init() {
 
   echo "$task_id" >"$dir/task-id.txt"
   echo "$repo" >"$dir/repo.txt"
+  if [[ -n "$brief" ]]; then
+    [[ -f "$brief" ]] || die "init: --brief not a file: $brief"
+    local cls rc=0
+    cls="$(_ssa jev classify --brief "$brief" 2>/dev/null)" || rc=$?
+    if [[ "$rc" -ne 2 && -n "$cls" ]]; then
+      printf '%s\n' "$cls" >"$dir/classify.json"
+      read -r size difficulty kind <<<"$(printf '%s' "$cls" | _ssa_apply_classify "$size_set" "$difficulty_set" "$kind_set" "$size" "$difficulty" "$kind")"
+    fi
+  fi
   echo "$size" >"$dir/size.txt"
   echo "$difficulty" >"$dir/difficulty.txt"
   echo "$kind" >"$dir/kind.txt"
@@ -911,7 +941,9 @@ _ssa_jev_review() {
   [[ "${SSA_JEV:-1}" != "0" ]] || return 0
   wt="$(_read1 "$dir/wt.txt")"; base="$(_read1 "$dir/base-sha.txt")"
   [[ -n "$wt" && -d "$wt" && -n "$base" ]] || return 0
-  out="$(git -C "$wt" diff "$base" 2>/dev/null | _ssa jev review --brief - 2>/dev/null)" || rv=$?
+  local review_args=(--brief -)
+  [[ -s "$dir/last-msg.txt" ]] && review_args+=(--report "$dir/last-msg.txt")
+  out="$(git -C "$wt" diff "$base" 2>/dev/null | _ssa jev review "${review_args[@]}" 2>/dev/null)" || rv=$?
   [[ "$rv" -ne 2 && -n "$out" ]] || return 0
   printf '%s\n' "$out" >"$dir/diff-review.json" 2>/dev/null || true
   python3 - "$dir" <<'PY' 2>/dev/null || true
@@ -932,13 +964,14 @@ PY
 }
 
 cmd_jev() {
-  local action="${1:-}" brief="-" dir=""
+  local action="${1:-}" brief="-" dir="" report=""
   [[ -n "$action" ]] || die "jev: classify|lint|review|preflight|probe required"
   shift || true
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --brief) brief="${2:-}"; shift 2 ;;
       --dir) dir="${2:-}"; shift 2 ;;
+      --report) report="${2:-}"; shift 2 ;;
       *) die "jev: unknown arg $1" ;;
     esac
   done
@@ -949,6 +982,8 @@ cmd_jev() {
       if [[ -n "$dir" ]]; then
         _ssa_jev_review "$dir"
         [[ ! -f "$dir/diff-review.json" ]] || cat "$dir/diff-review.json"
+      elif [[ -n "$report" ]]; then
+        _ssa jev review --brief "$brief" --report "$report"
       else
         _ssa jev review --brief "$brief"
       fi
@@ -3206,9 +3241,11 @@ cmd_help() {
 Usage: smart-subagents.sh <command> [options]
 
   init --repo PATH [--size tiny|small|medium|large] [--kind KIND]
-       [--difficulty trivial|routine|hard|frontier] [--prefer CLI]
+       [--difficulty trivial|routine|hard|frontier] [--brief FILE] [--prefer CLI]
       Mint a private task dir, run usage, create an isolated worktree,
       pick a worker. Prints JSON with task_id, dir, worker, reason.
+      --brief runs jev classify first; low-confidence difficulty/size are
+      downshifted (hard@0.72 -> routine) unless you passed that flag.
 
   pick --size SIZE [--kind KIND] [--difficulty LEVEL] [--prefer CLI]
        [--fresh] [--out DIR] [--explain]
@@ -3317,11 +3354,12 @@ Usage: smart-subagents.sh <command> [options]
       Scan added lines and newly added environment files for secrets.
 
   jev classify|lint [--brief FILE | --dir DIR]      jev probe
-  jev review [--brief DIFF | --dir DIR]
+  jev review [--brief DIFF | --dir DIR] [--report LAST-MSG]
       Advisory typed judgments about a brief from TypeSafe's Jev model, one
       JSON object on stdout. classify returns size, difficulty and kind with a
-      confidence each, plus the flags line for init/pick; a name listed under
-      low_confidence is the supervisor's call. lint checks the brief contract
+      confidence each, plus effective/flags for init/pick: a low-confidence
+      difficulty or size is downshifted (hard@0.72 -> routine) so the quota
+      floor does not jump. lint checks the brief contract
       (goal, scope in and out, acceptance criteria, verify commands, absolute
       workdir) and exits 1 naming what is missing. dispatch runs the same lint
       by itself (jev preflight --dir DIR): it writes DIR/brief-lint.json, warns
@@ -3332,9 +3370,11 @@ Usage: smart-subagents.sh <command> [options]
       also reports a missing Structural discovery section as `structural`, in
       code, so a brief that lints clean is one dispatch accepts.
       review judges the hunks of EXISTING test files in a unified diff:
-      inverts_assertion, loosens_threshold, disables_test. verify runs it by
-      itself, writes DIR/diff-review.json, folds it into outcome.json as
-      jev_review and warns on stderr. It never changes the verdict.
+      inverts_assertion, loosens_threshold, disables_test, and when --report
+      (verify passes last-msg.txt) also dismisses_encoded_decision and
+      claim_not_in_diff. verify runs it by itself, writes DIR/diff-review.json,
+      folds it into outcome.json as jev_review and warns on stderr. It never
+      changes the verdict.
 
 Task record:
   Each task dir carries task.json (authoritative: state, class, attempts) and
