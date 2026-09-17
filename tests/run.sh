@@ -9,6 +9,7 @@ RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/ssa-run.XXXXXX")"
 trap 'rm -rf "$RUN_TMP"' EXIT
 
 export SSA_NO_QUOTA_SNAPSHOT=1
+export SSA_JEV=0
 export XDG_STATE_HOME="$RUN_TMP/state"
 export XDG_CACHE_HOME="$RUN_TMP/cache"
 mkdir -p "$XDG_STATE_HOME" "$XDG_CACHE_HOME"
