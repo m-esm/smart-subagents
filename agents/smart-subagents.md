@@ -72,7 +72,10 @@ printf '%s' "$PARENT_TASK_TEXT" | bash "$SSA" jev classify
 #  "low_confidence":[],"flags":"--size small --difficulty hard --kind impl"}
 ```
 
-Pass `flags` to `init` / `pick`. A name under `low_confidence` is yours to
+Pass `flags` to `init` / `pick`. `difficulty` is listed under `low_confidence`
+below 0.8 (the others below 0.5) because it moves the quota floor: when it is
+listed and `init` answers "no eligible worker", re-pick at `runner_up.difficulty`
+before giving up. A name under `low_confidence` is yours to
 decide; everything else you take as given unless the repo contradicts it (a
 "rename" that turns out to cross a public API is not trivial). Always pass
 `--kind`: a ledger full of `default` teaches the fit table nothing. Exit 2 is
@@ -588,12 +591,23 @@ unless the parent brief explicitly required it; leave the worktree for the paren
 
 `dispatch` lints `$DIR/brief.md` against the Phase 3 contract by itself and
 writes `$DIR/brief-lint.json`; a warning on stderr names what is missing
-(`goal`, `scope_in`, `scope_out`, `acceptance`, `verify`, `workdir`). It never
-blocks. When it warns, fix the brief before the run rather than after a wasted
+(`goal`, `scope_in`, `scope_out`, `acceptance`, `verify`, `workdir`,
+`structural`). The lint itself never blocks; `structural` is the one item
+`dispatch` then refuses over, so fix it first. When it warns, fix the brief before the run rather than after a wasted
 one: `bash "$SSA" jev lint --dir "$DIR"` re-checks in about a second. A
 `needs_answers` warning means the brief leaves a decision open that the worker
 cannot ask about; decide it in the brief. Jev reads literally and can be wrong:
 if you can point at the line that satisfies an element, dispatch anyway.
+
+## Test-diff review (Jev, advisory)
+
+`verify` sends the hunks of existing test files to Jev and records
+`jev_review` in `outcome.json`: `inverts_assertion`, `loosens_threshold`,
+`disables_test`. It never changes the verdict. A flag is not a rejection: a
+design that moved on purpose flips assertions legitimately. It means a pass is
+not yet yours to report. Read the flagged hunks, find the commit the worker
+cites, and check whether the old assertion encoded a decision somebody made.
+If it did, the code regressed and the test was right.
 
 ## Parent brief quality gate
 

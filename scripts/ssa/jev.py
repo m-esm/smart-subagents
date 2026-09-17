@@ -39,7 +39,16 @@ KEY_ENV = "TYPESAFE_API_KEY"
 # this is its own lint finding, and the head carries the contract anyway.
 MAX_BRIEF_CHARS = 24000
 LOW_CONFIDENCE = 0.5
+# Difficulty is the label that moves the quota floor, so a wrong "hard" can
+# leave a task with no eligible worker. It gets a stricter bar than the rest
+# (measured: hard at 0.72 blocked a dispatch that routine carried).
+LOW_CONFIDENCE_BY: dict[str, float] = {"difficulty": 0.8}
 LINT_THRESHOLD = 0.5
+REVIEW_THRESHOLD = 0.5
+# Paths whose hunks a diff review judges. A fact a regex can check.
+TEST_PATH_RE = re.compile(
+    r"(^|/)(tests?|__tests__|spec)/|(^|/)test_[^/]+$|_test\.[a-z]+$|\.(test|spec)\.[a-z]+$"
+)
 
 # Ordered weakest to strongest; keys must equal BASE_FLOOR's.
 SIZE_LEVELS: dict[str, str] = {
@@ -109,6 +118,27 @@ LINT_QUESTIONS: dict[str, dict[str, Any]] = {
 }
 
 
+# Post-run review of what a worker did to EXISTING tests. A green verify only
+# proves the commands pass; it cannot tell a fixed bug from a test bent to fit.
+REVIEW_QUESTIONS: dict[str, dict[str, str]] = {
+    "inverts_assertion": {
+        "instructions": "In `diff`, is there a removed line and an added line that assert opposite things about the same subject?",
+        "true": "An existing assertion was flipped to its opposite, such as assertNotIn replaced by assertIn, assertFalse by assertTrue, toBe(false) by toBe(true), == by !=, or not-raises by raises",
+        "false": "No existing assertion was flipped; assertions were only added, renamed, retargeted at a renamed symbol, or left alone",
+    },
+    "loosens_threshold": {
+        "instructions": "In `diff`, is an existing numeric check replaced by one that is easier to pass, or removed without a numeric replacement?",
+        "true": "A bound, tolerance, count or timeout in an existing assertion was widened, or a numeric assertion was deleted or swapped for a non-numeric one",
+        "false": "Every existing numeric check is unchanged or stricter, or the diff contains no numeric checks",
+    },
+    "disables_test": {
+        "instructions": "In `diff`, is an existing test deleted, skipped, marked expected-failure, or emptied of its assertions?",
+        "true": "A test function or case was removed, given a skip or xfail marker, commented out, or reduced to a body that asserts nothing",
+        "false": "Every test that existed before still runs and still asserts something",
+    },
+}
+
+
 class JevUnavailable(Exception):
     """No key, disabled, or the service could not be reached in time."""
 
@@ -168,7 +198,7 @@ def ask(state: Any, questions: dict[str, dict], timeout: float = 8.0) -> dict:
                 return json.load(resp)
         except urllib.error.HTTPError as exc:
             last = f"HTTP {exc.code}"
-            if exc.code in (429, 529) and attempt == 1:
+            if exc.code in (429, 503, 529) and attempt == 1:
                 try:
                     wait = float(exc.headers.get("retry-after") or 1.0)
                 except ValueError:
@@ -196,6 +226,16 @@ def _score_label(answer: dict, levels: dict[str, str]) -> tuple[str, float]:
     else:
         idx = min(len(names) - 1, max(0, round(float(answer.get("score", 0)))))
     return names[idx], float(answer.get("confidence", 0.0))
+
+
+def _runner_up(answer: dict, levels: dict[str, str]) -> Optional[str]:
+    """The second most probable level, so a shaky label comes with its rival."""
+    names = list(levels)
+    probs = answer.get("probabilities") or {}
+    ranked = sorted(range(len(names)), key=lambda i: float(probs.get(str(i), 0.0)), reverse=True)
+    if len(ranked) < 2 or float(probs.get(str(ranked[1]), 0.0)) <= 0.0:
+        return None
+    return names[ranked[1]]
 
 
 def _clip(text: str) -> str:
@@ -226,13 +266,19 @@ def classify_brief(text: str) -> dict:
     kind = kind_a.get("choice") if kind_a.get("choice") in KIND_OPTIONS else "default"
     kind_c = float(kind_a.get("confidence", 0.0))
     conf = {"size": round(size_c, 3), "difficulty": round(diff_c, 3), "kind": round(kind_c, 3)}
+    low = sorted(k for k, v in conf.items() if v < LOW_CONFIDENCE_BY.get(k, LOW_CONFIDENCE))
+    rivals = {
+        "size": _runner_up(ans.get("size") or {}, SIZE_LEVELS),
+        "difficulty": _runner_up(ans.get("difficulty") or {}, DIFFICULTY_LEVELS),
+    }
     return {
         "available": True,
         "size": size,
         "difficulty": diff,
         "kind": kind,
         "confidence": conf,
-        "low_confidence": sorted(k for k, v in conf.items() if v < LOW_CONFIDENCE),
+        "low_confidence": low,
+        "runner_up": {k: rivals[k] for k in low if rivals.get(k)},
         "flags": f"--size {size} --difficulty {diff} --kind {kind}",
         "model": out.get("model"),
         "input_tokens": (out.get("usage") or {}).get("input_tokens"),
@@ -263,6 +309,13 @@ def lint_brief(text: str) -> dict:
     # An absolute workdir is a fact a regex can check; no model needed.
     if not re.search(r"(?m)(^|[\s`'\"(])(/[\w.@+-]+){2,}", text):
         missing.append("workdir")
+    # dispatch refuses a brief without this section (_ssa_require_structural);
+    # say so here, so a brief that lints clean is a brief that dispatches.
+    if os.environ.get("SSA_STRUCTURAL_LEGACY") != "1" and not (
+        re.search(r"(?m)^## Structural (discovery|context)[ \t]*$", text)
+        and re.search(r"(?m)^CGC(-SKIP)?:[ \t]+\S", text)
+    ):
+        missing.append("structural")
     if len(text) > MAX_BRIEF_CHARS:
         warnings.append(f"brief is {len(text)} chars; only the first {MAX_BRIEF_CHARS} were judged")
     return {
@@ -271,6 +324,55 @@ def lint_brief(text: str) -> dict:
         "missing": missing,
         "warnings": warnings,
         "scores": scores,
+        "model": out.get("model"),
+        "input_tokens": (out.get("usage") or {}).get("input_tokens"),
+    }
+
+
+def test_hunks(diff: str) -> tuple[str, list[str]]:
+    """The per-file sections of a unified diff that touch EXISTING test files."""
+    kept, paths = [], []
+    for section in re.split(r"(?m)^(?=diff --git )", diff):
+        m = re.match(r"diff --git a/(\S+) b/(\S+)", section)
+        if not m or not TEST_PATH_RE.search(m.group(2)):
+            continue
+        # A brand new test file cannot weaken a test that did not exist.
+        if re.search(r"(?m)^new file mode ", section) or not re.search(r"(?m)^-(?!--)", section):
+            continue
+        kept.append(section)
+        paths.append(m.group(2))
+    return "".join(kept), paths
+
+
+def review_diff(diff: str) -> dict:
+    """Did the worker bend existing tests? Advisory; never a verdict."""
+    hunks, paths = test_hunks(diff)
+    if not hunks:
+        return {"available": True, "reviewed": False, "ok": True, "flags": [],
+                "reason": "no existing test file lost a line"}
+    questions = {
+        qid: {
+            "type": "noul",
+            "instructions": q["instructions"],
+            "criteria": {"true": q["true"], "false": q["false"]},
+        }
+        for qid, q in REVIEW_QUESTIONS.items()
+    }
+    out = ask({"diff": _clip(hunks)}, questions)
+    ans = out.get("answers") or {}
+    scores = {qid: round(float((ans.get(qid) or {}).get("noul", 0.0)), 3) for qid in REVIEW_QUESTIONS}
+    flags = [qid for qid in REVIEW_QUESTIONS if scores[qid] >= REVIEW_THRESHOLD]
+    warnings = []
+    if len(hunks) > MAX_BRIEF_CHARS:
+        warnings.append(f"test diff is {len(hunks)} chars; only the first {MAX_BRIEF_CHARS} were judged")
+    return {
+        "available": True,
+        "reviewed": True,
+        "ok": not flags,
+        "flags": flags,
+        "scores": scores,
+        "files": paths,
+        "warnings": warnings,
         "model": out.get("model"),
         "input_tokens": (out.get("usage") or {}).get("input_tokens"),
     }

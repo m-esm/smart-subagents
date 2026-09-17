@@ -155,7 +155,25 @@ bash scripts/smart-subagents.sh jev classify --brief brief.md
 bash scripts/smart-subagents.sh jev lint --dir "$DIR"     # exit 1 names what is missing
 ```
 
-Both are advisory and fail open: no key, no network or `SSA_JEV=0` exits 2 and
+`difficulty` is the label that moves the quota floor (a wrong `hard` can leave
+a task with no eligible worker), so it lands in `low_confidence` below 0.8
+where the other two use 0.5, and `runner_up` names the level it nearly was.
+`lint` checks two facts in code, not with the model: an absolute workdir and
+the `## Structural discovery` section `dispatch` refuses a brief without.
+
+A green `verify` proves the commands pass, not that a test was fixed rather
+than bent to fit. `verify` therefore sends the hunks of EXISTING test files
+to Jev and asks three literal questions: was an assertion flipped to its
+opposite, was a numeric check loosened, was a test disabled. Flags land in
+`diff-review.json` and in `outcome.json` under `jev_review`, with a warning on
+stderr. The verdict never changes; a flag means read those hunks yourself.
+
+```bash
+bash scripts/smart-subagents.sh jev review --dir "$DIR"   # exit 0 always; flags on stderr
+git diff main | bash scripts/smart-subagents.sh jev review   # exit 1 when something is flagged
+```
+
+All of it is advisory and fails open: no key, no network or `SSA_JEV=0` exits 2 and
 the supervisor decides as before. `dispatch` runs the lint itself and only
 warns. The option keys are derived from `BASE_FLOOR`, `DIFFICULTY` and the fit
 table; `tests/test_jev.py` fails when they drift.
@@ -312,7 +330,7 @@ agent runs this loop for you.
 | `SSA_DEADLINE_SECS` | off | Absolute ceiling on a background run |
 | `SSA_LEDGER` | `$XDG_STATE_HOME/smart-subagents/outcomes.jsonl` | Outcome ledger path |
 | `SSA_NO_QUOTA_SNAPSHOT` | unset | Skip the post-dispatch quota snapshot (offline machines, tests) |
-| `TYPESAFE_API_KEY` | unset, else `$XDG_CONFIG_HOME/typesafe/env` | Enables the advisory Jev judgments: `jev classify`, `jev lint` and the dispatch brief preflight. Without a key they are skipped and nothing else changes |
+| `TYPESAFE_API_KEY` | unset, else `$XDG_CONFIG_HOME/typesafe/env` | Enables the advisory Jev judgments: `jev classify`, `jev lint`, the dispatch brief preflight and the post-verify test-diff review. Without a key they are skipped and nothing else changes |
 | `SSA_JEV` | `1` | `0` turns every Jev call off (the test suite sets it) |
 | `SSA_JEV_MODEL` | `jev-latest` | Pin `jev-1.13.0` to freeze the model behind the judgments |
 | `CODEX_BIN` / `GROK_BIN` / `KIMI_BIN` / `CLAUDE_BIN` | auto-detected | Override worker binary paths. The variable name per worker comes from its registry entry, so a new worker declares its own |
