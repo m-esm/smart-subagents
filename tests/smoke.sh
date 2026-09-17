@@ -5,7 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SSA="$ROOT/scripts/smart-subagents.sh"
 USAGE="$ROOT/scripts/ai-cli-usage.py"
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/ssa-smoke.XXXXXX")"
-trap 'rm -rf "$TEST_TMP"' EXIT
+# shellcheck source=tests/teardown.sh
+source "$ROOT/tests/teardown.sh"
+trap 'ssa_teardown "$TEST_TMP"' EXIT
 export PYTHONPYCACHEPREFIX="$TEST_TMP/pycache"
 # Smoke never touches the network: the post-dispatch quota snapshot is off.
 export SSA_NO_QUOTA_SNAPSHOT=1

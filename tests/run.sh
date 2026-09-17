@@ -6,7 +6,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/ssa-run.XXXXXX")"
-trap 'rm -rf "$RUN_TMP"' EXIT
+# shellcheck source=tests/teardown.sh
+source "$ROOT/tests/teardown.sh"
+trap 'ssa_teardown "$RUN_TMP"' EXIT
 
 export SSA_NO_QUOTA_SNAPSHOT=1
 export SSA_JEV=0
