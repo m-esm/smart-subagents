@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.7
+
+Hot-path Jev, the bits that actually steer money after 0.3.6 named them:
+
+- `classify` `flags` (and `init --brief`) downshift a low-confidence
+  difficulty or size. `hard` at 0.72 still logs as hard; dispatch uses
+  `effective.difficulty` (routine) unless `--difficulty` was passed.
+- `jev review --report last-msg.txt` (verify does this) asks whether the
+  worker dismissed a user-encoded test or claimed a change the diff lacks.
+  Still advisory; verdict untouched.
+
 ## 0.3.6
 
 Three gaps measured on one real dispatch (six red tests, verified-pass):

@@ -68,17 +68,15 @@ is present, one call returns both axes and the kind, each with a confidence:
 
 ```bash
 printf '%s' "$PARENT_TASK_TEXT" | bash "$SSA" jev classify
-# {"size":"small","difficulty":"hard","kind":"impl","confidence":{...},
-#  "low_confidence":[],"flags":"--size small --difficulty hard --kind impl"}
+# {"size":"small","difficulty":"hard","kind":"impl","effective":{"difficulty":"routine",...},
+#  "low_confidence":["difficulty"],"flags":"--size small --difficulty routine --kind impl"}
 ```
 
-Pass `flags` to `init` / `pick`. `difficulty` is listed under `low_confidence`
-below 0.8 (the others below 0.5) because it moves the quota floor: when it is
-listed and `init` answers "no eligible worker", re-pick at `runner_up.difficulty`
-before giving up. A name under `low_confidence` is yours to
-decide; everything else you take as given unless the repo contradicts it (a
-"rename" that turns out to cross a public API is not trivial). Always pass
-`--kind`: a ledger full of `default` teaches the fit table nothing. Exit 2 is
+Pass `flags` to `init` / `pick` (or `init --brief FILE` and let it classify).
+`flags` already downshifts a low-confidence difficulty/size so a shaky `hard`
+does not raise the quota floor. The argmax stays in `difficulty` for the log.
+`--difficulty` on the command line still wins. Always pass `--kind`: a ledger
+full of `default` teaches the fit table nothing. Exit 2 is
 "Jev unavailable": classify by hand as before.
 
 Artifacts under `$DIR/`: `brief.md`, `usage.json`, `pick.json`, `stdout.log`

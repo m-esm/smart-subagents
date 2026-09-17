@@ -191,9 +191,21 @@ class Classify(unittest.TestCase):
         self.assertEqual(rc, 0)
         got = json.loads(out)
         self.assertEqual(got["difficulty"], "hard")
+        self.assertEqual(got["effective"]["difficulty"], "routine")
+        self.assertEqual(got["flags"], "--size medium --difficulty routine --kind debug")
         self.assertEqual(got["low_confidence"], ["difficulty"])
         self.assertEqual(got["runner_up"], {"difficulty": "routine"})
         self.assertGreater(jev.LOW_CONFIDENCE_BY["difficulty"], jev.LOW_CONFIDENCE)
+
+    def test_effective_never_upshifts(self):
+        got = jev.effective_class(
+            "small", "routine", "impl", ["size"], {"size": "large"}
+        )
+        self.assertEqual(got["size"], "small")
+        got = jev.effective_class(
+            "medium", "hard", "impl", ["difficulty"], {"difficulty": "frontier"}
+        )
+        self.assertEqual(got["difficulty"], "hard")
 
 
 class Lint(unittest.TestCase):
@@ -263,6 +275,31 @@ class Review(unittest.TestCase):
         self.assertNotIn("src/scene.py", sent["state"]["diff"])
         self.assertNotIn("test_new.py", sent["state"]["diff"])
         self.assertEqual(set(sent["questions"]), set(jev.REVIEW_QUESTIONS))
+
+    def test_report_flags_a_dismissed_encoded_decision(self):
+        fake = FakeJev(
+            {
+                "inverts_assertion": {"noul": 0.94},
+                "dismisses_encoded_decision": {"noul": 0.91},
+                "claim_not_in_diff": {"noul": 0.04},
+            }
+        )
+        try:
+            with temp_env() as te:
+                p = te.root / "last-msg.txt"
+                p.write_text("test_spare_is_not_a_body is stale; spare scoop is a body now.\n")
+                rc, out, _ = run_ssa(
+                    "jev", "review", "--brief", "-", "--report", str(p),
+                    env=jev_env(te, fake), input_text=FLIPPED,
+                )
+        finally:
+            fake.close()
+        self.assertEqual(rc, 1, out)
+        got = json.loads(out)
+        self.assertIn("dismisses_encoded_decision", got["flags"])
+        sent = fake.requests[0]["body"]
+        self.assertIn("stale", sent["state"]["report"])
+        self.assertIn("dismisses_encoded_decision", sent["questions"])
 
     def test_clean_test_diff_exits_0(self):
         fake = FakeJev({qid: {"noul": 0.03} for qid in jev.REVIEW_QUESTIONS})
