@@ -1,8 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.3.8
 
 - Scope-check untracked, non-ignored worker files during verify, excluding SSA launch artifacts.
+- Persist task-linked Jev decisions without brief, diff or report text in an
+  append-only log (`SSA_JEV_DECISIONS`). Logging fails open.
+- Include Jev labels/findings and optional parent/slice ids in outcome records.
+- Add `jev tune [--days N] [--json]` for aggregate outcome joins (30 days by
+  default), and regressions for `init --brief` and explicit-axis precedence.
+- All Jev judgments remain advisory; thresholds and verification are unchanged.
 
 ## 0.3.7
 

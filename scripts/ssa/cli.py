@@ -287,7 +287,15 @@ def cmd_write_agents_file(args) -> int:
 
 
 def cmd_jev(args) -> int:
-    """Typed judgments about a brief. Always prints one JSON object."""
+    """Typed judgments as JSON, or bounded decision/outcome aggregates."""
+    from ssa import jev_log
+    if args.action == "tune":
+        if not 0 <= args.days <= 365000:
+            print("jev tune: --days must be between 0 and 365000", file=sys.stderr)
+            return 2
+        report = jev_log.tune(args.days)
+        print(json.dumps(report) if args.json else jev_log.format_report(report))
+        return 0
     try:
         if args.action == "probe":
             out = jev_mod.ask(
@@ -302,19 +310,18 @@ def cmd_jev(args) -> int:
             print(json.dumps(jev_mod.unavailable("brief is empty")))
             return 2
         if args.action == "classify":
-            print(json.dumps(jev_mod.classify_brief(text)))
-            return 0
-        if args.action == "review":
+            result = jev_mod.classify_brief(text)
+        elif args.action == "review":
             report = ""
             path = getattr(args, "report", "") or ""
             if path:
                 report = Path(path).read_text()
             result = jev_mod.review_diff(text, report=report)
-            print(json.dumps(result))
-            return 0 if result["ok"] else 1
-        result = jev_mod.lint_brief(text)
+        else:
+            result = jev_mod.lint_brief(text)
+        jev_log.append_decision(args.task_id, args.action, args.decision_action, result)
         print(json.dumps(result))
-        return 0 if result["ok"] else 1
+        return 0 if result.get("ok", True) else 1
     except jev_mod.JevUnavailable as exc:
         print(json.dumps(jev_mod.unavailable(str(exc))))
         return 2
@@ -466,7 +473,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--quiet", action="store_true")
     p.set_defaults(func=cmd_transition)
     p = sub.add_parser("jev", help="advisory typed judgments about a brief (TypeSafe Jev)")
-    p.add_argument("action", choices=["classify", "lint", "review", "probe"])
+    p.add_argument("action", choices=["classify", "lint", "review", "probe", "tune"])
+    p.add_argument("--task-id", default="")
+    p.add_argument("--action", dest="decision_action", default="advisory")
+    p.add_argument("--days", type=int, default=30, metavar="N")
+    p.add_argument("--json", action="store_true")
     p.add_argument("--brief", default="-", help="brief file (a unified diff for review), or - for stdin")
     p.add_argument("--report", default="", help="worker last-msg.txt for review claim questions")
     p.set_defaults(func=cmd_jev)
