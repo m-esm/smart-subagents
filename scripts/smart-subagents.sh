@@ -55,12 +55,14 @@ _ssa_wt_path() {
 # is fine on those trees.
 # SSA_GIT_STATUS_TIMEOUT seconds, default 5.
 # SSA_GIT_STATUS_UALL_MAX untracked porcelain lines, default 1000.
+# who=verify-scope appends non-launch untracked paths as NUL-separated bytes.
 _ssa_git_status_porcelain_uall() {
   local repo="$1" dest="${2:-}" who="${3:-smart-subagents}"
   local secs="${SSA_GIT_STATUS_TIMEOUT:-5}"
   local max_u="${SSA_GIT_STATUS_UALL_MAX:-1000}"
   need python3
   python3 - "$repo" "$dest" "$secs" "$who" "$max_u" <<'PY'
+import os
 import subprocess
 import sys
 
@@ -79,6 +81,26 @@ inside = subprocess.run(
     stderr=subprocess.DEVNULL,
 )
 if inside.returncode != 0:
+    sys.exit(0)
+# Launch artifacts SSA itself writes into the worktree. They must not
+# make gc/cleanup treat a finished task as dirty or count toward scope.
+# scan-secrets still sees the raw porcelain.
+LAUNCH_UNTRACKED = {
+    ".claude/agents/ssa-worker.md",
+}
+
+def is_launch_untracked(path):
+    return path in LAUNCH_UNTRACKED or path.endswith("/ssa-worker.md")
+
+if who == "verify-scope":
+    untracked = subprocess.check_output(
+        ["git", "-C", repo, "ls-files", "--others", "--exclude-standard", "-z"],
+        timeout=secs,
+    )
+    with open(dest, "ab") as out:
+        for path in untracked.split(b"\0"):
+            if path and not is_launch_untracked(os.fsdecode(path)):
+                out.write(path + b"\0")
     sys.exit(0)
 try:
     ran = subprocess.run(
@@ -103,19 +125,13 @@ if max_u >= 0 and untracked > max_u:
         % (who, repo, untracked)
     )
     sys.exit(1)
-# Launch artifacts SSA itself writes into the worktree. They must not
-# make gc/cleanup treat a finished task as dirty. scan-secrets still
-# sees the raw porcelain (who=scan-secrets / verify-summary).
-LAUNCH_UNTRACKED = {
-    ".claude/agents/ssa-worker.md",
-}
 if dest:
     if who in ("cleanup", "init-rollback"):
         kept = []
         for line in text.splitlines(True):
             if line.startswith("??"):
                 path = line[3:].rstrip("\n")
-                if path in LAUNCH_UNTRACKED or path.endswith("/ssa-worker.md"):
+                if is_launch_untracked(path):
                     continue
             kept.append(line)
         text = "".join(kept)
@@ -2780,6 +2796,7 @@ cmd_verify() {
 
   # Scope: every changed path must match a glob the parent declared.
   git -C "$wt" diff --name-only -z "$base" >"$dir/verify-changed.z" 2>/dev/null || :
+  _ssa_git_status_porcelain_uall "$wt" "$dir/verify-changed.z" verify-scope
 
   local secrets_ok=1
   if cmd_scan_secrets --dir "$dir"; then secrets_ok=1; else secrets_ok=0; fi
