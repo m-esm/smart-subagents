@@ -520,6 +520,61 @@ class PlanTests(unittest.TestCase):
 
 
 class VerifyTests(unittest.TestCase):
+    def test_verify_untracked_out_of_scope_fails(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "scope.txt").write_text("src/*\n")
+            (repo / "other").mkdir()
+            (repo / "other/new.py").write_text("print('new')\n")
+
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 1, err + out)
+            verify = json.loads((task_dir / "outcome.json").read_text())["verify"]
+            self.assertIs(verify["scope_ok"], False)
+            self.assertEqual(verify["verdict"], "fail")
+            self.assertEqual(
+                (task_dir / "verify-out-of-scope.txt").read_text().splitlines(),
+                ["other/new.py"],
+            )
+
+    def test_verify_untracked_in_scope_passes(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "scope.txt").write_text("src/*\n")
+            (repo / "src").mkdir()
+            (repo / "src/new.py").write_text("print('new')\n")
+
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            verify = json.loads((task_dir / "outcome.json").read_text())["verify"]
+            self.assertIs(verify["scope_ok"], True)
+            self.assertEqual(verify["verdict"], "pass")
+            self.assertEqual(verify["changed_files"], 1)
+            self.assertFalse((task_dir / "verify-out-of-scope.txt").exists())
+
+    def test_verify_untracked_launch_artifacts_and_ignored_files_pass(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "scope.txt").write_text("src/*\n")
+            for name in (".claude/agents/ssa-worker.md", "nested/ssa-worker.md",
+                         "BRIEF.md", ".ssa/BRIEF-1.md", "ignored.txt"):
+                path = repo / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture\n")
+            # The staging helper writes these brief paths to shared info/exclude.
+            with (repo / ".git/info/exclude").open("a") as exclude:
+                exclude.write("/BRIEF.md\n/.ssa/BRIEF-1.md\n/ignored.txt\n")
+
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            verify = json.loads((task_dir / "outcome.json").read_text())["verify"]
+            self.assertIs(verify["scope_ok"], True)
+            self.assertEqual(verify["changed_files"], 0)
+            self.assertFalse((task_dir / "verify-out-of-scope.txt").exists())
+
     def test_verify_unrun_baseline_is_inconclusive_but_empty_log_regresses(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
