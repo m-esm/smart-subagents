@@ -100,6 +100,8 @@ class FakeJev:
 def jev_env(te, fake, **extra):
     env = dict(te.env)
     env.update({"SSA_JEV": "1", "SSA_JEV_URL": fake.url, "TYPESAFE_API_KEY": "test-key"})
+    env.update({"SSA_JEV_DECISIONS": str(te.root / "decisions.jsonl"),
+                "SSA_LEDGER": str(te.root / "outcomes.jsonl")})
     env.update(extra)
     return env
 

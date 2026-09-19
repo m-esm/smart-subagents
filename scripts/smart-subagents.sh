@@ -531,8 +531,13 @@ cmd_init() {
   echo "$repo" >"$dir/repo.txt"
   if [[ -n "$brief" ]]; then
     [[ -f "$brief" ]] || die "init: --brief not a file: $brief"
-    local cls rc=0
-    cls="$(_ssa jev classify --brief "$brief" 2>/dev/null)" || rc=$?
+    local cls rc=0 jev_action=applied
+    if (( size_set + difficulty_set + kind_set == 3 )); then
+      jev_action=skipped-explicit-flags
+    elif (( size_set + difficulty_set + kind_set > 0 )); then
+      jev_action=partial-explicit-flags
+    fi
+    cls="$(_ssa jev classify --brief "$brief" --task-id "$task_id" --action "$jev_action" 2>/dev/null)" || rc=$?
     if [[ "$rc" -ne 2 && -n "$cls" ]]; then
       printf '%s\n' "$cls" >"$dir/classify.json"
       read -r size difficulty kind <<<"$(printf '%s' "$cls" | _ssa_apply_classify "$size_set" "$difficulty_set" "$kind_set" "$size" "$difficulty" "$kind")"
@@ -922,7 +927,7 @@ PY
 _ssa_jev_lint() {
   local dir="$1" brief="$2" out rc=0
   [[ "${SSA_JEV:-1}" != "0" ]] || return 0
-  out="$(_ssa jev lint --brief "$brief" 2>/dev/null)" || rc=$?
+  out="$(_ssa jev lint --brief "$brief" --task-id "$(_read1 "$dir/task-id.txt")" --action advisory 2>/dev/null)" || rc=$?
   [[ "$rc" -ne 2 && -n "$out" ]] || return 0
   printf '%s\n' "$out" >"$dir/brief-lint.json" 2>/dev/null || true
   if [[ "$rc" -eq 1 ]]; then
@@ -941,7 +946,7 @@ _ssa_jev_review() {
   [[ "${SSA_JEV:-1}" != "0" ]] || return 0
   wt="$(_read1 "$dir/wt.txt")"; base="$(_read1 "$dir/base-sha.txt")"
   [[ -n "$wt" && -d "$wt" && -n "$base" ]] || return 0
-  local review_args=(--brief -)
+  local review_args=(--brief - --task-id "$(_read1 "$dir/task-id.txt")" --action advisory)
   [[ -s "$dir/last-msg.txt" ]] && review_args+=(--report "$dir/last-msg.txt")
   out="$(git -C "$wt" diff "$base" 2>/dev/null | _ssa jev review "${review_args[@]}" 2>/dev/null)" || rv=$?
   [[ "$rv" -ne 2 && -n "$out" ]] || return 0
@@ -965,8 +970,12 @@ PY
 
 cmd_jev() {
   local action="${1:-}" brief="-" dir="" report=""
-  [[ -n "$action" ]] || die "jev: classify|lint|review|preflight|probe required"
+  [[ -n "$action" ]] || die "jev: classify|lint|review|preflight|probe|tune required"
   shift || true
+  if [[ "$action" == tune ]]; then
+    _ssa jev tune "$@"
+    return $?
+  fi
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --brief) brief="${2:-}"; shift 2 ;;
@@ -3151,6 +3160,29 @@ record = {
 if model_downgraded:
     record["model_downgraded"] = True
 
+jev = {}
+for filename, key in (("classify.json", "classify"),
+                      ("brief-lint.json", "lint_missing"),
+                      ("diff-review.json", "review_flags")):
+    try:
+        doc = json.loads((d / filename).read_text())
+        if not isinstance(doc, dict):
+            continue
+        if key == "classify":
+            jev[key] = {k: doc[k] for k in ("size", "difficulty", "kind", "effective",
+                                          "confidence", "runner_up") if k in doc}
+        else:
+            value = doc["missing" if key == "lint_missing" else "flags"]
+            if isinstance(value, list):
+                jev[key] = value
+    except (OSError, ValueError, KeyError):
+        pass
+if jev:
+    record["jev"] = jev
+for filename, key in (("parent-task.txt", "parent_task"), ("slice.txt", "slice")):
+    if (d / filename).is_file():
+        record[key] = (d / filename).read_text().strip()
+
 (d / "outcome-record.json").write_text(json.dumps(record, indent=2) + "\n")
 path = Path(ledger)
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -3375,6 +3407,9 @@ Usage: smart-subagents.sh <command> [options]
       claim_not_in_diff. verify runs it by itself, writes DIR/diff-review.json,
       folds it into outcome.json as jev_review and warns on stderr. It never
       changes the verdict.
+  jev tune [--days N] [--json]
+      Aggregate decisions joined to recorded outcomes, latest per task/stage.
+      Default window: 30 days. No raw task rows or text are printed.
 
 Task record:
   Each task dir carries task.json (authoritative: state, class, attempts) and
@@ -3401,6 +3436,7 @@ Env:
   SSA_NO_QUOTA_SNAPSHOT=1         skip the post-dispatch quota snapshot
   SSA_JEV=0                       turn off every Jev call (classify, lint, dispatch preflight)
   SSA_JEV_MODEL                   Jev model name (default jev-latest; pin jev-1.13.0 to freeze)
+  SSA_JEV_DECISIONS               decision log path (default: $XDG_STATE_HOME/smart-subagents/jev-decisions.jsonl)
   TYPESAFE_API_KEY                TypeSafe key; else read from $XDG_CONFIG_HOME/typesafe/env
   SSA_LEDGER                      outcome ledger path
                                   (default: $XDG_STATE_HOME/smart-subagents/outcomes.jsonl)
