@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Scope-check untracked, non-ignored worker files during verify, excluding SSA launch artifacts.
+
 ## 0.3.7
 
 Hot-path Jev, the bits that actually steer money after 0.3.6 named them:
