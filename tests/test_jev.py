@@ -301,6 +301,57 @@ class Review(unittest.TestCase):
         self.assertIn("stale", sent["state"]["report"])
         self.assertIn("dismisses_encoded_decision", sent["questions"])
 
+    def test_claim_is_judged_on_the_full_file_list_not_the_test_hunks(self):
+        # 1789805781-99629, 1789817331-54852: the claim question saw only the
+        # test hunks, so every source change the report named was "not in diff".
+        src = (
+            "diff --git a/src/scene.py b/src/scene.py\n--- a/src/scene.py\n+++ b/src/scene.py\n"
+            "@@ -1 +1 @@\n-NODES = []\n+NODES = ['spare']\n"
+        )
+        fake = FakeJev({"claim_not_in_diff": {"noul": 0.05}})
+        try:
+            with temp_env() as te:
+                p = te.root / "last-msg.txt"
+                p.write_text("changed src/scene.py, tests/test_scene.py and added docs/new.md\n")
+                extra = te.root / "untracked.txt"
+                extra.write_text("docs/new.md\n")
+                rc, out, _ = run_ssa(
+                    "jev", "review", "--brief", "-", "--report", str(p), "--files", str(extra),
+                    env=jev_env(te, fake), input_text=src + FLIPPED,
+                )
+        finally:
+            fake.close()
+        self.assertEqual(rc, 0, out)
+        sent = fake.requests[0]["body"]
+        self.assertNotIn("src/scene.py", sent["state"]["diff"])
+        files = sent["state"]["changed_files"]
+        for name in ("src/scene.py", "tests/test_scene.py", "docs/new.md"):
+            self.assertIn(name, files)
+        self.assertIn("changed_files", sent["questions"]["claim_not_in_diff"]["instructions"])
+
+    def test_huge_source_diff_is_never_sent_for_the_claim_question(self):
+        # 1789681429-79029: a 157K diff clipped to 24K hid most claimed changes.
+        big = "".join(
+            "diff --git a/src/m%d.py b/src/m%d.py\n--- a/src/m%d.py\n+++ b/src/m%d.py\n@@ -1 +1 @@\n-x\n+%s\n"
+            % (i, i, i, i, "y" * 2000) for i in range(40)
+        )
+        fake = FakeJev({"claim_not_in_diff": {"noul": 0.05}})
+        try:
+            with temp_env() as te:
+                p = te.root / "last-msg.txt"
+                p.write_text("changed src/m39.py\n")
+                rc, out, _ = run_ssa(
+                    "jev", "review", "--brief", "-", "--report", str(p),
+                    env=jev_env(te, fake), input_text=big,
+                )
+        finally:
+            fake.close()
+        self.assertEqual(rc, 0, out)
+        sent = fake.requests[0]["body"]
+        self.assertNotIn("diff", sent["state"])
+        self.assertIn("src/m39.py", sent["state"]["changed_files"])
+        self.assertEqual(set(sent["questions"]), {"claim_not_in_diff"})
+
     def test_clean_test_diff_exits_0(self):
         fake = FakeJev({qid: {"noul": 0.03} for qid in jev.REVIEW_QUESTIONS})
         try:
@@ -350,6 +401,26 @@ class VerifyReview(unittest.TestCase):
         (task / "base-sha.txt").write_text(sha + "\n")
         (task / "outcome.json").write_text(json.dumps({"verify": {"verdict": "pass"}}))
         return task
+
+    def test_untracked_files_reach_the_claim_question_and_the_review_reaches_the_ledger(self):
+        fake = FakeJev({"inverts_assertion": {"noul": 0.91}, "claim_not_in_diff": {"noul": 0.04}})
+        try:
+            with temp_env() as te:
+                task = self.make_task(te)
+                repo = Path((task / "wt.txt").read_text().strip())
+                (repo / "brand_new.py").write_text("x = 1\n")
+                (task / "last-msg.txt").write_text("added brand_new.py\n")
+                rc, _out, err = run_ssa("jev", "review", "--dir", str(task), env=jev_env(te, fake))
+                self.assertEqual(rc, 0, err)
+                self.assertIn("brand_new.py", fake.requests[0]["body"]["state"]["changed_files"])
+                rc, _out, err = run_ssa("record", "--dir", str(task), "--outcome", "verified-pass", env=te.env)
+                self.assertEqual(rc, 0, err)
+                ledger = Path(te.env["XDG_STATE_HOME"]) / "smart-subagents" / "outcomes.jsonl"
+                row = json.loads(ledger.read_text().splitlines()[-1])
+                self.assertEqual(row["jev_review"]["flags"], ["inverts_assertion"])
+                self.assertEqual(row["jev_review"]["scores"]["claim_not_in_diff"], 0.04)
+        finally:
+            fake.close()
 
     def test_warns_and_folds_into_the_outcome_without_touching_the_verdict(self):
         fake = FakeJev({"inverts_assertion": {"noul": 0.91}})

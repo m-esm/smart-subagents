@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.8
+
+`claim_not_in_diff` flagged 4 of the first 5 real reviews at 0.94+, all false:
+
+- The claim question shared `diff` with the test questions, so it saw only
+  test hunks (or a diff clipped at 24K chars) and every source change the
+  report named looked absent. It now reads `changed_files`: every path in the
+  diff plus untracked files (`jev review --files LIST`, verify passes it).
+  Replayed on those runs: 0.94/0.96/0.94/0.94 became 0.20/0.15/0.06/skipped;
+  a fabricated file claim still scores 0.94.
+- Commands run and gitignored build outputs named in a report are not claims.
+- Above 400 changed files the question is skipped with a warning.
+- `dismisses_encoded_decision` is only asked when a test hunk exists.
+- `record` copies `jev_review` into the `outcomes.jsonl` row. Task dirs live
+  under `$TMPDIR` and get cleaned; 408 ledger rows carried no review.
+
 ## 0.3.7
 
 Hot-path Jev, the bits that actually steer money after 0.3.6 named them:

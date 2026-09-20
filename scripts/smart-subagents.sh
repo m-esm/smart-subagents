@@ -943,6 +943,11 @@ _ssa_jev_review() {
   [[ -n "$wt" && -d "$wt" && -n "$base" ]] || return 0
   local review_args=(--brief -)
   [[ -s "$dir/last-msg.txt" ]] && review_args+=(--report "$dir/last-msg.txt")
+  # git diff never lists a file the worker created and left untracked.
+  if git -C "$wt" ls-files --others --exclude-standard >"$dir/review-untracked.txt" 2>/dev/null \
+      && [[ -s "$dir/review-untracked.txt" ]]; then
+    review_args+=(--files "$dir/review-untracked.txt")
+  fi
   out="$(git -C "$wt" diff "$base" 2>/dev/null | _ssa jev review "${review_args[@]}" 2>/dev/null)" || rv=$?
   [[ "$rv" -ne 2 && -n "$out" ]] || return 0
   printf '%s\n' "$out" >"$dir/diff-review.json" 2>/dev/null || true
@@ -964,7 +969,7 @@ PY
 }
 
 cmd_jev() {
-  local action="${1:-}" brief="-" dir="" report=""
+  local action="${1:-}" brief="-" dir="" report="" files=""
   [[ -n "$action" ]] || die "jev: classify|lint|review|preflight|probe required"
   shift || true
   while [[ $# -gt 0 ]]; do
@@ -972,6 +977,7 @@ cmd_jev() {
       --brief) brief="${2:-}"; shift 2 ;;
       --dir) dir="${2:-}"; shift 2 ;;
       --report) report="${2:-}"; shift 2 ;;
+      --files) files="${2:-}"; shift 2 ;;
       *) die "jev: unknown arg $1" ;;
     esac
   done
@@ -982,10 +988,11 @@ cmd_jev() {
       if [[ -n "$dir" ]]; then
         _ssa_jev_review "$dir"
         [[ ! -f "$dir/diff-review.json" ]] || cat "$dir/diff-review.json"
-      elif [[ -n "$report" ]]; then
-        _ssa jev review --brief "$brief" --report "$report"
       else
-        _ssa jev review --brief "$brief"
+        local direct_args=(--brief "$brief")
+        [[ -z "$report" ]] || direct_args+=(--report "$report")
+        [[ -z "$files" ]] || direct_args+=(--files "$files")
+        _ssa jev review "${direct_args[@]}"
       fi
       ;;
     preflight)
@@ -3055,10 +3062,14 @@ if stat.exists():
 verified = None
 verdict = None
 failure_class = None
+jev_review = None
 oc = d / "outcome.json"
 if oc.exists():
     try:
         ocdoc = json.loads(oc.read_text())
+        # The task dir lives under $TMPDIR and gets cleaned; the ledger does not.
+        if isinstance(ocdoc.get("jev_review"), dict):
+            jev_review = {k: ocdoc["jev_review"].get(k) for k in ("reviewed", "ok", "flags", "scores")}
         verdict = (ocdoc.get("verify") or {}).get("verdict")
         verified = verdict == "pass"
         klass = ocdoc.get("failure_class")
@@ -3150,6 +3161,8 @@ record = {
 }
 if model_downgraded:
     record["model_downgraded"] = True
+if jev_review:
+    record["jev_review"] = jev_review
 
 (d / "outcome-record.json").write_text(json.dumps(record, indent=2) + "\n")
 path = Path(ledger)
@@ -3354,7 +3367,7 @@ Usage: smart-subagents.sh <command> [options]
       Scan added lines and newly added environment files for secrets.
 
   jev classify|lint [--brief FILE | --dir DIR]      jev probe
-  jev review [--brief DIFF | --dir DIR] [--report LAST-MSG]
+  jev review [--brief DIFF | --dir DIR] [--report LAST-MSG] [--files LIST]
       Advisory typed judgments about a brief from TypeSafe's Jev model, one
       JSON object on stdout. classify returns size, difficulty and kind with a
       confidence each, plus effective/flags for init/pick: a low-confidence
