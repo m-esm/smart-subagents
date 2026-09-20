@@ -964,6 +964,11 @@ _ssa_jev_review() {
   [[ -n "$wt" && -d "$wt" && -n "$base" ]] || return 0
   local review_args=(--brief - --task-id "$(_read1 "$dir/task-id.txt")" --action advisory)
   [[ -s "$dir/last-msg.txt" ]] && review_args+=(--report "$dir/last-msg.txt")
+  # git diff never lists a file the worker created and left untracked.
+  if git -C "$wt" ls-files --others --exclude-standard >"$dir/review-untracked.txt" 2>/dev/null \
+      && [[ -s "$dir/review-untracked.txt" ]]; then
+    review_args+=(--files "$dir/review-untracked.txt")
+  fi
   out="$(git -C "$wt" diff "$base" 2>/dev/null | _ssa jev review "${review_args[@]}" 2>/dev/null)" || rv=$?
   [[ "$rv" -ne 2 && -n "$out" ]] || return 0
   printf '%s\n' "$out" >"$dir/diff-review.json" 2>/dev/null || true
@@ -985,7 +990,7 @@ PY
 }
 
 cmd_jev() {
-  local action="${1:-}" brief="-" dir="" report=""
+  local action="${1:-}" brief="-" dir="" report="" files=""
   [[ -n "$action" ]] || die "jev: classify|lint|review|preflight|probe|tune required"
   shift || true
   if [[ "$action" == tune ]]; then
@@ -997,6 +1002,7 @@ cmd_jev() {
       --brief) brief="${2:-}"; shift 2 ;;
       --dir) dir="${2:-}"; shift 2 ;;
       --report) report="${2:-}"; shift 2 ;;
+      --files) files="${2:-}"; shift 2 ;;
       *) die "jev: unknown arg $1" ;;
     esac
   done
@@ -1007,10 +1013,11 @@ cmd_jev() {
       if [[ -n "$dir" ]]; then
         _ssa_jev_review "$dir"
         [[ ! -f "$dir/diff-review.json" ]] || cat "$dir/diff-review.json"
-      elif [[ -n "$report" ]]; then
-        _ssa jev review --brief "$brief" --report "$report"
       else
-        _ssa jev review --brief "$brief"
+        local direct_args=(--brief "$brief")
+        [[ -z "$report" ]] || direct_args+=(--report "$report")
+        [[ -z "$files" ]] || direct_args+=(--files "$files")
+        _ssa jev review "${direct_args[@]}"
       fi
       ;;
     preflight)
@@ -3192,6 +3199,10 @@ for filename, key in (("classify.json", "classify"),
             value = doc["missing" if key == "lint_missing" else "flags"]
             if isinstance(value, list):
                 jev[key] = value
+            # Flags alone cannot tune REVIEW_THRESHOLD, and the task dir under
+            # $TMPDIR is cleaned long before anyone looks.
+            if key == "review_flags" and isinstance(doc.get("scores"), dict):
+                jev["review_scores"] = doc["scores"]
     except (OSError, ValueError, KeyError):
         pass
 if jev:
@@ -3403,7 +3414,7 @@ Usage: smart-subagents.sh <command> [options]
       Scan added lines and newly added environment files for secrets.
 
   jev classify|lint [--brief FILE | --dir DIR]      jev probe
-  jev review [--brief DIFF | --dir DIR] [--report LAST-MSG]
+  jev review [--brief DIFF | --dir DIR] [--report LAST-MSG] [--files LIST]
       Advisory typed judgments about a brief from TypeSafe's Jev model, one
       JSON object on stdout. classify returns size, difficulty and kind with a
       confidence each, plus effective/flags for init/pick: a low-confidence

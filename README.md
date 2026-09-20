@@ -167,9 +167,12 @@ A green `verify` proves the commands pass, not that a test was fixed rather
 than bent to fit. `verify` therefore sends the hunks of EXISTING test files
 to Jev (and the worker's `last-msg.txt`) and asks whether an assertion was
 flipped, a numeric check loosened, a test disabled, or the report dismissed
-a user-encoded test / claimed a change the diff lacks. Flags land in
-`diff-review.json` and in `outcome.json` under `jev_review`, with a warning on
-stderr. The verdict never changes; a flag means read those hunks yourself.
+a user-encoded test. A second question reads the report against
+`changed_files` (every path in the diff plus untracked files, never the
+clipped diff text) and asks whether it names a changed file that is not there;
+commands run and generated build outputs do not count. Flags land in
+`diff-review.json`, in `outcome.json` under `jev_review`, and (flags plus
+scores) in the `outcomes.jsonl` row under `jev`, with a warning on stderr. The verdict never changes; a flag means read those hunks yourself.
 
 ```bash
 bash scripts/smart-subagents.sh jev review --dir "$DIR"   # exit 0 always; flags on stderr

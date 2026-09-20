@@ -316,7 +316,11 @@ def cmd_jev(args) -> int:
             path = getattr(args, "report", "") or ""
             if path:
                 report = Path(path).read_text()
-            result = jev_mod.review_diff(text, report=report)
+            files = None
+            files_path = getattr(args, "files", "") or ""
+            if files_path:
+                files = Path(files_path).read_text().splitlines()
+            result = jev_mod.review_diff(text, report=report, files=files)
         else:
             result = jev_mod.lint_brief(text)
         jev_log.append_decision(args.task_id, args.action, args.decision_action, result)
@@ -480,6 +484,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     p.add_argument("--brief", default="-", help="brief file (a unified diff for review), or - for stdin")
     p.add_argument("--report", default="", help="worker last-msg.txt for review claim questions")
+    p.add_argument("--files", default="", help="newline list of extra changed paths (untracked files) for review")
     p.set_defaults(func=cmd_jev)
 
     return ap
