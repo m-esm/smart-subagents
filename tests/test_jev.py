@@ -100,6 +100,8 @@ class FakeJev:
 def jev_env(te, fake, **extra):
     env = dict(te.env)
     env.update({"SSA_JEV": "1", "SSA_JEV_URL": fake.url, "TYPESAFE_API_KEY": "test-key"})
+    env.update({"SSA_JEV_DECISIONS": str(te.root / "decisions.jsonl"),
+                "SSA_LEDGER": str(te.root / "outcomes.jsonl")})
     env.update(extra)
     return env
 
@@ -417,8 +419,8 @@ class VerifyReview(unittest.TestCase):
                 self.assertEqual(rc, 0, err)
                 ledger = Path(te.env["XDG_STATE_HOME"]) / "smart-subagents" / "outcomes.jsonl"
                 row = json.loads(ledger.read_text().splitlines()[-1])
-                self.assertEqual(row["jev_review"]["flags"], ["inverts_assertion"])
-                self.assertEqual(row["jev_review"]["scores"]["claim_not_in_diff"], 0.04)
+                self.assertEqual(row["jev"]["review_flags"], ["inverts_assertion"])
+                self.assertEqual(row["jev"]["review_scores"]["claim_not_in_diff"], 0.04)
         finally:
             fake.close()
 

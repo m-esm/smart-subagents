@@ -13,8 +13,18 @@
 - Commands run and gitignored build outputs named in a report are not claims.
 - Above 400 changed files the question is skipped with a warning.
 - `dismisses_encoded_decision` is only asked when a test hunk exists.
-- `record` copies `jev_review` into the `outcomes.jsonl` row. Task dirs live
-  under `$TMPDIR` and get cleaned; 408 ledger rows carried no review.
+- The ledger row carries the review scores (`jev.review_scores`) beside the
+  flags, so `REVIEW_THRESHOLD` can be tuned after `$TMPDIR` is cleaned.
+
+Also in 0.3.8:
+
+- Scope-check untracked, non-ignored worker files during verify, excluding SSA launch artifacts.
+- Persist task-linked Jev decisions without brief, diff or report text in an
+  append-only log (`SSA_JEV_DECISIONS`). Logging fails open.
+- Include Jev labels/findings and optional parent/slice ids in outcome records.
+- Add `jev tune [--days N] [--json]` for aggregate outcome joins (30 days by
+  default), and regressions for `init --brief` and explicit-axis precedence.
+- All Jev judgments remain advisory; thresholds and verification are unchanged.
 
 ## 0.3.7
 

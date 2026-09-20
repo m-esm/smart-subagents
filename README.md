@@ -171,13 +171,28 @@ a user-encoded test. A second question reads the report against
 `changed_files` (every path in the diff plus untracked files, never the
 clipped diff text) and asks whether it names a changed file that is not there;
 commands run and generated build outputs do not count. Flags land in
-`diff-review.json`, in `outcome.json` under `jev_review`, and in the
-`outcomes.jsonl` row that `record` writes, with a warning on stderr. The verdict never changes; a flag means read those hunks yourself.
+`diff-review.json`, in `outcome.json` under `jev_review`, and (flags plus
+scores) in the `outcomes.jsonl` row under `jev`, with a warning on stderr. The verdict never changes; a flag means read those hunks yourself.
 
 ```bash
 bash scripts/smart-subagents.sh jev review --dir "$DIR"   # exit 0 always; flags on stderr
 git diff main | bash scripts/smart-subagents.sh jev review   # exit 1 when something is flagged
 ```
+
+`jev tune [--days N] [--json]` joins the decision log to the outcome ledger by
+task id, using the latest decision per task and stage in the last 30 days by
+default. It reports aggregate counts and verified-pass rates, never raw rows.
+Rates use joined outcomes as their denominator; verified-pass requires both
+that outcome label and `verification_passed=true`. Missing outcomes are counted
+as unjoined, not failures. Review also reports partial outcomes.
+
+Task-linked classify, lint and review calls append label-only decisions to
+`SSA_JEV_DECISIONS`. Manual calls without a task id do not log. Init records
+`applied` when no axes were explicit, `partial-explicit-flags` when some were
+explicit, and `skipped-explicit-flags` when all three were explicit. Explicit
+axes always win. Lint and review use `advisory`. Calls that cannot reach Jev,
+and reviews with nothing to judge, write no decision. Logging errors are ignored.
+`record` includes available Jev labels and findings and optional parent/slice ids.
 
 All of it is advisory and fails open: no key, no network or `SSA_JEV=0` exits 2 and
 the supervisor decides as before. `dispatch` runs the lint itself and only
@@ -339,6 +354,7 @@ agent runs this loop for you.
 | `TYPESAFE_API_KEY` | unset, else `$XDG_CONFIG_HOME/typesafe/env` | Enables the advisory Jev judgments: `jev classify`, `jev lint`, the dispatch brief preflight and the post-verify test-diff review. Without a key they are skipped and nothing else changes |
 | `SSA_JEV` | `1` | `0` turns every Jev call off (the test suite sets it) |
 | `SSA_JEV_MODEL` | `jev-latest` | Pin `jev-1.13.0` to freeze the model behind the judgments |
+| `SSA_JEV_DECISIONS` | `${XDG_STATE_HOME:-$HOME/.local/state}/smart-subagents/jev-decisions.jsonl` | Append-only task-linked Jev decisions, joined to `SSA_LEDGER` by `jev tune` |
 | `CODEX_BIN` / `GROK_BIN` / `KIMI_BIN` / `CLAUDE_BIN` | auto-detected | Override worker binary paths. The variable name per worker comes from its registry entry, so a new worker declares its own |
 
 ## Architecture
