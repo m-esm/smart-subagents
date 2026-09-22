@@ -69,6 +69,16 @@ standalone (compact session-agent JSON and the agent name); the rest are single
 values. A template naming anything else, or carrying a shell metacharacter, is
 rejected at load time. The argv goes to `execve`, never through a shell.
 
+A binary candidate with no leading `/` or `~/` resolves against the registry
+file's own directory, so a worker that ships as a wrapper beside
+`workers.json` (`opencode-cerebras`) needs no absolute path. An optional
+`default_for` block (`{"difficulty": [...], "size": [...]}`, an absent axis
+matches everything) names the worker `recommend()` makes primary for matching
+tasks whenever it survives the quota filter and the floor was not relaxed;
+`Registry.default_worker(difficulty, size)` returns the first match in file
+order. That is how "cheap fast worker for routine labor" is enforced instead of
+hoped for. `cerebras` declares it for `trivial` and `routine`.
+
 `ssa/cli.py workers` prints one row per registered worker, seven tab-separated
 fields: name, display name, sandbox, write policy, probe function, resolved
 binary, resolved credential file. A field the registry cannot resolve on this
@@ -76,6 +86,7 @@ machine prints as `-`.
 
 ```console
 $ python3 scripts/ssa/cli.py workers
+cerebras	opencode on Cerebras	workspace	write	check_cerebras	/Users/you/smart-subagents/scripts/opencode-cerebras	/Users/you/.config/cerebras/env
 codex	OpenAI Codex CLI	os	write	check_codex	/Users/you/.local/bin/codex	/Users/you/.codex/auth.json
 grok	Grok CLI	workspace	write	check_grok	/Users/you/.grok/bin/grok	/Users/you/.grok/auth.json
 kimi	Kimi Code	none	no-write	check_kimi	/Users/you/.kimi-code/bin/kimi	/Users/you/.kimi-code/credentials/kimi-code.json

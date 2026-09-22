@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# opencode on Cerebras, as a smart-subagents worker binary.
+#
+# Every argument goes to `opencode run`. This wrapper:
+#   1. starts ssa/cerebras_proxy.py on an ephemeral 127.0.0.1 port (it strips
+#      the echoed reasoning fields Cerebras rejects and injects the API key
+#      from ~/.config/cerebras/env, so the worker process never holds it);
+#   2. points opencode's `cerebras` provider at that proxy through a
+#      throwaway OPENCODE_CONFIG;
+#   3. on macOS, confines opencode's file writes to the working directory,
+#      TMPDIR and opencode's own state dirs with sandbox-exec (Seatbelt), the
+#      same mechanism codex uses. That is what lets the registry call this
+#      worker `sandbox: workspace`. Without sandbox-exec the wrapper refuses to
+#      run unless OPENCODE_CEREBRAS_NO_SANDBOX=1 accepts an unsandboxed run.
+#
+# Env: OPENCODE_BIN (override binary), OPENCODE_CEREBRAS_NO_SANDBOX=1,
+#      OPENCODE_CEREBRAS_IDLE_TIMEOUT, OPENCODE_CEREBRAS_MAX_SECONDS,
+#      OPENCODE_CEREBRAS_MAX_REQUESTS (watchdog, see below).
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROXY="$HERE/ssa/cerebras_proxy.py"
+OPENCODE_BIN="${OPENCODE_BIN:-$(command -v opencode || true)}"
+[[ -n "$OPENCODE_BIN" ]] || { echo "opencode-cerebras: opencode not found on PATH (OPENCODE_BIN unset)" >&2; exit 127; }
+
+WORKDIR="$PWD"
+# `--dir X` in the args names the working tree the sandbox must let through.
+_args=("$@")
+for ((i = 0; i < ${#_args[@]}; i++)); do
+  if [[ "${_args[$i]}" == "--dir" && $((i + 1)) -lt ${#_args[@]} ]]; then
+    WORKDIR="${_args[$((i + 1))]}"
+  fi
+done
+WORKDIR_RAW="$WORKDIR"
+WORKDIR="$(cd "$WORKDIR" && pwd -P)"
+# opencode treats any path that is not spelled exactly under its resolved
+# project root as an "external directory" and auto-rejects the tool call in
+# non-interactive runs. A worktree under $TMPDIR arrives as a symlinked,
+# double-slashed path (/var/folders/...//smart-subagents/wt/...), so every
+# argument that mentions the raw spelling is rewritten to the real path.
+if [[ "$WORKDIR_RAW" != "$WORKDIR" ]]; then
+  for ((i = 0; i < ${#_args[@]}; i++)); do
+    _args[$i]="${_args[$i]//"$WORKDIR_RAW"/$WORKDIR}"
+  done
+fi
+cd "$WORKDIR"
+
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/opencode-cerebras.XXXXXX")"
+proxy_pid=""
+cleanup() {
+  [[ -n "$proxy_pid" ]] && kill "$proxy_pid" 2>/dev/null || true
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+
+python3 "$PROXY" --port-file "$tmp/port" 2>"$tmp/proxy.log" &
+proxy_pid=$!
+for _ in $(seq 1 100); do
+  [[ -s "$tmp/port" ]] && break
+  if ! kill -0 "$proxy_pid" 2>/dev/null; then
+    cat "$tmp/proxy.log" >&2
+    echo "opencode-cerebras: proxy failed to start" >&2
+    exit 2
+  fi
+  sleep 0.05
+done
+[[ -s "$tmp/port" ]] || { echo "opencode-cerebras: proxy never reported a port" >&2; exit 2; }
+port="$(cat "$tmp/port")"
+
+# Provider override: the key is a placeholder, the proxy adds the real one.
+cat >"$tmp/opencode.json" <<EOF
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "cerebras": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Cerebras (via smart-subagents proxy)",
+      "options": { "baseURL": "http://127.0.0.1:$port/v1", "apiKey": "proxy" },
+      "models": {
+        "gpt-oss-120b": { "name": "GPT-OSS 120B" },
+        "qwen-3.8-27b": { "name": "Qwen 3.8 27B" }
+      }
+    }
+  }
+}
+EOF
+
+# Watchdog: opencode has been seen to sit idle after its LLM loop without
+# exiting, and the dispatcher has no wall-time cap of its own. Every LLM call
+# passes through the proxy and lands in proxy.log, so "no request for
+# IDLE seconds" (default 300; a tool call has a 120 s cap inside opencode)
+# means a hang, not slow work. MAX_SECONDS (default 1800) bounds the run.
+# MAX_REQUESTS (default 120) catches the other failure: a model that keeps
+# calling tools without converging (qwen-3.8-27b was measured at 42 steps
+# and climbing on a two-file task gpt-oss-120b finishes in 5).
+IDLE="${OPENCODE_CEREBRAS_IDLE_TIMEOUT:-300}"
+MAX_SECONDS="${OPENCODE_CEREBRAS_MAX_SECONDS:-1800}"
+MAX_REQUESTS="${OPENCODE_CEREBRAS_MAX_REQUESTS:-120}"
+watchdog() {
+  local pid="$1" started
+  started="$(date +%s)"
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 5
+    local now last
+    now="$(date +%s)"
+    last="$(stat -f %m "$tmp/proxy.log" 2>/dev/null || stat -c %Y "$tmp/proxy.log" 2>/dev/null || echo "$started")"
+    if (( now - last > IDLE )); then
+      echo "opencode-cerebras: no LLM request for ${IDLE}s, killing idle opencode (pid $pid)" >&2
+      kill "$pid" 2>/dev/null; sleep 2; kill -9 "$pid" 2>/dev/null
+      return
+    fi
+    local n
+    n="$(grep -c 'cerebras-proxy POST' "$tmp/proxy.log" 2>/dev/null || echo 0)"
+    if (( n > MAX_REQUESTS )); then
+      echo "opencode-cerebras: ${n} LLM requests exceed the ${MAX_REQUESTS} cap (model not converging), killing opencode (pid $pid)" >&2
+      kill "$pid" 2>/dev/null; sleep 2; kill -9 "$pid" 2>/dev/null
+      return
+    fi
+    if (( now - started > MAX_SECONDS )); then
+      echo "opencode-cerebras: ${MAX_SECONDS}s wall-time cap reached, killing opencode (pid $pid)" >&2
+      kill "$pid" 2>/dev/null; sleep 2; kill -9 "$pid" 2>/dev/null
+      return
+    fi
+  done
+}
+
+run_opencode() {
+  OPENCODE_CONFIG="$tmp/opencode.json" "$@" "$OPENCODE_BIN" run --pure "${_args[@]}" &
+  local oc_pid=$!
+  watchdog "$oc_pid" &
+  local wd_pid=$!
+  local rc=0
+  wait "$oc_pid" || rc=$?
+  kill "$wd_pid" 2>/dev/null
+  wait "$wd_pid" 2>/dev/null || true
+  return "$rc"
+}
+
+rc=0
+if command -v sandbox-exec >/dev/null 2>&1; then
+  home_real="$(cd "$HOME" && pwd -P)"
+  tmp_real="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+  # Seatbelt: writes only where a worker legitimately needs them. Reads,
+  # network and process spawning stay open (allow default).
+  cat >"$tmp/sandbox.sb" <<EOF
+(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write*
+  (subpath "$WORKDIR")
+  (subpath "$tmp_real")
+  (subpath "$tmp")
+  (subpath "/private/tmp")
+  (subpath "/private/var/folders")
+  (subpath "$home_real/.local/share/opencode")
+  (subpath "$home_real/.local/state/opencode")
+  (subpath "$home_real/.cache/opencode")
+  (subpath "$home_real/.config/opencode")
+  (subpath "$home_real/.bun")
+  (subpath "$home_real/.cache/pytest")
+  (literal "/dev/null")
+  (literal "/dev/zero")
+  (regex #"^/dev/tty")
+  (regex #"^/dev/pty"))
+EOF
+  run_opencode sandbox-exec -f "$tmp/sandbox.sb" || rc=$?
+elif [[ "${OPENCODE_CEREBRAS_NO_SANDBOX:-}" == "1" ]]; then
+  echo "opencode-cerebras: sandbox-exec unavailable, running unsandboxed (OPENCODE_CEREBRAS_NO_SANDBOX=1)" >&2
+  run_opencode env || rc=$?
+else
+  echo "opencode-cerebras: sandbox-exec not found; set OPENCODE_CEREBRAS_NO_SANDBOX=1 to run without a write sandbox" >&2
+  exit 3
+fi
+exit "$rc"

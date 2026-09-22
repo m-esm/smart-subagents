@@ -303,7 +303,7 @@ def launched_model(spec, ctx: Dict[str, Any]) -> str:
         extra = {}
     if ENV_SUBAGENT_MODEL in extra:
         return extra[ENV_SUBAGENT_MODEL]
-    return _model_from_ctx(ctx)
+    return _model_from_ctx(ctx, spec)
 
 
 def launched_model_for_dir(dir_path: str, worker: str = "", reg=None) -> str:
@@ -335,7 +335,7 @@ def launched_model_for_dir(dir_path: str, worker: str = "", reg=None) -> str:
     try:
         return launched_model(spec, ctx)
     except AdapterError:
-        return _model_from_ctx({"args": args})
+        return _model_from_ctx({"args": args}, spec)
 
 
 def _first_line(path: str) -> str:
@@ -388,17 +388,22 @@ def _model_tokens(spec, ctx: Dict[str, Any]) -> List[str]:
     return [t.replace("{model}", model) for t in spec.model_flags]
 
 
-def _model_from_ctx(ctx: Dict[str, Any]) -> str:
-    """The --model value the recommender already chose, or ctx['model'].
+def _model_from_ctx(ctx: Dict[str, Any], spec=None) -> str:
+    """The model value the recommender already chose, or ctx['model'].
 
-    worker-args.txt is one token per line, so `--model` and its value are
-    adjacent entries. A missing pair means the agents JSON omits `model`.
+    worker-args.txt is one token per line, so the flag and its value are
+    adjacent entries. The flag is `--model` or, when a spec is given, the
+    first token of its `models.flag` (`-m` for kimi and cerebras). A missing
+    pair means the agents JSON omits `model`.
     """
     args = ctx.get("args")
     if args is not None:
+        flags = {"--model"}
+        if spec is not None and getattr(spec, "model_flags", None):
+            flags.add(str(spec.model_flags[0]))
         tokens = [str(a) for a in args]
         for i, tok in enumerate(tokens):
-            if tok == "--model" and i + 1 < len(tokens):
+            if tok in flags and i + 1 < len(tokens):
                 return tokens[i + 1]
             if tok.startswith("--model=") and len(tok) > 8:
                 return tok[8:]
@@ -950,7 +955,9 @@ def _error_text(obj: dict) -> str:
 
     def _msg(value) -> str:
         if isinstance(value, dict):
-            return str(value.get("message") or "")
+            # opencode nests the API error: {"name": "APIError", "data": {"message": ...}}
+            data = value.get("data") if isinstance(value.get("data"), dict) else {}
+            return str(value.get("message") or data.get("message") or "")
         return str(value or "")
 
     def _fallback() -> str:

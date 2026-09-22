@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.3.9
+
+A fifth worker, `cerebras`: opencode on Cerebras' API (gpt-oss-120b, about
+3000 tokens/s, a 720M-token day window on the measured account), and the
+first worker the registry can make the default.
+
+- `scripts/opencode-cerebras` drives `opencode run` through
+  `scripts/ssa/cerebras_proxy.py`, a stdlib reverse proxy on 127.0.0.1 that
+  strips the `reasoning_content` echo Cerebras answers with a 400 (every
+  AI-SDK client sends it, so the second turn of any agentic run died) and
+  injects the key from `~/.config/cerebras/env`, so the worker process never
+  holds it. On macOS `sandbox-exec` confines writes to the worktree, TMPDIR
+  and opencode's state dirs; without it the wrapper refuses unless
+  `OPENCODE_CEREBRAS_NO_SANDBOX=1`. Measured: a two-file task with tests in
+  13 s, 4 steps.
+- The wrapper rewrites the worktree path in every argument to its real path
+  (a `$TMPDIR` worktree arrives symlinked and double-slashed, and opencode
+  auto-rejects any path not spelled under its resolved project root as an
+  "external directory"), and runs a watchdog: no LLM request through the
+  proxy for `OPENCODE_CEREBRAS_IDLE_TIMEOUT` seconds (300) or
+  `OPENCODE_CEREBRAS_MAX_SECONDS` (1800) of wall time kills opencode, which
+  was seen to sit idle after its loop while the dispatcher has no cap;
+  `OPENCODE_CEREBRAS_MAX_REQUESTS` (120) kills a model that keeps calling
+  tools without converging.
+- Measured on a two-file task with tests: gpt-oss-120b 5 of 5 runs green in
+  12 to 30 s; qwen-3.8-27b looped past 42 steps on the first run, so the
+  registry pins gpt-oss-120b for every difficulty.
+- `adapters.launched_model` reads the registry's own model flag (`-m`), so
+  `model-used.txt` is filled for kimi and cerebras, not only `--model`.
+- `check_cerebras` reads the live meters from the rate-limit response
+  headers of one 1-token completion (Cerebras has no usage endpoint); six
+  windows, `tokens_day` binding, any exhausted window blocks eligibility.
+- Registry: a relative binary candidate resolves against the registry's own
+  directory; `default_for` (`{difficulty, size}`) names the worker
+  `recommend()` makes primary when it survives the filter. Never on a relaxed
+  floor, and `--prefer` still wins. `registry_default` is in the JSON.
+- `adapters._error_text` reads a nested `error.data.message` (opencode's
+  APIError shape), so its 429s reach the cooldown classifier.
+- Codex 0.153 dropped `wire_api = "chat"` and Cerebras serves no Responses
+  API, so codex cannot be the Cerebras driver; that is why opencode.
+
 ## 0.3.8
 
 `claim_not_in_diff` flagged 4 of the first 5 real reviews at 0.94+, all false:

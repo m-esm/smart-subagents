@@ -1,61 +1,268 @@
 {
   "schema_version": 1,
-  "_note": "Single source of truth for per-CLI knowledge. A fourth worker is an entry here plus a probe function in ai-cli-usage.py, never a code fork. Point SSA_WORKERS_JSON at another file to override. Placeholders allowed in argv templates: {worktree} {brief} {output} {session_id} {prompt} {effort} {model} {budget} {fork} {agents} {agent}. {effort}, {model}, {budget} and {fork} splice zero or more tokens; {agents} and {agent} are standalone (compact session-agent JSON and the agent name); the rest are single values. No token may contain shell metacharacters: the argv is executed directly, never through a shell.",
+  "_note": "Single source of truth for per-CLI knowledge. A new worker is an entry here plus a probe function in ai-cli-usage.py, never a code fork. A relative binary candidate resolves against this file's directory. `default_for` ({difficulty: [...], size: [...]}) names the worker recommend() makes primary for matching tasks whenever it survives the quota filter. Point SSA_WORKERS_JSON at another file to override. Placeholders allowed in argv templates: {worktree} {brief} {output} {session_id} {prompt} {effort} {model} {budget} {fork} {agents} {agent}. {effort}, {model}, {budget} and {fork} splice zero or more tokens; {agents} and {agent} are standalone (compact session-agent JSON and the agent name); the rest are single values. No token may contain shell metacharacters: the argv is executed directly, never through a shell.",
   "workers": {
+    "cerebras": {
+      "display_name": "opencode on Cerebras",
+      "_note": "opencode driven through scripts/opencode-cerebras: a local proxy (ssa/cerebras_proxy.py) strips the reasoning echo Cerebras rejects and injects the key from ~/.config/cerebras/env, and on macOS sandbox-exec confines writes to the worktree (hence sandbox: workspace). Two models on the current key: gpt-oss-120b (default) and qwen-3.8-27b. default_for makes it the primary for trivial and routine work whenever its day window has quota; --prefer still wins.",
+      "binary": {
+        "env": "CEREBRAS_WORKER_BIN",
+        "candidates": [
+          "opencode-cerebras"
+        ],
+        "path_name": "opencode-cerebras"
+      },
+      "auth_file": "~/.config/cerebras/env",
+      "probe": "check_cerebras",
+      "sandbox": "workspace",
+      "write_allowed_default": true,
+      "run": {
+        "cwd": "worktree",
+        "env_scrub": true
+      },
+      "default_for": {
+        "difficulty": [
+          "trivial",
+          "routine"
+        ]
+      },
+      "prompt": {
+        "implement": {
+          "transport": "file-ref",
+          "template": "Read the file {brief} and complete the task it describes."
+        },
+        "plan": {
+          "transport": "file-ref",
+          "template": "Read the file {brief} and complete the task it describes."
+        },
+        "resume": {
+          "transport": "file-ref",
+          "template": "Read the file {brief} and complete the task it describes."
+        }
+      },
+      "argv": {
+        "implement": [
+          "--format",
+          "json",
+          "--dir",
+          "{worktree}",
+          "{effort}",
+          "{model}",
+          "{prompt}"
+        ],
+        "plan": [
+          "--format",
+          "json",
+          "--agent",
+          "plan",
+          "--dir",
+          "{worktree}",
+          "{effort}",
+          "{model}",
+          "{prompt}"
+        ],
+        "resume": [
+          "--format",
+          "json",
+          "-s",
+          "{session_id}",
+          "--dir",
+          "{worktree}",
+          "{effort}",
+          "{model}",
+          "{prompt}"
+        ]
+      },
+      "output": {
+        "implement": "none",
+        "plan": "stdout",
+        "resume": "none"
+      },
+      "format": {
+        "implement": "jsonl",
+        "plan": "jsonl",
+        "resume": "jsonl"
+      },
+      "session": {
+        "kind": "jsonl-keys",
+        "keys": [
+          "sessionID"
+        ],
+        "_note": "opencode --format json puts sessionID on every event."
+      },
+      "final": {
+        "kind": "jsonl-event",
+        "match": {
+          "type": "text"
+        },
+        "keys": [
+          "part.text"
+        ]
+      },
+      "error": {
+        "kind": "jsonl-event",
+        "match": {
+          "type": "error"
+        },
+        "keys": [
+          "error.data.message",
+          "error.name"
+        ],
+        "_note": "Measured 2026-09-22: {\"type\":\"error\",\"error\":{\"name\":\"APIError\",\"data\":{\"message\":\"Bad Request: ...\",\"statusCode\":400}}}."
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "effort_flags": [
+        "--variant",
+        "{effort}"
+      ],
+      "models": {
+        "_note": "opencode wants provider/model. gpt-oss-120b is pinned for every difficulty: measured 2026-09-22 it finished a two-file task with tests in 5 steps on 5 of 5 runs, while qwen-3.8-27b (the only other live model on the key) looped past 42 steps without converging. Do not add a qwen rule without a new measurement.",
+        "flag": [
+          "-m",
+          "{model}"
+        ],
+        "rules": [
+          {
+            "model": "cerebras/gpt-oss-120b"
+          }
+        ]
+      },
+      "fit": {
+        "default": 0.95,
+        "impl": 1.0,
+        "review": 0.9,
+        "debug": 0.9,
+        "best_of_n": 1.3,
+        "analysis": 0.9
+      }
+    },
     "codex": {
       "display_name": "OpenAI Codex CLI",
       "binary": {
         "env": "CODEX_BIN",
-        "candidates": ["~/.local/bin/codex"],
+        "candidates": [
+          "~/.local/bin/codex"
+        ],
         "path_name": "codex"
       },
       "auth_file": "~/.codex/auth.json",
       "probe": "check_codex",
       "sandbox": "os",
       "write_allowed_default": true,
-      "run": { "cwd": "inherit", "env_scrub": false },
+      "run": {
+        "cwd": "inherit",
+        "env_scrub": false
+      },
       "prompt": {
-        "implement": { "transport": "stdin" },
-        "plan": { "transport": "stdin" },
-        "resume": { "transport": "stdin" }
+        "implement": {
+          "transport": "stdin"
+        },
+        "plan": {
+          "transport": "stdin"
+        },
+        "resume": {
+          "transport": "stdin"
+        }
       },
       "argv": {
         "implement": [
-          "exec", "-C", "{worktree}", "-s", "workspace-write", "--json",
-          "{effort}", "{model}", "-o", "{output}", "-"
+          "exec",
+          "-C",
+          "{worktree}",
+          "-s",
+          "workspace-write",
+          "--json",
+          "{effort}",
+          "{model}",
+          "-o",
+          "{output}",
+          "-"
         ],
         "plan": [
-          "exec", "-C", "{worktree}", "-s", "read-only",
-          "{effort}", "{model}", "-o", "{output}", "-"
+          "exec",
+          "-C",
+          "{worktree}",
+          "-s",
+          "read-only",
+          "{effort}",
+          "{model}",
+          "-o",
+          "{output}",
+          "-"
         ],
         "resume": [
-          "exec", "resume", "{session_id}", "-C", "{worktree}",
-          "-s", "workspace-write", "--json", "{effort}", "{model}", "-"
+          "exec",
+          "resume",
+          "{session_id}",
+          "-C",
+          "{worktree}",
+          "-s",
+          "workspace-write",
+          "--json",
+          "{effort}",
+          "{model}",
+          "-"
         ]
       },
-      "output": { "implement": "arg", "plan": "arg", "resume": "none" },
-      "format": { "implement": "jsonl", "plan": "text", "resume": "jsonl" },
+      "output": {
+        "implement": "arg",
+        "plan": "arg",
+        "resume": "none"
+      },
+      "format": {
+        "implement": "jsonl",
+        "plan": "text",
+        "resume": "jsonl"
+      },
       "session": {
         "kind": "jsonl-keys",
-        "keys": ["session_id", "sessionId", "thread", "thread_id"],
+        "keys": [
+          "session_id",
+          "sessionId",
+          "thread",
+          "thread_id"
+        ],
         "_note": "A bare top-level \"id\" is NOT a session id: codex emits one on ordinary stream items, and accepting it produced unresumable garbage."
       },
       "final": {
         "kind": "jsonl-event",
-        "match": { "type": "item.completed", "item.type": "agent_message" },
-        "keys": ["item.text"]
+        "match": {
+          "type": "item.completed",
+          "item.type": "agent_message"
+        },
+        "keys": [
+          "item.text"
+        ]
       },
       "error": {
         "kind": "jsonl-event",
-        "match": { "type": "turn.failed" },
-        "keys": ["error.message"],
+        "match": {
+          "type": "turn.failed"
+        },
+        "keys": [
+          "error.message"
+        ],
         "_note": "The real quota message: {\"type\":\"turn.failed\",\"error\":{\"message\":\"You have hit your usage limit. ...\"}}. Nothing else in the log says the run failed."
       },
-      "effort_ladder": ["low", "medium", "high"],
-      "effort_flags": ["-c", "model_reasoning_effort={effort}"],
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "effort_flags": [
+        "-c",
+        "model_reasoning_effort={effort}"
+      ],
       "models": {
         "_note": "No model override is configured. Codex model names are account-scoped, so nothing is invented here. To force one, add a rule such as {\"difficulty\": [\"frontier\"], \"model\": \"<name your account has>\"}.",
-        "flag": ["-m", "{model}"],
+        "flag": [
+          "-m",
+          "{model}"
+        ],
         "rules": []
       },
       "fit": {
@@ -71,14 +278,19 @@
       "display_name": "Grok CLI",
       "binary": {
         "env": "GROK_BIN",
-        "candidates": ["~/.grok/bin/grok"],
+        "candidates": [
+          "~/.grok/bin/grok"
+        ],
         "path_name": "grok"
       },
       "auth_file": "~/.grok/auth.json",
       "probe": "check_grok",
       "sandbox": "workspace",
       "write_allowed_default": true,
-      "run": { "cwd": "inherit", "env_scrub": false },
+      "run": {
+        "cwd": "inherit",
+        "env_scrub": false
+      },
       "_prompt_note": "file-ref, not arg: the whole brief in argv is readable by every local user through ps. The shell stages it in the worktree as BRIEF.md.",
       "prompt": {
         "implement": {
@@ -96,33 +308,95 @@
       },
       "argv": {
         "implement": [
-          "-p", "{prompt}", "--cwd", "{worktree}", "--sandbox", "workspace",
-          "{effort}", "{model}", "--output-format", "streaming-messages-json"
+          "-p",
+          "{prompt}",
+          "--cwd",
+          "{worktree}",
+          "--sandbox",
+          "workspace",
+          "{effort}",
+          "{model}",
+          "--output-format",
+          "streaming-messages-json"
         ],
         "plan": [
-          "-p", "{prompt}", "--cwd", "{worktree}", "--sandbox", "workspace",
-          "{effort}", "{model}"
+          "-p",
+          "{prompt}",
+          "--cwd",
+          "{worktree}",
+          "--sandbox",
+          "workspace",
+          "{effort}",
+          "{model}"
         ],
         "resume": [
-          "--resume", "{session_id}", "-p", "{prompt}", "--cwd", "{worktree}",
-          "--sandbox", "workspace", "{effort}", "{model}",
-          "--output-format", "streaming-messages-json"
+          "--resume",
+          "{session_id}",
+          "-p",
+          "{prompt}",
+          "--cwd",
+          "{worktree}",
+          "--sandbox",
+          "workspace",
+          "{effort}",
+          "{model}",
+          "--output-format",
+          "streaming-messages-json"
         ]
       },
-      "output": { "implement": "none", "plan": "stdout", "resume": "none" },
-      "format": { "implement": "jsonl", "plan": "text", "resume": "jsonl" },
-      "session": { "kind": "jsonl-keys", "keys": ["sessionId", "session_id"] },
-      "final": { "kind": "jsonl-event", "match": { "type": "result" }, "keys": ["result"] },
+      "output": {
+        "implement": "none",
+        "plan": "stdout",
+        "resume": "none"
+      },
+      "format": {
+        "implement": "jsonl",
+        "plan": "text",
+        "resume": "jsonl"
+      },
+      "session": {
+        "kind": "jsonl-keys",
+        "keys": [
+          "sessionId",
+          "session_id"
+        ]
+      },
+      "final": {
+        "kind": "jsonl-event",
+        "match": {
+          "type": "result"
+        },
+        "keys": [
+          "result"
+        ]
+      },
       "error": {
         "kind": "jsonl-event",
-        "match": { "type": "result", "is_error": true },
-        "keys": ["result", "error"]
+        "match": {
+          "type": "result",
+          "is_error": true
+        },
+        "keys": [
+          "result",
+          "error"
+        ]
       },
-      "effort_ladder": ["low", "medium", "high", "xhigh"],
-      "effort_flags": ["--reasoning-effort", "{effort}"],
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "effort_flags": [
+        "--reasoning-effort",
+        "{effort}"
+      ],
       "models": {
         "_note": "No model override is configured. Grok exposes reasoning effort instead, so difficulty already has a lever. Add rules here only if your account has a model you want pinned by difficulty.",
-        "flag": ["-m", "{model}"],
+        "flag": [
+          "-m",
+          "{model}"
+        ],
         "rules": []
       },
       "fit": {
@@ -138,14 +412,19 @@
       "display_name": "Kimi Code",
       "binary": {
         "env": "KIMI_BIN",
-        "candidates": ["~/.kimi-code/bin/kimi"],
+        "candidates": [
+          "~/.kimi-code/bin/kimi"
+        ],
         "path_name": "kimi"
       },
       "auth_file": "~/.kimi-code/credentials/kimi-code.json",
       "probe": "check_kimi",
       "sandbox": "none",
       "write_allowed_default": false,
-      "run": { "cwd": "worktree", "env_scrub": true },
+      "run": {
+        "cwd": "worktree",
+        "env_scrub": true
+      },
       "prompt": {
         "implement": {
           "transport": "file-ref",
@@ -162,35 +441,79 @@
       },
       "argv": {
         "implement": [
-          "-p", "{prompt}", "--output-format", "stream-json", "{effort}", "{model}"
+          "-p",
+          "{prompt}",
+          "--output-format",
+          "stream-json",
+          "{effort}",
+          "{model}"
         ],
-        "plan": ["-p", "{prompt}", "{effort}", "{model}"],
-        "resume": ["-S", "{session_id}", "-p", "{prompt}", "{effort}", "{model}"]
+        "plan": [
+          "-p",
+          "{prompt}",
+          "{effort}",
+          "{model}"
+        ],
+        "resume": [
+          "-S",
+          "{session_id}",
+          "-p",
+          "{prompt}",
+          "{effort}",
+          "{model}"
+        ]
       },
-      "output": { "implement": "none", "plan": "stdout", "resume": "none" },
-      "format": { "implement": "jsonl", "plan": "text", "resume": "jsonl" },
+      "output": {
+        "implement": "none",
+        "plan": "stdout",
+        "resume": "none"
+      },
+      "format": {
+        "implement": "jsonl",
+        "plan": "text",
+        "resume": "jsonl"
+      },
       "session": {
         "kind": "jsonl-event",
         "event_key": "type",
         "event": "session.resume_hint",
-        "keys": ["session_id"]
+        "keys": [
+          "session_id"
+        ]
       },
       "final": {
         "kind": "jsonl-event",
-        "match": { "role": "assistant" },
-        "keys": ["content"],
+        "match": {
+          "role": "assistant"
+        },
+        "keys": [
+          "content"
+        ],
         "_note": "kimi emits the session.resume_hint meta line LAST, so a generic scan returned the resume hint as the worker final word."
       },
       "effort_ladder": [],
       "effort_flags": [],
       "models": {
         "_note": "Kimi has no reasoning-effort flag, so a faster model alias is the only lever difficulty can pull. Rules are ordered, first match wins.",
-        "flag": ["-m", "{model}"],
+        "flag": [
+          "-m",
+          "{model}"
+        ],
         "rules": [
-          { "difficulty": ["trivial"], "model": "kimi-for-coding-highspeed" },
           {
-            "difficulty": ["routine"],
-            "size": ["tiny", "small"],
+            "difficulty": [
+              "trivial"
+            ],
+            "model": "kimi-for-coding-highspeed"
+          },
+          {
+            "difficulty": [
+              "routine"
+            ],
+            "size": [
+              "tiny",
+              "small"
+            ],
             "model": "kimi-for-coding-highspeed"
           }
         ]
@@ -208,7 +531,9 @@
       "display_name": "Claude Code (Fable)",
       "binary": {
         "env": "CLAUDE_BIN",
-        "candidates": ["~/.local/bin/claude"],
+        "candidates": [
+          "~/.local/bin/claude"
+        ],
         "path_name": "claude"
       },
       "probe": "check_claude",
@@ -218,7 +543,13 @@
       "run": {
         "cwd": "worktree",
         "env_scrub": true,
-        "env_keep": ["HOME", "PATH", "TMPDIR", "TERM", "USER"],
+        "env_keep": [
+          "HOME",
+          "PATH",
+          "TMPDIR",
+          "TERM",
+          "USER"
+        ],
         "env_pass": {
           "spawn_depth": "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH",
           "concurrent": "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS",
@@ -247,45 +578,120 @@
         "name": "ssa-worker",
         "description": "SSA dispatched worker: {task}",
         "prompt": "You are the dispatched worker and you are the labor. Complete the task in the brief yourself. Do not run smart-subagents.sh, do not spawn another CLI, do not delegate onward. Do not commit, do not push, do not reformat the tree.",
-        "disallowedTools": ["Task", "Agent"]
+        "disallowedTools": [
+          "Task",
+          "Agent"
+        ]
       },
       "argv": {
         "implement": [
-          "-p", "{prompt}", "--output-format", "json",
-          "--permission-mode", "acceptEdits",
-          "{effort}", "{model}", "{budget}",
-          "--agents", "{agents}", "--agent", "{agent}"
+          "-p",
+          "{prompt}",
+          "--output-format",
+          "json",
+          "--permission-mode",
+          "acceptEdits",
+          "{effort}",
+          "{model}",
+          "{budget}",
+          "--agents",
+          "{agents}",
+          "--agent",
+          "{agent}"
         ],
         "plan": [
-          "-p", "{prompt}", "--output-format", "json",
-          "--permission-mode", "plan",
-          "{effort}", "{model}", "{budget}",
-          "--agents", "{agents}", "--agent", "{agent}"
+          "-p",
+          "{prompt}",
+          "--output-format",
+          "json",
+          "--permission-mode",
+          "plan",
+          "{effort}",
+          "{model}",
+          "{budget}",
+          "--agents",
+          "{agents}",
+          "--agent",
+          "{agent}"
         ],
         "resume": [
-          "-p", "{prompt}", "--resume", "{session_id}", "{fork}", "--output-format", "json",
-          "--permission-mode", "acceptEdits",
-          "{effort}", "{model}", "{budget}",
-          "--agents", "{agents}", "--agent", "{agent}"
+          "-p",
+          "{prompt}",
+          "--resume",
+          "{session_id}",
+          "{fork}",
+          "--output-format",
+          "json",
+          "--permission-mode",
+          "acceptEdits",
+          "{effort}",
+          "{model}",
+          "{budget}",
+          "--agents",
+          "{agents}",
+          "--agent",
+          "{agent}"
         ]
       },
-      "output": { "implement": "none", "plan": "stdout", "resume": "none" },
-      "format": { "implement": "json", "plan": "json", "resume": "json" },
-      "session": { "kind": "json-keys", "keys": ["session_id"] },
-      "final": { "kind": "json-key", "keys": ["result"] },
+      "output": {
+        "implement": "none",
+        "plan": "stdout",
+        "resume": "none"
+      },
+      "format": {
+        "implement": "json",
+        "plan": "json",
+        "resume": "json"
+      },
+      "session": {
+        "kind": "json-keys",
+        "keys": [
+          "session_id"
+        ]
+      },
+      "final": {
+        "kind": "json-key",
+        "keys": [
+          "result"
+        ]
+      },
       "error": {
         "kind": "json-key",
-        "keys": ["error", "result"],
+        "keys": [
+          "error",
+          "result"
+        ],
         "_note": "Only read when the result object says is_error, or its subtype names an error."
       },
-      "effort_ladder": ["low", "medium", "high", "xhigh", "max"],
-      "effort_flags": ["--effort", "{effort}"],
-      "budget_flags": ["--max-budget-usd", "{budget}"],
-      "fork_flags": ["--fork-session"],
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "effort_flags": [
+        "--effort",
+        "{effort}"
+      ],
+      "budget_flags": [
+        "--max-budget-usd",
+        "{budget}"
+      ],
+      "fork_flags": [
+        "--fork-session"
+      ],
       "models": {
         "_note": "This worker is Fable. Every difficulty pins --model fable; effort is the only rung.",
-        "flag": ["--model", "{model}"],
-        "rules": [{ "model": "fable" }]
+        "flag": [
+          "--model",
+          "{model}"
+        ],
+        "rules": [
+          {
+            "model": "fable"
+          }
+        ]
       },
       "fit": {
         "default": 1.1,
