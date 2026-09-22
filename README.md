@@ -8,7 +8,7 @@ Quota-aware subagent routing for [Claude Code](https://claude.com/claude-code). 
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-black.svg)](LICENSE)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-6544e9.svg)](https://docs.claude.com/en/docs/claude-code/plugins)
-[![Workers](https://img.shields.io/badge/workers-codex%20%7C%20grok%20%7C%20kimi%20%7C%20claude-1f6feb.svg)](#prerequisites)
+[![Workers](https://img.shields.io/badge/workers-cerebras%20%7C%20codex%20%7C%20grok%20%7C%20kimi%20%7C%20claude-1f6feb.svg)](#prerequisites)
 [![Shell + Python](https://img.shields.io/badge/deps-bash%20%2B%20python3-success.svg)](#prerequisites)
 
 </div>
@@ -282,6 +282,13 @@ Python 3.9+, git, bash, and at least one worker CLI you're already logged into. 
 authentication: it reads the credentials those CLIs stored, to call each provider's usage endpoint.
 The worker list, sandboxes and binary lookup live in [`scripts/workers.json`](scripts/workers.json),
 not in a table here, and `doctor` prints it with what is installed.
+
+The `cerebras` worker is [opencode](https://opencode.ai) on Cerebras' API, driven through
+[`scripts/opencode-cerebras`](scripts/opencode-cerebras): it needs `opencode` on PATH and
+`CEREBRAS_API_KEY=...` in `~/.config/cerebras/env` (mode 600) or the environment. A local proxy
+strips the reasoning echo Cerebras rejects and holds the key, and on macOS `sandbox-exec`
+confines writes to the worktree. Its registry entry carries `default_for`, so it is the primary
+worker for `trivial` and `routine` work whenever its day window has quota; `--prefer` still wins.
 
 As a Claude Code plugin:
 

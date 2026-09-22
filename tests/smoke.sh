@@ -50,7 +50,7 @@ python3 "$ROOT/scripts/ssa/cli.py" registry-validate >"$TEST_TMP/registry.txt" \
 grep -q 'registry ok' "$TEST_TMP/registry.txt" || fail "registry-validate output"
 python3 "$ROOT/scripts/ssa/cli.py" workers >"$TEST_TMP/workers.txt" \
   || fail "workers lists"
-for smoke_worker in codex grok kimi claude; do
+for smoke_worker in cerebras codex grok kimi claude; do
   grep -q "^${smoke_worker}	" "$TEST_TMP/workers.txt" || \
     fail "workers lists $smoke_worker"
 done

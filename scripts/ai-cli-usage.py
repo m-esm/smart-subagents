@@ -1229,6 +1229,128 @@ def parse_kimi_usage(
 
 
 # ---------------------------------------------------------------------------
+# Cerebras (opencode worker through scripts/opencode-cerebras)
+#
+# Cerebras has no usage endpoint. Every response carries the live rate-limit
+# meters as headers (x-ratelimit-{limit,remaining}-{tokens,requests}-{minute,
+# hour,day}), so the probe is one minimal chat completion (about 70 tokens on
+# a 720M/day plan) and the parser reads those headers. The day token window is
+# the binding one; minute and hour windows are throughput and only gate
+# eligibility when exhausted.
+# ---------------------------------------------------------------------------
+
+CEREBRAS_API = "https://api.cerebras.ai/v1/chat/completions"
+CEREBRAS_KEY_FILE = HOME / ".config" / "cerebras" / "env"
+CEREBRAS_PROBE_MODEL = "gpt-oss-120b"
+_CEREBRAS_PERIODS = (("minute", 60.0), ("hour", 3600.0), ("day", 86400.0))
+_CEREBRAS_KINDS = ("tokens", "requests")
+
+
+def _http_headers(
+    url: str, headers: dict[str, str], method: str = "GET", data: Optional[bytes] = None
+) -> tuple[int, dict[str, str], str]:
+    """Like _http_json but returns (status, lowercased headers, body text)."""
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            hdrs = {k.lower(): v for k, v in r.headers.items()}
+            return r.status, hdrs, r.read().decode("utf-8", errors="replace")[:2000]
+    except urllib.error.HTTPError as e:
+        hdrs = {k.lower(): v for k, v in e.headers.items()}
+        return e.code, hdrs, e.read().decode("utf-8", errors="replace")[:500]
+    except Exception as e:
+        return 0, {}, str(e)
+
+
+def check_cerebras() -> CliStatus:
+    st = CliStatus(cli="cerebras", available=False)
+    from ssa.cerebras_proxy import read_key  # same key lookup the proxy uses
+
+    key = read_key(str(CEREBRAS_KEY_FILE))
+    if not key:
+        st.error = "no CEREBRAS_API_KEY in the environment or %s" % CEREBRAS_KEY_FILE
+        return st
+    body = json.dumps(
+        {
+            "model": CEREBRAS_PROBE_MODEL,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+        }
+    ).encode("utf-8")
+    code, hdrs, text = _http_headers(
+        CEREBRAS_API,
+        {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "User-Agent": "smart-subagents/cli-usage",
+        },
+        method="POST",
+        data=body,
+    )
+    if code == 429 and hdrs:
+        # Rate limited is still a readable meter: parse what the headers say.
+        return parse_cerebras_usage(hdrs, st)
+    if code != 200:
+        _probe_failed(st, code, text)
+        return st
+    return parse_cerebras_usage(hdrs, st)
+
+
+def parse_cerebras_usage(headers: dict, st: Optional[CliStatus] = None) -> CliStatus:
+    """Pure: turn Cerebras rate-limit response headers into a CliStatus.
+
+    `headers` keys are matched case-insensitively. One window per
+    (kind, period) pair that has both a limit and a remaining header;
+    tokens_day is the binding meter. No network.
+    """
+    st = st if st is not None else CliStatus(cli="cerebras", available=True)
+    st.available = True
+    st.plan = "api-key"
+    hdrs = {str(k).lower(): v for k, v in (headers or {}).items()}
+    day_pct: Optional[float] = None
+    exhausted: list[str] = []
+    for kind in _CEREBRAS_KINDS:
+        for period, seconds in _CEREBRAS_PERIODS:
+            name = f"{kind}_{period}"
+            limit = _num(st, hdrs.get(f"x-ratelimit-limit-{kind}-{period}"), name + ".limit")
+            remaining = _num(
+                st, hdrs.get(f"x-ratelimit-remaining-{kind}-{period}"), name + ".remaining"
+            )
+            if limit is None or remaining is None:
+                continue
+            used = max(0.0, limit - remaining)
+            pct = (used / limit * 100.0) if limit > 0 else None
+            st.windows.append(
+                Window(
+                    name=name,
+                    used_pct=pct,
+                    remaining_pct=(100.0 - pct) if pct is not None else None,
+                    used=used,
+                    limit=limit,
+                    remaining=remaining,
+                    unit=kind,
+                    severity=_severity(pct),
+                    period_seconds=seconds,
+                )
+            )
+            if pct is not None and pct >= 99.5:
+                exhausted.append(name)
+            if name == "tokens_day":
+                day_pct = pct
+    if day_pct is None:
+        _mark_missing_usage(st)
+    else:
+        st.score = max(0.0, 100.0 - day_pct)
+        st.eligible = not exhausted
+        if exhausted:
+            st.skip_reason = "Cerebras window exhausted: " + ", ".join(exhausted)
+    spec = REGISTRY.workers.get("cerebras")
+    st.extras["sandbox"] = bool(spec) and spec.sandbox != "none"
+    st.extras["probe_model"] = CEREBRAS_PROBE_MODEL
+    return st
+
+
+# ---------------------------------------------------------------------------
 # Recommendation
 # ---------------------------------------------------------------------------
 
@@ -1814,13 +1936,29 @@ def recommend(
         local_labor = False
 
     primary = ranked_statuses[0].cli if ranked_statuses else None
-    # A preferred CLI that survived the filter wins outright: parent intent
-    # beats a marginal ranking difference, and no thumb on the scale is needed.
-    if prefer and prefer in {s.cli for s in ranked_statuses}:
+    ranked_names = {s.cli for s in ranked_statuses}
+    # The registry can name a default worker per difficulty/size
+    # (workers.json `default_for`). It wins whenever it survives the quota
+    # filter: that is how "use the cheap fast worker for routine labor" is
+    # enforced rather than hoped for. An explicit --prefer still beats it.
+    registry_default = REGISTRY.default_worker(difficulty, task_size)
+    default_applied = False
+    if prefer and prefer in ranked_names:
+        # A preferred CLI that survived the filter wins outright: parent
+        # intent beats a marginal ranking difference.
         primary = prefer
+    elif registry_default and not relaxed and registry_default in ranked_names:
+        default_applied = primary != registry_default
+        primary = registry_default
     fallbacks = [s.cli for s in ranked_statuses if s.cli != primary]
 
     reasons = []
+    if default_applied:
+        reasons.append(
+            f"{registry_default} is the registry default for "
+            f"difficulty={difficulty} size={task_size} (workers.json default_for) "
+            f"and has quota; ranked winner was {ranked_statuses[0].cli}"
+        )
     if primary:
         top = next(s for s in ranked_statuses if s.cli == primary)
         reasons.append(
@@ -1880,6 +2018,7 @@ def recommend(
             c: worker_args(c, difficulty, task_size) for c in WORKER_CLIS
         },
         "prefer": prefer or None,
+        "registry_default": registry_default or None,
         "rank_basis": rank_basis,
         "floor_relaxed": relaxed,
         "cooldowns": {
@@ -1923,6 +2062,7 @@ PROBES = {
     "check_codex": check_codex,
     "check_grok": check_grok,
     "check_kimi": check_kimi,
+    "check_cerebras": check_cerebras,
 }
 
 NO_PROBE = "no quota probe"

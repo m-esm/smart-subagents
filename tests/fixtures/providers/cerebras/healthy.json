@@ -1,0 +1,16 @@
+{
+  "headers": {
+    "x-ratelimit-limit-tokens-minute": "500000",
+    "x-ratelimit-remaining-tokens-minute": "500000",
+    "x-ratelimit-limit-tokens-hour": "30000000",
+    "x-ratelimit-remaining-tokens-hour": "30000000",
+    "x-ratelimit-limit-tokens-day": "720000000",
+    "x-ratelimit-remaining-tokens-day": "714000000",
+    "x-ratelimit-limit-requests-minute": "1000",
+    "x-ratelimit-remaining-requests-minute": "999",
+    "x-ratelimit-limit-requests-hour": "60000",
+    "x-ratelimit-remaining-requests-hour": "59999",
+    "x-ratelimit-limit-requests-day": "1440000",
+    "x-ratelimit-remaining-requests-day": "1439999"
+  }
+}

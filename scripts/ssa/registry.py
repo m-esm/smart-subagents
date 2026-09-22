@@ -117,11 +117,15 @@ def _require(where: str, block: dict, key: str, types: tuple) -> Any:
 class WorkerSpec:
     """One registry entry, validated."""
 
-    def __init__(self, name: str, block: dict):
+    def __init__(self, name: str, block: dict, base_dir: Optional[Path] = None):
         where = "worker %r" % name
         if not isinstance(block, dict):
             raise _fail(where, "entry is not an object")
         self.name = name
+        # Where a relative binary candidate resolves: the registry file's own
+        # directory, so a worker shipped beside workers.json (a wrapper script)
+        # needs no absolute path in the registry.
+        self.base_dir = Path(base_dir) if base_dir is not None else DEFAULT_PATH.parent
         self.display_name = str(_require(where, block, "display_name", (str,)))
 
         binary = _require(where, block, "binary", (dict,))
@@ -341,6 +345,8 @@ class WorkerSpec:
                 }
             )
 
+        self.default_for = self._default_for(where, block)
+
         fit = block.get("fit") or {}
         if not isinstance(fit, dict):
             raise _fail(where, "fit is not an object")
@@ -350,6 +356,38 @@ class WorkerSpec:
                 self.fit[str(kind_name)] = float(value)
             except (TypeError, ValueError):
                 raise _fail(where, "fit.%s is not a number" % kind_name)
+
+    @staticmethod
+    def _default_for(where: str, block: dict) -> Optional[Dict[str, List[str]]]:
+        """Optional {"difficulty": [...], "size": [...]}: when a task matches,
+        this worker is the primary as long as it survives the quota filter.
+        An absent axis matches every value. None when not declared."""
+        raw = block.get("default_for")
+        if raw is None:
+            return None
+        if not isinstance(raw, dict) or not raw:
+            raise _fail(where, "default_for is not a non-empty object")
+        out: Dict[str, List[str]] = {}
+        for axis, values in raw.items():
+            if axis not in ("difficulty", "size"):
+                raise _fail(where, "default_for names unknown axis %r" % axis)
+            if not isinstance(values, list) or not values or not all(
+                isinstance(v, str) and v for v in values
+            ):
+                raise _fail(where, "default_for.%s is not a non-empty list of strings" % axis)
+            out[axis] = [str(v) for v in values]
+        return out
+
+    def is_default_for(self, difficulty: str, size: str) -> bool:
+        if not self.default_for:
+            return False
+        wanted = self.default_for.get("difficulty")
+        if wanted and difficulty not in wanted:
+            return False
+        wanted = self.default_for.get("size")
+        if wanted and size not in wanted:
+            return False
+        return True
 
     @staticmethod
     def _env_keep(where: str, run: dict) -> List[str]:
@@ -490,6 +528,8 @@ class WorkerSpec:
             path = candidate
             if path.startswith("~/"):
                 path = os.path.join(home, path[2:])
+            elif not os.path.isabs(path):
+                path = os.path.join(str(self.base_dir), path)
             if os.path.isfile(path) and os.access(path, os.X_OK):
                 return path
         if self.binary_path_name:
@@ -519,6 +559,7 @@ class WorkerSpec:
             "modes": sorted(self.argv),
             "effort_ladder": list(self.effort_ladder),
             "fit": dict(self.fit),
+            "default_for": dict(self.default_for) if self.default_for else None,
         }
 
 
@@ -540,7 +581,7 @@ class Registry:
         for name, block in workers.items():
             if not re.match(r"^[a-z][a-z0-9_-]*$", str(name)):
                 raise _fail(where, "worker name %r is not [a-z][a-z0-9_-]*" % name)
-            self.workers[str(name)] = WorkerSpec(str(name), block)
+            self.workers[str(name)] = WorkerSpec(str(name), block, base_dir=path.parent)
 
     @property
     def names(self) -> tuple:
@@ -554,6 +595,13 @@ class Registry:
                 % (name, ", ".join(self.names) or "(none)")
             )
         return spec
+
+    def default_worker(self, difficulty: str, size: str) -> str:
+        """First worker (file order) whose default_for matches, or ""."""
+        for name, spec in self.workers.items():
+            if spec.is_default_for(difficulty, size):
+                return name
+        return ""
 
     def fit_table(self) -> Dict[str, Dict[str, float]]:
         """kind -> {worker: multiplier}. Absent priors default to 1.0."""
