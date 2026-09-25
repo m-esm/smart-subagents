@@ -371,6 +371,81 @@ def _keychain_claude_creds() -> Optional[dict]:
     return None
 
 
+def _file_claude_creds() -> Optional[dict]:
+    # Linux Claude Code keeps its login in this file; so does a host where a
+    # `claude setup-token` was written in by hand (no refresh token).
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(Path.home(), ".claude")
+    try:
+        with open(os.path.join(base, ".credentials.json")) as f:
+            d = json.load(f)
+    except Exception:
+        return None
+    return d if isinstance(d, dict) and "claudeAiOauth" in d else None
+
+
+def _env_claude_creds() -> Optional[dict]:
+    tok = (os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()
+    return {"claudeAiOauth": {"accessToken": tok}} if tok else None
+
+
+CLAUDE_HEADER_PROBE_MODEL = "claude-haiku-4-5-20251001"
+
+
+def claude_usage_from_headers(headers: dict) -> dict:
+    """Pure: unified rate-limit headers -> the oauth/usage payload shape.
+
+    A setup-token carries user:inference only, so /api/oauth/usage answers
+    403 oauth_scope_insufficient. Every inference response still carries the
+    account's 5h and 7d utilization (0..1) and reset (epoch seconds), which is
+    the same meter. The Fable-scoped weekly limit is not in the headers.
+    """
+    h = {k.lower(): v for k, v in headers.items()}
+    out: dict = {}
+    for key, name in (("5h", "five_hour"), ("7d", "seven_day")):
+        raw = h.get(f"anthropic-ratelimit-unified-{key}-utilization")
+        if raw is None:
+            continue
+        try:
+            util = float(raw) * 100.0
+        except ValueError:
+            continue
+        block: dict = {"utilization": util}
+        reset = h.get(f"anthropic-ratelimit-unified-{key}-reset")
+        if reset:
+            try:
+                block["resets_at"] = datetime.fromtimestamp(float(reset), timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+            except ValueError:
+                pass
+        out[name] = block
+    return out
+
+
+def _claude_header_usage(access: str) -> tuple[int, dict]:
+    body = json.dumps(
+        {
+            "model": CLAUDE_HEADER_PROBE_MODEL,
+            "max_tokens": 1,
+            "system": "You are Claude Code, Anthropic's official CLI for Claude.",
+            "messages": [{"role": "user", "content": "ping"}],
+        }
+    ).encode("utf-8")
+    code, hdrs, _ = _http_headers(
+        "https://api.anthropic.com/v1/messages",
+        {
+            "Authorization": f"Bearer {access}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+            "User-Agent": "claude-code/cli",
+        },
+        method="POST",
+        data=body,
+    )
+    return code, claude_usage_from_headers(hdrs)
+
+
 # ---------------------------------------------------------------------------
 # Claude
 # ---------------------------------------------------------------------------
@@ -378,7 +453,7 @@ def _keychain_claude_creds() -> Optional[dict]:
 
 def check_claude() -> CliStatus:
     st = CliStatus(cli="claude", available=False)
-    creds = _keychain_claude_creds()
+    creds = _keychain_claude_creds() or _file_claude_creds() or _env_claude_creds()
     if not creds or "claudeAiOauth" not in creds:
         # Fallback: claude auth status for plan only
         try:
@@ -417,6 +492,13 @@ def check_claude() -> CliStatus:
             "User-Agent": "claude-code/cli",
         },
     )
+    if code == 403 and "oauth_scope_insufficient" in json.dumps(data):
+        hcode, hdata = _claude_header_usage(access)
+        if hdata:
+            st.extras["meter_source"] = "rate-limit headers (setup-token)"
+            return parse_claude_usage(hdata, None, st)
+        _probe_failed(st, hcode, "setup-token and no rate-limit headers")
+        return st
     if code != 200 or not isinstance(data, dict):
         _probe_failed(st, code, data)
         return st
