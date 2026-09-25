@@ -10,8 +10,9 @@
 #   3. on macOS, confines opencode's file writes to the working directory,
 #      TMPDIR and opencode's own state dirs with sandbox-exec (Seatbelt), the
 #      same mechanism codex uses. That is what lets the registry call this
-#      worker `sandbox: workspace`. Without sandbox-exec the wrapper refuses to
-#      run unless OPENCODE_CEREBRAS_NO_SANDBOX=1 accepts an unsandboxed run.
+#      worker `sandbox: workspace`. On Linux bubblewrap (bwrap) does the same
+#      job. With neither, the wrapper refuses to run unless
+#      OPENCODE_CEREBRAS_NO_SANDBOX=1 accepts an unsandboxed run.
 #
 # Env: OPENCODE_BIN (override binary), OPENCODE_CEREBRAS_NO_SANDBOX=1,
 #      OPENCODE_CEREBRAS_IDLE_TIMEOUT, OPENCODE_CEREBRAS_MAX_SECONDS,
@@ -164,11 +165,24 @@ if command -v sandbox-exec >/dev/null 2>&1; then
   (regex #"^/dev/pty"))
 EOF
   run_opencode sandbox-exec -f "$tmp/sandbox.sb" || rc=$?
+elif command -v bwrap >/dev/null 2>&1 && bwrap --ro-bind / / --dev /dev true 2>/dev/null; then
+  # Linux: bubblewrap gives the same shape as the Seatbelt profile. The whole
+  # filesystem is read-only except the worktree, TMPDIR and opencode's own
+  # state dirs. Network stays shared, so the loopback proxy is reachable.
+  home_real="$(cd "$HOME" && pwd -P)"
+  tmp_real="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+  bw=(bwrap --ro-bind / / --dev /dev --proc /proc --die-with-parent
+    --bind "$WORKDIR" "$WORKDIR" --bind "$tmp_real" "$tmp_real" --bind "$tmp" "$tmp")
+  for d in .local/share/opencode .local/state/opencode .cache/opencode .config/opencode .bun .cache/pytest; do
+    mkdir -p "$home_real/$d"
+    bw+=(--bind "$home_real/$d" "$home_real/$d")
+  done
+  run_opencode "${bw[@]}" -- || rc=$?
 elif [[ "${OPENCODE_CEREBRAS_NO_SANDBOX:-}" == "1" ]]; then
-  echo "opencode-cerebras: sandbox-exec unavailable, running unsandboxed (OPENCODE_CEREBRAS_NO_SANDBOX=1)" >&2
+  echo "opencode-cerebras: no sandbox-exec or usable bwrap, running unsandboxed (OPENCODE_CEREBRAS_NO_SANDBOX=1)" >&2
   run_opencode env || rc=$?
 else
-  echo "opencode-cerebras: sandbox-exec not found; set OPENCODE_CEREBRAS_NO_SANDBOX=1 to run without a write sandbox" >&2
+  echo "opencode-cerebras: no sandbox-exec (macOS) or usable bwrap (Linux); install bubblewrap or set OPENCODE_CEREBRAS_NO_SANDBOX=1 to run without a write sandbox" >&2
   exit 3
 fi
 exit "$rc"
