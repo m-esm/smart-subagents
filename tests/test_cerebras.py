@@ -294,11 +294,17 @@ class ProxyTests(unittest.TestCase):
             env=env,
             stderr=subprocess.PIPE,
         )
-        for _ in range(100):
-            if os.path.exists(self.port_file):
+        # Cold python start on a CI runner can take seconds; wait while the
+        # proxy is alive, and show its stderr if it died instead.
+        deadline = time.time() + 20
+        while time.time() < deadline and not os.path.exists(self.port_file):
+            if self.proc.poll() is not None:
                 break
             time.sleep(0.05)
-        self.assertTrue(os.path.exists(self.port_file), "proxy never reported a port")
+        if not os.path.exists(self.port_file):
+            self.proc.kill()
+            err = self.proc.stderr.read().decode(errors="replace") if self.proc.stderr else ""
+            self.fail("proxy never reported a port (rc=%s): %s" % (self.proc.poll(), err[-800:]))
         self.port = int(Path(self.port_file).read_text().strip())
 
     def tearDown(self):
