@@ -8,7 +8,7 @@ Quota-aware subagent routing for [Claude Code](https://claude.com/claude-code). 
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-black.svg)](LICENSE)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-6544e9.svg)](https://docs.claude.com/en/docs/claude-code/plugins)
-[![Workers](https://img.shields.io/badge/workers-cerebras%20%7C%20codex%20%7C%20grok%20%7C%20kimi%20%7C%20claude-1f6feb.svg)](#prerequisites)
+[![Workers](https://img.shields.io/badge/workers-cerebras%20%7C%20deepseek%20%7C%20codex%20%7C%20grok%20%7C%20kimi%20%7C%20claude-1f6feb.svg)](#prerequisites)
 [![Shell + Python](https://img.shields.io/badge/deps-bash%20%2B%20python3-success.svg)](#prerequisites)
 
 </div>
@@ -289,6 +289,13 @@ The `cerebras` worker is [opencode](https://opencode.ai) on Cerebras' API, drive
 strips the reasoning echo Cerebras rejects and holds the key, and on macOS `sandbox-exec`
 confines writes to the worktree. Its registry entry carries `default_for`, so it is the primary
 worker for `trivial` and `routine` work whenever its day window has quota; `--prefer` still wins.
+
+The `deepseek` worker is the same wrapper under the name
+[`scripts/opencode-deepseek`](scripts/opencode-deepseek), with `DEEPSEEK_API_KEY=...` in
+`~/.config/deepseek/env` (mode 600). It is prepaid, so its meter is money: a daily spend cap
+(`DEEPSEEK_DAILY_USD`, default 5) computed from the balance endpoint, and a balance floor
+(`DEEPSEEK_MIN_BALANCE`, default 1). It is the default for `hard` work: V4 Pro, with V4.1
+Flash for anything cheaper when it is picked explicitly.
 
 As a Claude Code plugin:
 

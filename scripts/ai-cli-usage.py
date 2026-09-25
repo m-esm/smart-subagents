@@ -30,7 +30,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -1433,6 +1433,146 @@ def parse_cerebras_usage(headers: dict, st: Optional[CliStatus] = None) -> CliSt
 
 
 # ---------------------------------------------------------------------------
+# DeepSeek (opencode worker through scripts/opencode-deepseek)
+#
+# Pay-per-token on a prepaid balance, and DeepSeek publishes no rate-limit
+# headers, so the binding meter is money. GET /user/balance returns the USD
+# balance. The first reading of each UTC day is kept as a snapshot under the
+# state dir; the day's spend is the snapshot minus the current balance, and
+# `spend_day` is that spend against DEEPSEEK_DAILY_USD (default 5). The worker
+# goes ineligible when the day cap is spent or the balance falls under
+# DEEPSEEK_MIN_BALANCE (default 1). A balance that rose since the snapshot is a
+# top-up: the snapshot restarts there. Every host keeps its own snapshot of
+# one shared balance, so the spend it sees is fleet-wide.
+# ---------------------------------------------------------------------------
+
+DEEPSEEK_API = "https://api.deepseek.com/user/balance"
+DEEPSEEK_KEY_FILE = HOME / ".config" / "deepseek" / "env"
+DEEPSEEK_KEY_NAME = "DEEPSEEK_API_KEY"
+
+
+def _deepseek_env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+def parse_deepseek_usage(
+    payload: Any,
+    snapshot: Optional[dict],
+    today: str,
+    daily_cap: float,
+    min_balance: float,
+    st: Optional[CliStatus] = None,
+) -> tuple[CliStatus, dict]:
+    """Pure: /user/balance JSON plus the day snapshot -> (CliStatus, new snapshot).
+
+    No network, no file IO. `today` is the UTC date string the snapshot keys on.
+    """
+    st = st if st is not None else CliStatus(cli="deepseek", available=True)
+    st.available = True
+    st.plan = "api-key (prepaid)"
+    infos = (payload or {}).get("balance_infos") if isinstance(payload, dict) else None
+    usd = None
+    for info in infos or []:
+        if isinstance(info, dict) and info.get("currency") == "USD":
+            usd = _num(st, info.get("total_balance"), "balance.usd")
+    if usd is None:
+        _mark_missing_usage(st)
+        return st, dict(snapshot or {})
+    snap = dict(snapshot or {})
+    if snap.get("day") != today or not isinstance(snap.get("start"), (int, float)) or usd > snap["start"]:
+        snap = {"day": today, "start": usd}
+    spent = max(0.0, snap["start"] - usd)
+    cap = daily_cap if daily_cap > 0 else 0.0
+    day_pct = min(100.0, spent / cap * 100.0) if cap else 100.0
+    now = datetime.now(timezone.utc)
+    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    st.windows.append(
+        Window(
+            name="spend_day",
+            used_pct=day_pct,
+            remaining_pct=100.0 - day_pct,
+            used=round(spent, 4),
+            limit=cap,
+            remaining=round(max(0.0, cap - spent), 4),
+            unit="usd",
+            severity=_severity(day_pct),
+            period_seconds=86400.0,
+            resets_at=midnight.isoformat(),
+            resets_in_hours=round((midnight - now).total_seconds() / 3600.0, 2),
+            note="daily spend cap DEEPSEEK_DAILY_USD",
+        )
+    )
+    # The balance is a gate, not a meter: a window with no percentage would
+    # read as unknown and halve the effective score, so it lives in extras.
+    low = usd < min_balance
+    st.extras["balance_usd"] = usd
+    st.extras["min_balance_usd"] = min_balance
+    st.extras["spent_today_usd"] = round(spent, 4)
+    st.score = max(0.0, 100.0 - day_pct)
+    reasons = []
+    if payload.get("is_available") is False:
+        reasons.append("account reports is_available=false")
+    if low:
+        reasons.append("balance $%.2f under the $%.2f floor" % (usd, min_balance))
+    if day_pct >= 99.5:
+        reasons.append("daily spend cap $%.2f reached" % cap)
+    st.eligible = not reasons
+    if reasons:
+        st.skip_reason = "DeepSeek: " + "; ".join(reasons)
+    spec = REGISTRY.workers.get("deepseek")
+    st.extras["sandbox"] = bool(spec) and spec.sandbox != "none"
+    return st, snap
+
+
+def check_deepseek() -> CliStatus:
+    st = CliStatus(cli="deepseek", available=False)
+    from ssa.cerebras_proxy import read_key  # same key lookup the proxy uses
+
+    key = read_key(str(DEEPSEEK_KEY_FILE), DEEPSEEK_KEY_NAME)
+    if not key:
+        st.error = "no %s in the environment or %s" % (DEEPSEEK_KEY_NAME, DEEPSEEK_KEY_FILE)
+        return st
+    code, _hdrs, text = _http_headers(
+        DEEPSEEK_API,
+        {"Authorization": f"Bearer {key}", "User-Agent": "smart-subagents/cli-usage"},
+    )
+    if code != 200:
+        _probe_failed(st, code, text)
+        return st
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        _probe_failed(st, code, "unparseable balance body")
+        return st
+    snap_path = _state_dir() / "deepseek-day.json"
+    try:
+        snapshot = json.loads(snap_path.read_text())
+    except (OSError, ValueError):
+        snapshot = None
+    st, snap = parse_deepseek_usage(
+        payload,
+        snapshot,
+        datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        _deepseek_env_float("DEEPSEEK_DAILY_USD", 5.0),
+        _deepseek_env_float("DEEPSEEK_MIN_BALANCE", 1.0),
+        st,
+    )
+    if snap and snap != snapshot:
+        try:
+            snap_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            tmp = snap_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(snap))
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, snap_path)
+        except OSError as exc:
+            st.extras["snapshot_error"] = str(exc)
+    return st
+
+
+# ---------------------------------------------------------------------------
 # Recommendation
 # ---------------------------------------------------------------------------
 
@@ -2145,6 +2285,7 @@ PROBES = {
     "check_grok": check_grok,
     "check_kimi": check_kimi,
     "check_cerebras": check_cerebras,
+    "check_deepseek": check_deepseek,
 }
 
 NO_PROBE = "no quota probe"

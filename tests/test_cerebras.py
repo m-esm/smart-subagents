@@ -129,15 +129,19 @@ class RegistryDefaultTests(IsolatedStateTestCase):
         rec = self.m.recommend(fleet, task_size="small", difficulty="trivial")
         self.assertEqual(rec["primary_worker"], "cerebras")
 
-    def test_hard_and_frontier_rank_normally(self):
+    def test_hard_and_frontier_never_land_on_cerebras(self):
+        # hard has its own registry default (deepseek, tests/test_deepseek.py);
+        # frontier has none and ranks normally.
         fleet = self.fleet({"cerebras": 100.0, "codex": 90.0, "grok": 85.0, "kimi": 80.0})
         for difficulty in ("hard", "frontier"):
             with self.subTest(difficulty=difficulty):
                 rec = self.m.recommend(
                     fleet, task_size="medium", task_kind="impl", difficulty=difficulty
                 )
-                self.assertIsNone(rec["registry_default"])
+                self.assertNotEqual(rec["registry_default"], "cerebras")
                 self.assertNotEqual(rec["primary_worker"], "cerebras")
+        rec = self.m.recommend(fleet, task_size="medium", task_kind="impl", difficulty="frontier")
+        self.assertIsNone(rec["registry_default"])
 
     def test_default_yields_when_below_the_floor(self):
         fleet = self.fleet({"cerebras": 5.0, "codex": 90.0, "grok": 85.0})
@@ -290,11 +294,17 @@ class ProxyTests(unittest.TestCase):
             env=env,
             stderr=subprocess.PIPE,
         )
-        for _ in range(100):
-            if os.path.exists(self.port_file):
+        # Cold python start on a CI runner can take seconds; wait while the
+        # proxy is alive, and show its stderr if it died instead.
+        deadline = time.time() + 20
+        while time.time() < deadline and not os.path.exists(self.port_file):
+            if self.proc.poll() is not None:
                 break
             time.sleep(0.05)
-        self.assertTrue(os.path.exists(self.port_file), "proxy never reported a port")
+        if not os.path.exists(self.port_file):
+            self.proc.kill()
+            err = self.proc.stderr.read().decode(errors="replace") if self.proc.stderr else ""
+            self.fail("proxy never reported a port (rc=%s): %s" % (self.proc.poll(), err[-800:]))
         self.port = int(Path(self.port_file).read_text().strip())
 
     def tearDown(self):

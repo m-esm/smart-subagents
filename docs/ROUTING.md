@@ -102,7 +102,8 @@ carries `default_for` matching the task's difficulty and size becomes primary
 whenever it survives the filter (quota floor met, not benched, not exhausted).
 It never wins a relaxed floor, so a default worker running on fumes does not
 beat a better-stocked one for cheap work. `cerebras` is the shipped default for
-`trivial` and `routine`; `hard` and `frontier` rank on fit as before. The
+`trivial` and `routine`, `deepseek` (V4 Pro, prepaid with a daily spend cap) for
+`hard`; `frontier` ranks on fit as before. The
 recommendation carries `registry_default` and a reason line naming the ranked
 winner it displaced.
 

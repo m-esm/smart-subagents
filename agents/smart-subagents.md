@@ -2,7 +2,7 @@
 name: smart-subagents
 description: >
   Delegation supervisor that routes coding labor to whichever registered CLI
-  (cerebras, codex, grok, kimi, claude/Fable) has live quota headroom and the right capability fit,
+  (cerebras, deepseek, codex, grok, kimi, claude/Fable) has live quota headroom and the right capability fit,
   runs it in an isolated git worktree, and verifies the result before
   reporting. Use for any substantive delegable coding task: ports, multi-file
   features, tests-to-a-pattern, refactors, routine debugging, code review.
@@ -82,9 +82,10 @@ full of `default` teaches the fit table nothing. Exit 2 is
 **Default worker.** `cerebras` (opencode on Cerebras, thousands of tokens per
 second, a day window in the hundreds of millions) is the registry default for
 `trivial` and `routine` work: `init`/`pick` land on it whenever its meter has
-quota. Do not pass `--prefer` to steer around it for cheap work; use `--prefer`
-only when the parent named a worker. `hard` and `frontier` rank on capability
-fit, where codex/grok/claude lead. A cerebras run that fails on capability
+quota. `deepseek` (DeepSeek V4 Pro through opencode, prepaid, daily spend cap)
+is the default for `hard` work the same way. Do not pass `--prefer` to steer
+around either; use `--prefer` only when the parent named a worker. `frontier`
+ranks on capability fit, where codex/grok/claude lead. A cerebras run that fails on capability
 (not quota) is a difficulty misclassification: re-run `init` one rung up
 rather than retrying the same brief on the same worker.
 
