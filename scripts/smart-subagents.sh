@@ -24,7 +24,13 @@ SSA_CLI_PY="${SSA_CLI_PY:-${SSA_ROOT}/scripts/ssa/cli.py}"
 [[ -f "$SSA_CLI_PY" ]] || SSA_CLI_PY="${SCRIPT_DIR}/ssa/cli.py"
 
 # Work dir holds briefs, worktrees and worker logs: private, never world-readable.
-SSA_WORK_DIR="${SSA_WORK_DIR:-${TMPDIR:-/tmp}/smart-subagents}"
+# With no TMPDIR (Linux), /tmp is shared by every user: the first user to run
+# owns /tmp/smart-subagents and the ownership check then refuses everyone else.
+if [[ -n "${TMPDIR:-}" ]]; then
+  SSA_WORK_DIR="${SSA_WORK_DIR:-${TMPDIR}/smart-subagents}"
+else
+  SSA_WORK_DIR="${SSA_WORK_DIR:-/tmp/smart-subagents-$(id -u)}"
+fi
 
 # Ledger of dispatch outcomes: state, not cache, so it survives a cache wipe.
 SSA_STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/smart-subagents"
