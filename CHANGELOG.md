@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.0
+
+A sixth worker, `deepseek`: opencode on DeepSeek's API, prepaid per token.
+It is the registry default for `hard` work, which used to rank onto codex,
+grok or the Claude plan (on the fleet VPSes, where only cerebras and claude
+exist, that meant Fable).
+
+- `scripts/opencode-cerebras` became `scripts/opencode-worker`, one wrapper
+  with a profile per provider picked by the name it runs under;
+  `opencode-cerebras` and `opencode-deepseek` are symlinks to it. The model
+  entry in the throwaway opencode config is derived from the `-m` argument,
+  so no model list lives in the wrapper. stdin is closed for `opencode run`,
+  which otherwise waits on a non-tty stdin and never starts.
+- `ssa/cerebras_proxy.py` takes `--key-name`, `--no-strip` and `--label`.
+  DeepSeek runs with `--no-strip`: it wants `reasoning_content` echoed inside
+  a tool-call turn. The key stays in the proxy, as for cerebras.
+- Model rules: `deepseek-flash` (V4.1 Flash) for trivial and routine,
+  `deepseek-v4-pro` otherwise. Measured on a fix-plus-test task through the
+  wrapper: Flash 5 steps in 13 s, V4 Pro 5 steps in 18 s, both passing.
+- `check_deepseek` meters money: `GET /user/balance`, a per-UTC-day snapshot
+  under the state dir, and a `spend_day` window against `DEEPSEEK_DAILY_USD`
+  (default 5). Ineligible when the day cap is spent or the balance is under
+  `DEEPSEEK_MIN_BALANCE` (default 1). A top-up restarts the snapshot.
+- Watchdog knobs are `OPENCODE_WORKER_{IDLE_TIMEOUT,MAX_SECONDS,MAX_REQUESTS,
+  NO_SANDBOX}`; the `OPENCODE_CEREBRAS_*` names still work.
+
 ## 0.3.9
 
 A fifth worker, `cerebras`: opencode on Cerebras' API (gpt-oss-120b, about

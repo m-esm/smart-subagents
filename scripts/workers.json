@@ -140,6 +140,150 @@
         "analysis": 0.9
       }
     },
+    "deepseek": {
+      "display_name": "opencode on DeepSeek",
+      "_note": "opencode driven through scripts/opencode-deepseek (a symlink to opencode-worker): the same local proxy as cerebras injects the key from ~/.config/deepseek/env, but with --no-strip, because DeepSeek wants reasoning_content echoed inside a tool-call turn. Pay-per-token on a prepaid balance, so its meter is money: the probe reads /user/balance and a daily spend cap (DEEPSEEK_DAILY_USD). default_for makes V4 Pro the primary for hard work, which otherwise lands on grok, codex or the Claude plan; cerebras keeps trivial and routine.",
+      "binary": {
+        "env": "DEEPSEEK_WORKER_BIN",
+        "candidates": [
+          "opencode-deepseek"
+        ],
+        "path_name": "opencode-deepseek"
+      },
+      "auth_file": "~/.config/deepseek/env",
+      "probe": "check_deepseek",
+      "sandbox": "workspace",
+      "write_allowed_default": true,
+      "run": {
+        "cwd": "worktree",
+        "env_scrub": true
+      },
+      "default_for": {
+        "difficulty": [
+          "hard"
+        ]
+      },
+      "prompt": {
+        "implement": {
+          "transport": "file-ref",
+          "template": "Read the file {brief} and complete the task it describes."
+        },
+        "plan": {
+          "transport": "file-ref",
+          "template": "Read the file {brief} and complete the task it describes."
+        },
+        "resume": {
+          "transport": "file-ref",
+          "template": "Read the file {brief} and complete the task it describes."
+        }
+      },
+      "argv": {
+        "implement": [
+          "--format",
+          "json",
+          "--dir",
+          "{worktree}",
+          "{effort}",
+          "{model}",
+          "{prompt}"
+        ],
+        "plan": [
+          "--format",
+          "json",
+          "--agent",
+          "plan",
+          "--dir",
+          "{worktree}",
+          "{effort}",
+          "{model}",
+          "{prompt}"
+        ],
+        "resume": [
+          "--format",
+          "json",
+          "-s",
+          "{session_id}",
+          "--dir",
+          "{worktree}",
+          "{effort}",
+          "{model}",
+          "{prompt}"
+        ]
+      },
+      "output": {
+        "implement": "none",
+        "plan": "stdout",
+        "resume": "none"
+      },
+      "format": {
+        "implement": "jsonl",
+        "plan": "jsonl",
+        "resume": "jsonl"
+      },
+      "session": {
+        "kind": "jsonl-keys",
+        "keys": [
+          "sessionID"
+        ],
+        "_note": "opencode --format json puts sessionID on every event."
+      },
+      "final": {
+        "kind": "jsonl-event",
+        "match": {
+          "type": "text"
+        },
+        "keys": [
+          "part.text"
+        ]
+      },
+      "error": {
+        "kind": "jsonl-event",
+        "match": {
+          "type": "error"
+        },
+        "keys": [
+          "error.data.message",
+          "error.name"
+        ],
+        "_note": "Same opencode error event shape as cerebras."
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "effort_flags": [
+        "--variant",
+        "{effort}"
+      ],
+      "models": {
+        "_note": "opencode wants provider/model. Measured 2026-09-25 on a fix-plus-test task through the wrapper: deepseek-flash (V4.1 Flash) 5 steps in 13 s, deepseek-v4-pro 5 steps in 18 s, both passing. Flash for cheap work, V4 Pro for hard and frontier.",
+        "flag": [
+          "-m",
+          "{model}"
+        ],
+        "rules": [
+          {
+            "difficulty": [
+              "trivial",
+              "routine"
+            ],
+            "model": "deepseek/deepseek-flash"
+          },
+          {
+            "model": "deepseek/deepseek-v4-pro"
+          }
+        ]
+      },
+      "fit": {
+        "default": 1.0,
+        "impl": 1.05,
+        "review": 1.0,
+        "debug": 1.0,
+        "best_of_n": 1.2,
+        "analysis": 1.0
+      }
+    },
     "codex": {
       "display_name": "OpenAI Codex CLI",
       "binary": {

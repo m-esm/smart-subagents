@@ -77,7 +77,8 @@ matches everything) names the worker `recommend()` makes primary for matching
 tasks whenever it survives the quota filter and the floor was not relaxed;
 `Registry.default_worker(difficulty, size)` returns the first match in file
 order. That is how "cheap fast worker for routine labor" is enforced instead of
-hoped for. `cerebras` declares it for `trivial` and `routine`.
+hoped for. `cerebras` declares it for `trivial` and `routine`, `deepseek` for
+`hard`.
 
 `ssa/cli.py workers` prints one row per registered worker, seven tab-separated
 fields: name, display name, sandbox, write policy, probe function, resolved
@@ -87,6 +88,7 @@ machine prints as `-`.
 ```console
 $ python3 scripts/ssa/cli.py workers
 cerebras	opencode on Cerebras	workspace	write	check_cerebras	/Users/you/smart-subagents/scripts/opencode-cerebras	/Users/you/.config/cerebras/env
+deepseek	opencode on DeepSeek	workspace	write	check_deepseek	/Users/you/smart-subagents/scripts/opencode-deepseek	/Users/you/.config/deepseek/env
 codex	OpenAI Codex CLI	os	write	check_codex	/Users/you/.local/bin/codex	/Users/you/.codex/auth.json
 grok	Grok CLI	workspace	write	check_grok	/Users/you/.grok/bin/grok	/Users/you/.grok/auth.json
 kimi	Kimi Code	none	no-write	check_kimi	/Users/you/.kimi-code/bin/kimi	/Users/you/.kimi-code/credentials/kimi-code.json

@@ -104,7 +104,7 @@ class FourthWorkerTests(unittest.TestCase):
             self.assertEqual(rc, 0, err)
             names = [line.split("\t")[0] for line in out.strip().splitlines()]
             self.assertEqual(
-                names, ["cerebras", "codex", "grok", "kimi", "claude", "fakecli"]
+                names, ["cerebras", "deepseek", "codex", "grok", "kimi", "claude", "fakecli"]
             )
             row = dict(
                 zip(

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local reverse proxy that makes Cerebras usable from OpenAI-compatible CLIs.
+"""Local reverse proxy that keeps an API key out of an opencode worker.
 
 Cerebras' chat completions API returns `reasoning` on gpt-oss / qwen and then
 rejects the same field when a client echoes it back inside the assistant
@@ -10,6 +10,12 @@ reasoning fields from assistant messages, injects the API key so the worker
 process never holds it, and streams the upstream response back unchanged.
 
     python3 cerebras_proxy.py --port-file /path/port [--upstream URL] [--key-file PATH]
+                              [--key-name NAME] [--no-strip] [--label TAG]
+
+The defaults are the Cerebras profile. DeepSeek runs through the same proxy
+with --key-name DEEPSEEK_API_KEY --no-strip: DeepSeek wants the echoed
+reasoning_content back inside a tool-call turn, so stripping it would break
+the run, while the key injection is exactly what the worker needs.
 
 It binds an ephemeral port, writes the port number to --port-file, and serves
 until it is killed. No request or response body is ever logged.
@@ -49,13 +55,15 @@ _SKIP_REQUEST_HEADERS = {
 _SKIP_RESPONSE_HEADERS = {"transfer-encoding", "connection", "content-length"}
 
 
-def rewrite_body(raw: bytes) -> bytes:
+def rewrite_body(raw: bytes, strip: tuple = STRIP_FIELDS) -> bytes:
     """Drop echoed reasoning fields from assistant messages. Pure.
 
     Anything that is not a JSON object with a `messages` list passes through
     untouched, byte for byte, so a malformed body reaches upstream and gets
     upstream's error instead of this proxy's.
     """
+    if not strip:
+        return raw
     try:
         doc = json.loads(raw)
     except Exception:
@@ -69,7 +77,7 @@ def rewrite_body(raw: bytes) -> bytes:
     for msg in messages:
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
-        for field in STRIP_FIELDS:
+        for field in strip:
             if field in msg:
                 del msg[field]
                 changed = True
@@ -78,23 +86,23 @@ def rewrite_body(raw: bytes) -> bytes:
     return json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def read_key(key_file: str) -> str:
+def read_key(key_file: str, key_name: str = KEY_NAME) -> str:
     """The API key: environment first, then KEY=value lines in key_file."""
-    env_value = os.environ.get(KEY_NAME, "").strip()
+    env_value = os.environ.get(key_name, "").strip()
     if env_value:
         return env_value
     path = Path(os.path.expanduser(key_file))
     try:
         for line in path.read_text().splitlines():
             line = line.strip()
-            if line.startswith(KEY_NAME + "="):
-                return line[len(KEY_NAME) + 1 :].strip().strip("'\"")
+            if line.startswith(key_name + "="):
+                return line[len(key_name) + 1 :].strip().strip("'\"")
     except OSError:
         pass
     return ""
 
 
-def make_handler(upstream: str, key: str):
+def make_handler(upstream: str, key: str, strip: tuple = STRIP_FIELDS, label: str = "cerebras-proxy"):
     parts = urlsplit(upstream)
     host = parts.hostname or ""
     port = parts.port
@@ -113,7 +121,7 @@ def make_handler(upstream: str, key: str):
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
             if self.command in ("POST", "PUT", "PATCH"):
-                body = rewrite_body(body)
+                body = rewrite_body(body, strip)
             headers = {
                 k: v
                 for k, v in self.headers.items()
@@ -152,7 +160,7 @@ def make_handler(upstream: str, key: str):
                     self.send_header("Connection", "close")
                     self.end_headers()
                     self.wfile.write(
-                        json.dumps({"error": {"message": "cerebras-proxy: %s" % exc}}).encode()
+                        json.dumps({"error": {"message": "%s: %s" % (label, exc)}}).encode()
                     )
                 except Exception:
                     pass
@@ -160,8 +168,8 @@ def make_handler(upstream: str, key: str):
             finally:
                 conn.close()
             sys.stderr.write(
-                "cerebras-proxy %s %s -> %s %.2fs\n"
-                % (self.command, self.path, status, time.time() - started)
+                "%s %s %s -> %s %.2fs\n"
+                % (label, self.command, self.path, status, time.time() - started)
             )
 
         def do_GET(self):
@@ -183,14 +191,19 @@ def make_handler(upstream: str, key: str):
     return Handler
 
 
-def serve(port_file: str, upstream: str, key_file: str) -> int:
-    key = read_key(key_file)
+def serve(
+    port_file: str,
+    upstream: str,
+    key_file: str,
+    key_name: str = KEY_NAME,
+    strip: tuple = STRIP_FIELDS,
+    label: str = "cerebras-proxy",
+) -> int:
+    key = read_key(key_file, key_name)
     if not key:
-        sys.stderr.write(
-            "cerebras-proxy: no %s in the environment or %s\n" % (KEY_NAME, key_file)
-        )
+        sys.stderr.write("%s: no %s in the environment or %s\n" % (label, key_name, key_file))
         return 2
-    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(upstream, key))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(upstream, key, strip, label))
     server.daemon_threads = True
     bound = server.server_address[1]
     tmp = port_file + ".tmp"
@@ -217,8 +230,14 @@ def main(argv=None) -> int:
     ap.add_argument("--port-file", required=True, help="file that receives the bound port")
     ap.add_argument("--upstream", default=DEFAULT_UPSTREAM)
     ap.add_argument("--key-file", default=DEFAULT_KEY_FILE)
+    ap.add_argument("--key-name", default=KEY_NAME, help="env var / file key holding the API key")
+    ap.add_argument(
+        "--no-strip", action="store_true", help="forward echoed reasoning fields untouched"
+    )
+    ap.add_argument("--label", default="cerebras-proxy", help="prefix of the per-request log line")
     args = ap.parse_args(argv)
-    return serve(args.port_file, args.upstream, args.key_file)
+    strip = () if args.no_strip else STRIP_FIELDS
+    return serve(args.port_file, args.upstream, args.key_file, args.key_name, strip, args.label)
 
 
 if __name__ == "__main__":
