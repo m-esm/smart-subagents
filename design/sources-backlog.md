@@ -31,3 +31,8 @@ row is struck through with a one-line reason. Do not edit rows by hand; strike o
 - [ ] 2026-09-21 data-goblin/power-bi-agentic-development: Power BI AI skills and Power BI agents for Claude Code and GitHub Co https://github.com/data-goblin/power-bi-agentic-development (GitHub 921 stars)
 - [ ] 2026-09-21 dev-toolings/superpowers-symfony: Claude Code plugin for Symfony 7.4 LTS & 8.x — 44 skills, 7 AI subagents & 1 https://github.com/dev-toolings/superpowers-symfony (GitHub 214 stars)
 - [ ] 2026-09-21 wangyuxun6699/learn_claude_code_langchain: Rebuild Claude Code's agent harness step by step with LangChain and https://github.com/wangyuxun6699/learn_claude_code_langchain (GitHub 53 stars)
+- [ ] 2026-09-28 Show HN: Tenjin – A Jev based x402 tool router for Claude Code https://github.com/BackTrackCo/tenjin-agent (HN 4 pts)
+- [ ] 2026-09-28 Show HN: Resume Claude Code subagents killed by a usage limit, don't redo them https://github.com/error0702/agent-limit-retry (HN 2 pts)
+- [ ] 2026-09-28 Ask HN: Has anyone built a leaderless multi-agent system? https://news.ycombinator.com/item?id=49847249 (HN 3 pts)
+- [ ] 2026-09-28 Miosa-osa/OSA: An AI agent for your terminal, built on signal theory: every output is signal, n https://github.com/Miosa-osa/OSA (GitHub 75 stars)
+- [ ] 2026-09-28 omaralisql/Claude-Zeroclaw-Nexus: Claude Code ZeroClaw Pro 2026: AI Multitool & CLI Router for Claude SDK Suba https://github.com/omaralisql/Claude-Zeroclaw-Nexus (GitHub 52 stars)
