@@ -35,6 +35,10 @@ if control_path.exists():
 exit_code = int(control.get("exit_code", 0))
 session_id = control.get("session_id", "fake-kimi-session-000000000001")
 
+if "--output-format" not in sys.argv[1:]:
+    print("## Approach\n\nfake-kimi plan: ok")
+    sys.exit(exit_code)
+
 # Real `kimi --output-format stream-json` shape, measured 2026-09-01: an
 # assistant line whose content is a plain string (tool_calls alongside it),
 # a tool line per result, and the session.resume_hint meta line LAST. That

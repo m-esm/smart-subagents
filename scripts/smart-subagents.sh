@@ -1976,6 +1976,16 @@ import json, sys
 from pathlib import Path
 d = Path(sys.argv[1])
 cli_py, dirty = sys.argv[2], sys.argv[3] == "true"
+
+
+def event_stream_only(text):
+    lines = [line for line in text.splitlines() if line.strip()]
+    try:
+        return bool(lines) and all(isinstance(json.loads(line), dict) for line in lines)
+    except ValueError:
+        return False
+
+
 plans = []
 for f in sorted(d.glob("plan-*-*.md")):
     text = f.read_text(errors="replace").strip()
@@ -1990,6 +2000,9 @@ for f in sorted(d.glob("plan-*-*.md")):
         entry["empty"] = bool(v.get("empty"))
         if v.get("reason"):
             entry["reason"] = v["reason"]
+    if not entry["empty"] and event_stream_only(text):
+        entry["empty"] = True
+        entry["reason"] = "no plan text, only event-stream lines"
     if log.exists():
         # A byte count and a ready command, never the path on its own: the log
         # is NDJSON nobody should cat.
@@ -3498,9 +3511,27 @@ Env:
 EOF
 }
 
+_ssa_warn_if_behind_superproject() {
+  local super top rel head recorded
+  super="$(git -C "$SSA_ROOT" rev-parse --show-superproject-working-tree 2>/dev/null || true)"
+  [[ -n "$super" ]] || return 0
+  top="$(git -C "$SSA_ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
+  rel="${top#"$super"/}"
+  [[ -n "$top" && "$rel" != "$top" ]] || return 0
+  head="$(git -C "$SSA_ROOT" rev-parse HEAD 2>/dev/null || true)"
+  recorded="$(git -C "$super" ls-files --stage -- "$rel" 2>/dev/null \
+    | awk '$1 == "160000" { print $2; exit }')"
+  [[ -n "$head" && -n "$recorded" && "$head" != "$recorded" ]] || return 0
+  git -C "$SSA_ROOT" merge-base --is-ancestor "$head" "$recorded" 2>/dev/null || return 0
+  echo "smart-subagents: WARNING: $top is checked out at ${head:0:7}, behind ${recorded:0:7} recorded by $super, so workers run the older code. Update it: git -C $super submodule update -- $rel" >&2
+}
+
 main() {
   local cmd="${1:-help}"
   shift || true
+  case "$cmd" in
+    init|dispatch|plan|doctor) _ssa_warn_if_behind_superproject ;;
+  esac
   case "$cmd" in
     init) cmd_init "$@" ;;
     pick) cmd_pick "$@" ;;

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.2
+
+0.4.1 shipped, yet a panel at 22:58 the same day failed exactly as before:
+`~/.claude` recorded smart-subagents at the 0.4.1 commit while its
+`vendor/smart-subagents` checkout still sat on 0.4.0, so the deepseek
+planner again read its brief from outside `--dir` and the summary counted
+its 1.3 KB event stream as a plan.
+
+- `init`, `dispatch`, `plan` and `doctor` warn on stderr when this checkout
+  is a submodule behind the commit its superproject records, and print the
+  `git submodule update` that fixes it. A checkout at or ahead of the
+  pointer stays quiet.
+- A text-format planner (codex, grok, kimi) whose output is only JSON event
+  lines is `"empty": true` with reason `no plan text, only event-stream
+  lines`.
+- The panel summary applies the same check itself, so an event-only stub
+  is reported empty even when `plan-verdict` fails.
+- Test fakes for grok, kimi and fakecli print prose in plan mode, matching
+  the real CLIs, whose plan argv requests no JSON output.
+
 ## 0.4.1
 
 `plan` with an opencode planner (cerebras, deepseek) returned no plan and

@@ -248,6 +248,10 @@ def _tool_calls(text: str, tool_rule: Optional[dict], tool_error_rule: Optional[
     return calls
 
 
+def event_stream_only(text: str) -> bool:
+    return any(True for _ in _iter_json_lines(text)) and not _non_json_lines(text)
+
+
 def planner_failure_from_text(
     text: str,
     fmt: str,
@@ -256,6 +260,8 @@ def planner_failure_from_text(
     tool_rule: Optional[dict] = None,
     tool_error_rule: Optional[dict] = None,
 ) -> str:
+    if fmt == "text" and event_stream_only(text):
+        return "no plan text, only event-stream lines"
     calls = _tool_calls(text, tool_rule, tool_error_rule) if fmt == "jsonl" else []
     if calls and calls[0][2]:
         return "first tool call failed (%s): %s" % (calls[0][1], _clip(calls[0][2], 200))

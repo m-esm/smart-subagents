@@ -216,8 +216,11 @@ leave that tree untouched; `plan` checks it after the run and reports `"dirty": 
 `panel-dirty.txt` when one of them wrote anything. Each planner's brief is staged inside that tree
 as `.ssa/PLAN-BRIEF-<i>.md` (opencode rejects a read outside its `--dir`) and removed before the
 check. A planner that leaves no plan, because its run has no final message, its first tool call
-failed or it ended on a failed one, is reported `"empty": true` with a `reason`, and
-`usable_plans` counts the rest.
+failed, it ended on a failed one, or its output is nothing but event-stream lines, is reported
+`"empty": true` with a `reason`, and `usable_plans` counts the rest.
+
+When this checkout is a git submodule, `init`, `dispatch`, `plan` and `doctor` warn on stderr if
+it sits behind the commit the superproject records: the pointer moved, the code workers run did not.
 
 ## Guarantees
 

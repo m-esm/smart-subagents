@@ -69,6 +69,9 @@ class PlannerFailureTests(unittest.TestCase):
         stream = tool_event("read", "completed")
         self.assertEqual(self.failure(stream), "no final assistant message")
 
+    def test_a_text_planner_that_printed_only_events_has_no_plan(self):
+        self.assertEqual(self.failure(REJECTED, fmt="text"), "no plan text, only event-stream lines")
+
     def test_a_text_planner_is_judged_on_its_text(self):
         self.assertEqual(self.failure("## Plan\n\n1. Do it.\n", fmt="text"), "")
         self.assertEqual(self.failure("   \n", fmt="text"), "no final assistant message")
@@ -131,6 +134,13 @@ class PlannerVerdictTests(unittest.TestCase):
         self.assertEqual(digest.planner_verdict("grok", str(self.plan), str(self.log)),
                          {"empty": False})
         self.assertEqual(self.plan.read_text(), "## Plan\n\nKeep it.\n")
+
+    def test_a_text_planner_file_of_events_only_is_empty(self):
+        self.plan = self.dir / "plan-0-risk-grok.md"
+        self.plan.write_text(REJECTED)
+        verdict = digest.planner_verdict("grok", str(self.plan), str(self.log))
+        self.assertEqual(verdict, {"empty": True, "reason": "no plan text, only event-stream lines"})
+        self.assertTrue(self.plan.read_text().startswith(digest.NO_PLAN_MARK))
 
     def test_an_unavailable_binary_marker_stays_empty(self):
         self.plan.write_text("(planner produced no output; deepseek binary unavailable)\n")

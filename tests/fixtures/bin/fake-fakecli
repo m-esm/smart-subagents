@@ -36,6 +36,10 @@ if control_path.exists():
 exit_code = int(control.get("exit_code", 0))
 session_id = control.get("session_id", "fake-fakecli-session-000000000001")
 
+if sys.argv[1:2] == ["plan"]:
+    print("## Approach\n\nfake-fakecli plan: ok")
+    sys.exit(exit_code)
+
 payload = {"result": "ok"}
 if session_id:
     payload["session_id"] = session_id

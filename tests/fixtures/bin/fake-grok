@@ -30,6 +30,10 @@ if control_path.exists():
 exit_code = int(control.get("exit_code", 0))
 session_id = control.get("session_id", "fake-grok-session-000000000001")
 
+if "--output-format" not in sys.argv[1:]:
+    print("## Approach\n\nfake-grok plan: ok")
+    sys.exit(exit_code)
+
 # Same shape as the real CLI (2026-09-01): an init line carrying the session
 # id, one full assistant message, then a result line whose `result` field is
 # the final agent text. No -o flag exists, so last-msg.txt must come from here.

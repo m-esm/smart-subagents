@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from helpers import FIXTURES_DIR, make_git_repo, run_ssa, temp_env  # noqa: E402
+from helpers import FIXTURES_DIR, SSA_CLI_PY, make_git_repo, run_ssa, temp_env  # noqa: E402
 from test_shell import write_script, write_usage_stub  # noqa: E402
 
 REJECTED = FIXTURES_DIR / "providers" / "cerebras" / "opencode-plan-brief-rejected.jsonl"
@@ -34,6 +34,14 @@ emit({{"type": "tool_use", "part": {{"type": "tool", "tool": "read", "state": {{
     "status": "completed", "input": {{"filePath": brief}}, "output": "ok"}}}}}})
 lens = re.search(r"## Your lens\\n\\n(.+)", body).group(1)
 emit({{"type": "text", "part": {{"type": "text", "text": "## Approach\\n\\n" + lens}}}})
+"""
+
+CLI_WITHOUT_VERDICT = """#!{python}
+import runpy, sys
+if sys.argv[1:2] == ["plan-verdict"]:
+    sys.exit(1)
+sys.argv[0] = {cli!r}
+runpy.run_path({cli!r}, run_name="__main__")
 """
 
 
@@ -114,6 +122,29 @@ class OpencodePlanPanelTests(unittest.TestCase):
                 self.assertTrue(text.startswith("(planner produced no plan:"), text)
             log = Path(doc["dir"]) / "plan-0.log"
             self.assertIn('"tool_use"', log.read_text())
+
+    def test_an_event_only_stub_is_empty_when_the_verdict_step_fails(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            fake = write_script(
+                te.root / "refusing-opencode",
+                "#!/bin/sh\n/bin/cat %s\n" % REJECTED,
+            )
+            cli = write_script(
+                te.root / "cli-without-verdict.py",
+                CLI_WITHOUT_VERDICT.format(python=sys.executable, cli=str(SSA_CLI_PY)),
+            )
+            env = self._env(te, fake)
+            env["SSA_CLI_PY"] = str(cli)
+            rc, out, err = run_ssa(
+                "plan", "--repo", str(repo), "--n", "1", "--goal", "Plan it.", env=env,
+            )
+            self.assertEqual(rc, 0, err)
+            doc = json.loads(out)
+            self.assertEqual(doc["usable_plans"], 0, json.dumps(doc, indent=2))
+            self.assertTrue(doc["plans"][0]["empty"])
+            self.assertEqual(doc["plans"][0]["reason"], "no plan text, only event-stream lines")
+            self.assertFalse((Path(doc["dir"]) / "plan-0.verdict.json").exists())
 
 
 if __name__ == "__main__":
