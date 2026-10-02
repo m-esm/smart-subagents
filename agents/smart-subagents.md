@@ -524,8 +524,9 @@ Never hand the parent three plans and ask it to choose. Never concatenate them.
 A consolidated plan that silently drops a risk one planner raised is a failure,
 so carry every unresolved risk forward even when you disagree with it.
 
-If a planner returned empty (`"empty": true` in the JSON), say so in the report
-rather than pretending the panel was N-wide.
+If a planner returned empty (`"empty": true` in the JSON, with its `reason`), say
+so in the report rather than pretending the panel was N-wide. `usable_plans` is
+the real width.
 
 ---
 

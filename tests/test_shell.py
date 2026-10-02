@@ -1544,10 +1544,11 @@ class PlanPanelTests(unittest.TestCase):
             doc = json.loads(out)
             plan = doc["plans"][0]
             self.assertTrue(plan["empty"])
+            self.assertEqual(plan["reason"], "no final assistant message")
             self.assertIn("log_bytes", plan)
             self.assertIn("digest", plan["log_digest_cmd"])
             text = Path(plan["file"]).read_text()
-            self.assertIn("planner produced no output", text)
+            self.assertIn("planner produced no plan", text)
             self.assertIn("log:", text)
             self.assertNotIn("see plan-0.log", text)
             self.assertTrue((Path(doc["dir"]) / "panel-done.txt").exists())

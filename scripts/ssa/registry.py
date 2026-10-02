@@ -298,6 +298,10 @@ class WorkerSpec:
         # validated exactly like `final`: a run that ended on turn.failed must
         # not report the last successful message as its outcome.
         self.error = self._locator(where, block, "error", default_kind="")
+        self.tool = self._locator(where, block, "tool", default_kind="")
+        self.tool_error = self._locator(where, block, "tool_error", default_kind="")
+        if bool(self.tool) != bool(self.tool_error):
+            raise _fail(where, "tool and tool_error must be declared together")
 
         self.effort_ladder = [str(r) for r in (block.get("effort_ladder") or [])]
         self.effort_flags = [str(t) for t in (block.get("effort_flags") or [])]

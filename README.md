@@ -213,7 +213,11 @@ smart-subagents.sh plan --repo ~/code/api --n 3 --difficulty hard --goal-file go
 Planners run in parallel in one shared read-only worktree, round-robined across whichever CLIs have
 quota, so a day with one eligible CLI still yields N plans instead of zero. Planners are expected to
 leave that tree untouched; `plan` checks it after the run and reports `"dirty": true` plus a
-`panel-dirty.txt` when one of them wrote anything.
+`panel-dirty.txt` when one of them wrote anything. Each planner's brief is staged inside that tree
+as `.ssa/PLAN-BRIEF-<i>.md` (opencode rejects a read outside its `--dir`) and removed before the
+check. A planner that leaves no plan, because its run has no final message, its first tool call
+failed or it ended on a failed one, is reported `"empty": true` with a `reason`, and
+`usable_plans` counts the rest.
 
 ## Guarantees
 

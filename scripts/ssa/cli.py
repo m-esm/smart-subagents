@@ -164,6 +164,13 @@ def cmd_final_message(args) -> int:
     return 0
 
 
+def cmd_plan_verdict(args) -> int:
+    reg = _reg(args)
+    doc = digest_mod.planner_verdict(args.worker, args.plan, args.log, reg=reg)
+    print(json.dumps(doc))
+    return 0
+
+
 def cmd_digest(args) -> int:
     reg = _reg(args)
     doc = digest_mod.digest(
@@ -429,6 +436,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log", required=True)
     p.add_argument("--mode", default="implement", choices=list(registry_mod.MODES))
     p.set_defaults(func=cmd_final_message)
+
+    p = sub.add_parser(
+        "plan-verdict",
+        help="rewrite one planner's output as its plan, or as the reason it has none",
+    )
+    p.add_argument("--worker", required=True)
+    p.add_argument("--plan", required=True)
+    p.add_argument("--log", required=True)
+    p.set_defaults(func=cmd_plan_verdict)
 
     p = sub.add_parser("digest", help="bounded summary of a worker log (never the raw lines)")
     p.add_argument("--worker", required=True)

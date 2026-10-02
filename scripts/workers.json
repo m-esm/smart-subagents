@@ -110,6 +110,26 @@
         ],
         "_note": "Measured 2026-09-22: {\"type\":\"error\",\"error\":{\"name\":\"APIError\",\"data\":{\"message\":\"Bad Request: ...\",\"statusCode\":400}}}."
       },
+      "tool": {
+        "kind": "jsonl-event",
+        "match": {
+          "type": "tool_use"
+        },
+        "keys": [
+          "part.tool"
+        ]
+      },
+      "tool_error": {
+        "kind": "jsonl-event",
+        "match": {
+          "type": "tool_use",
+          "part.state.status": "error"
+        },
+        "keys": [
+          "part.state.error"
+        ],
+        "_note": "Measured 2026-10-02 from a deepseek planner refused its brief: {\"type\":\"tool_use\",\"part\":{\"tool\":\"read\",\"state\":{\"status\":\"error\",\"error\":\"The user rejected permission to use this specific tool call.\"}}}. opencode run halts on a rejected call, so the stream ends there."
+      },
       "effort_ladder": [
         "low",
         "medium",
@@ -246,6 +266,26 @@
           "error.name"
         ],
         "_note": "Same opencode error event shape as cerebras."
+      },
+      "tool": {
+        "kind": "jsonl-event",
+        "match": {
+          "type": "tool_use"
+        },
+        "keys": [
+          "part.tool"
+        ]
+      },
+      "tool_error": {
+        "kind": "jsonl-event",
+        "match": {
+          "type": "tool_use",
+          "part.state.status": "error"
+        },
+        "keys": [
+          "part.state.error"
+        ],
+        "_note": "Same opencode tool_use event shape as cerebras."
       },
       "effort_ladder": [
         "low",

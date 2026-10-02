@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.1
+
+`plan` with an opencode planner (cerebras, deepseek) returned no plan and
+said it had one. Measured 2026-10-02: the deepseek architecture planner read
+its brief from the panel dir, outside `--dir`; opencode auto-rejected the
+read as an external directory and halted, and the panel reported a 1.3 KB
+event stream as `"empty": false`.
+
+- Each planner's brief is staged inside the shared worktree as
+  `.ssa/PLAN-BRIEF-<i>.md`, through the same helper `dispatch` uses, and
+  removed before the dirty check. The brief names the worktree by its
+  resolved path, the spelling opencode treats as inside the project.
+- `plan-verdict` (cli.py) turns each planner's output into its plan: a
+  stdout planner with a structured format keeps the final message in the
+  plan file and its event stream moves to `plan-<i>.log`. A planner with no
+  final message, a failed first tool call, or a run that ended on a failed
+  tool call is `"empty": true` with a `reason`. The summary adds
+  `usable_plans`.
+- The registry gains optional `tool` / `tool_error` locators, declared
+  together; cerebras and deepseek declare opencode's `tool_use` shape.
+- `opencode-worker`: the request-count watchdog read `0\n0` before the first
+  request (`grep -c` prints 0 and exits 1, then `|| echo 0` added another)
+  and logged an arithmetic syntax error every 5 s.
+
 ## 0.4.0
 
 A sixth worker, `deepseek`: opencode on DeepSeek's API, prepaid per token.

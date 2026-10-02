@@ -153,7 +153,8 @@ watchdog() {
       return
     fi
     local n
-    n="$(grep -c "$PROFILE-proxy POST" "$tmp/proxy.log" 2>/dev/null || echo 0)"
+    n="$(grep -c "$PROFILE-proxy POST" "$tmp/proxy.log" 2>/dev/null || true)"
+    n="${n:-0}"
     if (( n > MAX_REQUESTS )); then
       echo "$TAG: ${n} LLM requests exceed the ${MAX_REQUESTS} cap (model not converging), killing opencode (pid $pid)" >&2
       kill "$pid" 2>/dev/null; sleep 2; kill -9 "$pid" 2>/dev/null

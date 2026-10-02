@@ -1282,8 +1282,8 @@ _ssa_log_digest() {
 # is a launch path only. Exclude it worktree-locally so git diff / scope never
 # see it.
 _ssa_stage_worktree_brief() {
-  local wt="$1" src="$2"
-  local rel="BRIEF.md" dest git_dir exclude common suffix=0
+  local wt="$1" src="$2" rel="${3:-BRIEF.md}"
+  local dest git_dir exclude common suffix=0
   # A repository may legitimately track BRIEF.md. Never replace that product
   # file with the supervisor brief: use a separate in-worktree launch path.
   if git -C "$wt" ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
@@ -1859,10 +1859,12 @@ PY
   echo "$wt" >"$dir/wt.txt"
   _PLAN_REPO="$repo"; _PLAN_WT="$wt"
   trap '_plan_rollback' EXIT
+  local wt_real
+  wt_real="$(cd "$wt" && pwd -P)" || die "plan: cannot resolve $wt"
 
-  local i pids=() lenses=()
+  local i pids=() lenses=() staged=()
   for (( i=0; i<n; i++ )); do
-    local lens worker brief plan_out
+    local lens worker brief plan_out launch_brief
     lens="$(_lens_name "$i")"
     worker="${warr[$(( i % ${#warr[@]} ))]}"
     lenses+=("$lens:$worker")
@@ -1881,7 +1883,7 @@ PY
       echo
       echo "## Rules"
       echo
-      echo "- Read the repository at $wt. This is a planning task: change NOTHING."
+      echo "- Read the repository at $wt_real. This is a planning task: change NOTHING."
       echo "- If the repo has an agent contract (AGENTS.md, CLAUDE.md, CONTRIBUTING.md,"
       echo "  or a domain rules doc), read it first and plan within it."
       echo "- Cite concrete file:line for every claim about existing code."
@@ -1897,11 +1899,13 @@ PY
       echo "3. Risks and unknowns, worst first."
       echo "4. Open questions a human must answer. Empty list is a valid answer."
     } >"$brief"
+    launch_brief="$(_ssa_stage_worktree_brief "$wt_real" "$brief" ".ssa/PLAN-BRIEF-$i.md")"
+    staged+=("$launch_brief")
 
     (
       local args_file="$dir/worker-args-$worker.txt"
       [[ -f "$args_file" ]] || : >"$args_file"
-      if ! _ssa_build "$worker" plan --worktree "$wt" --brief "$brief" \
+      if ! _ssa_build "$worker" plan --worktree "$wt" --brief "$launch_brief" \
           --output "$plan_out" --args-file "$args_file" \
           || [[ -z "$_BC_BIN" || ! -x "$_BC_BIN" ]]; then
         echo "(planner produced no output; $worker binary unavailable)" >"$plan_out"
@@ -1938,6 +1942,11 @@ PY
     lens="${lens_worker%%:*}"
     worker="${lens_worker#*:}"
     plan_out="$dir/plan-$i-$lens-$worker.md"
+    if _ssa plan-verdict --worker "$worker" --plan "$plan_out" --log "$dir/plan-$i.log" \
+        >"$dir/plan-$i.verdict.json" 2>/dev/null; then
+      continue
+    fi
+    rm -f "$dir/plan-$i.verdict.json"
     [[ ! -s "$plan_out" ]] || continue
     {
       echo "(planner produced no output. Digest of $dir/plan-$i.log follows.)"
@@ -1947,6 +1956,8 @@ PY
         || echo "(no digest: $worker is not registered, or the log is empty)"
     } >"$plan_out"
   done
+  rm -f "${staged[@]}"
+  rmdir "$wt_real/.ssa" 2>/dev/null || true
 
   # C3: planners are dispatched read-only, but grok's sandbox is `workspace`
   # and nothing checked afterwards. Say so rather than assume.
@@ -1972,7 +1983,13 @@ for f in sorted(d.glob("plan-*-*.md")):
     index, lens, worker = parts[1], parts[2], parts[3]
     log = d / ("plan-%s.log" % index)
     entry = {"file": str(f), "lens": lens, "worker": worker, "bytes": len(text),
-             "empty": text.startswith("(planner produced no output")}
+             "empty": text.startswith("(planner produced no")}
+    verdict = d / ("plan-%s.verdict.json" % index)
+    if verdict.exists():
+        v = json.loads(verdict.read_text())
+        entry["empty"] = bool(v.get("empty"))
+        if v.get("reason"):
+            entry["reason"] = v["reason"]
     if log.exists():
         # A byte count and a ready command, never the path on its own: the log
         # is NDJSON nobody should cat.
@@ -1986,6 +2003,7 @@ wt = (d / "wt.txt").read_text().strip() if (d / "wt.txt").exists() else ""
 doc = {"dir": str(d), "worktree": wt,
        "goal": str(d / "goal.md"), "planners": sys.argv[4:],
        "plans": plans,
+       "usable_plans": sum(1 for p in plans if not p["empty"]),
        "next": "supervisor: read every plan, reconcile disagreements, "
                "emit one plan"}
 if dirty:

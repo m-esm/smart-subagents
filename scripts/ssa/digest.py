@@ -227,6 +227,77 @@ def final_message(worker: str, log_path: str, reg=None, mode: str = "implement")
 
 
 # ---------------------------------------------------------------------------
+# Planner verdict
+# ---------------------------------------------------------------------------
+
+NO_OUTPUT_MARK = "(planner produced no output"
+NO_PLAN_MARK = "(planner produced no plan"
+
+
+def _tool_calls(text: str, tool_rule: Optional[dict], tool_error_rule: Optional[dict]):
+    if not tool_rule or not tool_error_rule:
+        return []
+    calls = []
+    for i, obj in enumerate(_iter_json_lines(text)):
+        if not _matches(obj, tool_rule.get("match") or {}):
+            continue
+        name = _rule_value(obj, tool_rule.get("keys") or []) or "tool"
+        failed = _matches(obj, tool_error_rule.get("match") or {})
+        error = _rule_value(obj, tool_error_rule.get("keys") or []) if failed else ""
+        calls.append((i, name, (error or "failed") if failed else ""))
+    return calls
+
+
+def planner_failure_from_text(
+    text: str,
+    fmt: str,
+    final_rule: Optional[dict],
+    error_rule: Optional[dict] = None,
+    tool_rule: Optional[dict] = None,
+    tool_error_rule: Optional[dict] = None,
+) -> str:
+    calls = _tool_calls(text, tool_rule, tool_error_rule) if fmt == "jsonl" else []
+    if calls and calls[0][2]:
+        return "first tool call failed (%s): %s" % (calls[0][1], _clip(calls[0][2], 200))
+    final = final_message_from_text(text, fmt, final_rule, error_rule)
+    if not final:
+        return "no final assistant message"
+    if final.startswith("[run failed:") and "\n" not in final:
+        return final[1:-1] if final.endswith("]") else final[1:]
+    if calls and calls[-1][2] and calls[-1][0] > _scan(text, fmt, final_rule)[1]:
+        return "run ended on a failed tool call (%s): %s" % (calls[-1][1], _clip(calls[-1][2], 200))
+    return ""
+
+
+def planner_verdict(
+    worker: str, plan_path: str, log_path: str, reg=None
+) -> Dict[str, Any]:
+    spec = _spec(worker, reg)
+    fmt = spec.format.get("plan", "text")
+    on_stdout = spec.output_mode("plan") == "stdout"
+    raw = _read(plan_path)
+    if raw.startswith(NO_OUTPUT_MARK):
+        return {"empty": True, "reason": raw.strip().strip("()").split("; ", 1)[-1]}
+    stream = raw if on_stdout or fmt == "text" else _read(log_path)
+    if on_stdout and fmt != "text" and raw:
+        with open(log_path, "a") as fh:
+            fh.write(raw if raw.endswith("\n") else raw + "\n")
+    reason = planner_failure_from_text(
+        stream, fmt, spec.final, spec.error, spec.tool, spec.tool_error
+    )
+    if reason:
+        doc = digest(worker, log_path, reg=reg, mode="plan", max_events=10, final_chars=2000)
+        with open(plan_path, "w") as fh:
+            fh.write("%s: %s. Digest of %s follows.)\n\n%s\n" % (
+                NO_PLAN_MARK, reason.rstrip("."), log_path, render(doc)))
+        return {"empty": True, "reason": reason}
+    if on_stdout and fmt != "text":
+        with open(plan_path, "w") as fh:
+            fh.write(final_message_from_text(stream, fmt, spec.final, spec.error) + "\n")
+    return {"empty": False}
+
+
+# ---------------------------------------------------------------------------
 # One-line event summaries
 # ---------------------------------------------------------------------------
 
