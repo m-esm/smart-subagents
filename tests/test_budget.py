@@ -24,7 +24,8 @@ from test_shell import make_task_dir  # noqa: E402
 CLAUDE_WORKER_ARGS = ["--effort", "high", "--model", "fable"]
 CLAUDE_AGENTS = (
     '{"ssa-worker":{"description":"SSA dispatched worker: Complete the fixture task.",'
-    '"disallowedTools":["Task","Agent"],"model":"fable","prompt":"You are the dispatched '
+    '"disallowedTools":["Task","Agent"],"effort":"high","memory":"project","model":"fable",'
+    '"permissionMode":"acceptEdits","prompt":"You are the dispatched '
     "worker and you are the labor. Complete the task in the brief yourself. Do not run "
     "smart-subagents.sh, do not spawn another CLI, do not delegate onward. Do not commit, "
     'do not push, do not reformat the tree."}}'

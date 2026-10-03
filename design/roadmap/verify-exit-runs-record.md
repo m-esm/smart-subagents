@@ -1,5 +1,5 @@
 ---
-state: building
+state: shipped
 lens: spec-gap
 created: 2026-09-10
 metric: cmd_record calls inside cmd_verify
@@ -10,8 +10,8 @@ evidence:
   - design/roadmap/evidence/2026-09-10-cmd-record-in-verify.txt
   - design/roadmap/evidence/2026-09-10-verify-without-record.json
   - design/roadmap/evidence/2026-09-10-copilot-usage-records-auto.txt
-slices: 1/3
-after:
+slices: 3/3
+after: 1
 ---
 # Verify appends the outcome ledger row
 
@@ -26,5 +26,5 @@ After verify writes `outcome.json`, it calls the existing `record` path with `--
 ## Slices
 
 - [x] `cmd_verify` calls `cmd_record`; the measure command prints 1.
-- [ ] Verdict map: pass → verified-pass, fail → rejected, inconclusive → partial. A new finish with `outcome.json` also has `outcome-record.json`.
-- [ ] Idempotent: re-verify of a dir that already has `outcome-record.json` does not double-append the ledger. Manual `record --dir` still accepts `--retries` / `--handoff-to` / `--notes`.
+- [x] Verdict map: pass → verified-pass, fail → rejected, inconclusive → partial. A new finish with `outcome.json` also has `outcome-record.json`.
+- [x] Idempotent: re-verify of a dir that already has `outcome-record.json` does not double-append the ledger. Manual `record --dir` still accepts `--retries` / `--handoff-to` / `--notes`.

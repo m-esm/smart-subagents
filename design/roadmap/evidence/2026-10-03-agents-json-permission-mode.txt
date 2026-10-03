@@ -1,0 +1,6 @@
+origin/main 83f969bfd2f7932ffb15e679c7691f22576890c0 (before this slice)
+python3 -c "import pathlib; ad=pathlib.Path('scripts/ssa/adapters.py').read_text(); s=ad[ad.find('def agents_payload'):ad.find('def agents_json')]; print(int('permissionMode' in s))"
+0
+exit=0
+
+CLI argv already had --permission-mode acceptEdits. The --agents JSON body omitted permissionMode. Official --agents fields (https://code.claude.com/docs/en/sub-agents fetched 2026-10-03) list permissionMode on the definition; without it the named session agent does not pin acceptEdits.

@@ -202,7 +202,7 @@ class ClaudeDispatchTests(unittest.TestCase):
                     "--model",
                     "fable",
                     "--agents",
-                    '{"ssa-worker":{"description":"SSA dispatched worker: Complete the fixture task.","disallowedTools":["Task","Agent"],"model":"fable","prompt":"You are the dispatched worker and you are the labor. Complete the task in the brief yourself. Do not run smart-subagents.sh, do not spawn another CLI, do not delegate onward. Do not commit, do not push, do not reformat the tree."}}',
+                    '{"ssa-worker":{"description":"SSA dispatched worker: Complete the fixture task.","disallowedTools":["Task","Agent"],"effort":"high","memory":"project","model":"fable","permissionMode":"acceptEdits","prompt":"You are the dispatched worker and you are the labor. Complete the task in the brief yourself. Do not run smart-subagents.sh, do not spawn another CLI, do not delegate onward. Do not commit, do not push, do not reformat the tree."}}',
                     "--agent",
                     "ssa-worker",
                 ],
@@ -311,6 +311,11 @@ class ClaudeDispatchTests(unittest.TestCase):
                 payload["ssa-worker"]["disallowedTools"],
                 ["Task", "Agent"],
             )
+            self.assertEqual(payload["ssa-worker"]["memory"], "project")
+            self.assertEqual(payload["ssa-worker"]["permissionMode"], "acceptEdits")
+            self.assertNotIn("effort", payload["ssa-worker"])
+            self.assertNotIn("isolation", payload["ssa-worker"])
+            self.assertNotIn("background", payload["ssa-worker"])
 
     def test_plan_mode_pins_ssa_worker_and_keeps_plan_permission(self):
         spec = self.reg.get("claude")

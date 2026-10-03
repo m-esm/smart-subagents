@@ -3026,13 +3026,18 @@ PY
   _ssa_state "$dir" "$verdict_state"
   # Ledger row is part of verify, not a second supervisor verb. Mapping is
   # pass→verified-pass, fail→rejected, else partial. Verify's own rc is kept
-  # even if record fails; worker rc stays in exit-code.txt.
+  # even if record fails; worker rc stays in exit-code.txt. A second verify
+  # of the same dir must not double-append; manual `record --dir` still can.
   local rec_outcome=partial
   case "$rc" in
     0) rec_outcome=verified-pass ;;
     1) rec_outcome=rejected ;;
   esac
-  cmd_record --dir "$dir" --outcome "$rec_outcome" || true
+  if [[ -f "$dir/outcome-record.json" ]]; then
+    echo "verify: ledger row already present; not appending" >&2
+  else
+    cmd_record --dir "$dir" --outcome "$rec_outcome" || true
+  fi
   return "$rc"
 }
 

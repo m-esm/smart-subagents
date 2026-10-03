@@ -116,8 +116,12 @@ class AgentsFileTests(unittest.TestCase):
         self.assertTrue(fm["description"])
         self.assertEqual(fm["memory"], "project")
         self.assertIs(fm["background"], True)
-        self.assertNotIn("memory", json_body)
+        self.assertEqual(fm["isolation"], "worktree")
+        self.assertEqual(fm["permissionMode"], "acceptEdits")
+        self.assertEqual(json_body["memory"], "project")
+        self.assertEqual(json_body["permissionMode"], "acceptEdits")
         self.assertNotIn("background", json_body)
+        self.assertNotIn("isolation", json_body)
         return fm, body, json_body
 
     def test_init_writes_ssa_worker_md_matching_agents_json(self):
@@ -168,6 +172,14 @@ class AgentsFileTests(unittest.TestCase):
             fm, _body = parse_agent_markdown(md)
             self.assertNotIn("model", fm)
             self.assertNotIn("model", js["ssa-worker"])
+            self.assertEqual(fm["effort"], "high")
+            self.assertEqual(js["ssa-worker"]["effort"], "high")
+            self.assertEqual(fm["memory"], "project")
+            self.assertEqual(js["ssa-worker"]["memory"], "project")
+            self.assertEqual(fm["permissionMode"], "acceptEdits")
+            self.assertEqual(js["ssa-worker"]["permissionMode"], "acceptEdits")
+            self.assertEqual(fm["isolation"], "worktree")
+            self.assertNotIn("isolation", js["ssa-worker"])
 
     def test_missing_name_or_description_refuses_nonzero(self):
         with temp_env() as te:

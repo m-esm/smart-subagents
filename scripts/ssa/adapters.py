@@ -451,10 +451,21 @@ def agents_payload(spec, ctx: Dict[str, Any]) -> Dict[str, Any]:
         "description": description,
         "disallowedTools": list(cfg["disallowedTools"]),
         "prompt": cfg["prompt"],
+        # `--agents` JSON wins over the markdown file (code.claude.com/docs/en/sub-agents,
+        # fetched 2026-10-03). memory and permissionMode must live here or the
+        # session agent launched with `--agent ssa-worker` never sees them.
+        "memory": "project",
+        "permissionMode": "acceptEdits",
     }
     model = _model_from_ctx(ctx)
     if model:
         payload["model"] = model
+    try:
+        effort = launched_effort(spec, ctx)
+    except AdapterError:
+        effort = ""
+    if effort:
+        payload["effort"] = effort
     return payload
 
 
@@ -473,8 +484,10 @@ _MARKDOWN_FM_ORDER = (
     "description",
     "model",
     "disallowedTools",
+    "permissionMode",
     "memory",
     "background",
+    "effort",
     "isolation",
 )
 
@@ -482,10 +495,15 @@ _MARKDOWN_FM_ORDER = (
 def agents_markdown(payload: Dict[str, Any]) -> str:
     """Claude Code agent file: YAML frontmatter plus prompt body.
 
-    Extra file-only keys `memory: project`, `background: true`, and
-    `isolation: worktree` live here and must not appear in the `--agents`
-    JSON. `disallowedTools` is a JSON-style list so a YAML parse and
-    json.loads agree on the value.
+    File-only keys `background: true` and `isolation: worktree` live here
+    and must not appear in the `--agents` JSON: `--agent ssa-worker` is the
+    session agent already running inside SSA's git worktree, and JSON
+    `isolation: worktree` would mint a second worktree off the default
+    branch (code.claude.com/docs/en/sub-agents and
+    https://x.com/masayaneg/status/2104864366700966308, 2026-10). `memory`,
+    `permissionMode`, and `effort` do go on the JSON because `--agents`
+    wins over this file. `disallowedTools` is a JSON-style list so a YAML
+    parse and json.loads agree on the value.
     """
     name = str(payload.get("name") or "")
     description = str(payload.get("description") or "")
@@ -497,12 +515,15 @@ def agents_markdown(payload: Dict[str, Any]) -> str:
         "name": name,
         "description": description,
         "disallowedTools": list(payload.get("disallowedTools") or []),
-        "memory": "project",
+        "memory": payload.get("memory") or "project",
         "background": True,
         "isolation": "worktree",
+        "permissionMode": payload.get("permissionMode") or "acceptEdits",
     }
     if payload.get("model"):
         fm["model"] = payload["model"]
+    if payload.get("effort"):
+        fm["effort"] = payload["effort"]
     lines = ["---"]
     for key in _MARKDOWN_FM_ORDER:
         if key not in fm:
