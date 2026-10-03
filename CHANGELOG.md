@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.3
+
+Claude `--agents` JSON now carries the fields the 2026-10 docs actually
+honor on a session agent (`memory: project`, `permissionMode: acceptEdits`,
+and the launched `effort` rung). `isolation: worktree` stays file-only so
+Claude does not mint a second worktree off the default branch. Verify
+appends one ledger row and will not double-append on re-verify.
+
 ## 0.4.2
 
 0.4.1 shipped, yet a panel at 22:58 the same day failed exactly as before:

@@ -1,5 +1,5 @@
 ---
-state: building
+state: shipped
 lens: outside-in
 created: 2026-09-11
 metric: isolation keys written into claude ssa-worker agents markdown or --agents payload
@@ -8,8 +8,8 @@ target: 1
 measure: python3 -c "import pathlib,re,json; ad=pathlib.Path('scripts/ssa/adapters.py').read_text(); w=json.loads(pathlib.Path('scripts/workers.json').read_text()); order=ad[ad.find('_MARKDOWN_FM_ORDER'):ad.find('def agents_markdown')]; md=ad[ad.find('def agents_markdown'):ad.find('def write_agents_file')]; pay=ad[ad.find('def agents_payload'):ad.find('def agents_json')]; print(int('isolation' in order or 'isolation' in md or 'isolation' in pay or 'isolation' in w['workers']['claude']['agents']))"
 evidence:
   - design/roadmap/evidence/2026-09-11-agents-isolation-worktree.txt
-slices: 1/2
-after:
+slices: 2/2
+after: 1
 ---
 # Pin isolation: worktree on the Claude ssa-worker agent
 
@@ -25,9 +25,9 @@ Without `isolation: worktree` on the pinned agent, Claude's own enforcement (cwd
 
 ## What better looks like
 
-`agents_markdown` emits `isolation: worktree` (file-only is fine, same as memory/background). Optional later: pass it through `--agents` JSON if Claude Code accepts it there (docs list `isolation` on both the markdown fields and the `--agents` JSON fields). Gate: the measure command prints 1. A fixture agent file parsed by `tests/test_agents_file.py` contains `isolation` equal to `worktree`.
+`agents_markdown` emits `isolation: worktree`. `--agents` JSON still omits it: the session agent already runs inside SSA's git worktree, and JSON `isolation: worktree` would mint a second worktree off the default branch (https://code.claude.com/docs/en/sub-agents and https://x.com/masayaneg/status/2104864366700966308, 2026-10). Gate: the measure command prints 1. `tests/test_agents_file.py` asserts `fm["isolation"] == "worktree"` and `isolation` not in the JSON body.
 
 ## Slices
 
 - [x] `agents_markdown` writes `isolation: worktree`; measure prints 1.
-- [ ] `test_agents_file.py` asserts the parsed frontmatter has `isolation == "worktree"`; `--agents` JSON still omits it if that is the current Claude JSON contract, with a comment pointing at the docs.
+- [x] `test_agents_file.py` asserts the parsed frontmatter has `isolation == "worktree"`; `--agents` JSON still omits it, with a comment pointing at the docs.
