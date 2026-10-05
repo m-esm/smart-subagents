@@ -36,3 +36,7 @@ row is struck through with a one-line reason. Do not edit rows by hand; strike o
 - [ ] 2026-09-28 Ask HN: Has anyone built a leaderless multi-agent system? https://news.ycombinator.com/item?id=49847249 (HN 3 pts)
 - [ ] 2026-09-28 Miosa-osa/OSA: An AI agent for your terminal, built on signal theory: every output is signal, n https://github.com/Miosa-osa/OSA (GitHub 75 stars)
 - [ ] 2026-09-28 omaralisql/Claude-Zeroclaw-Nexus: Claude Code ZeroClaw Pro 2026: AI Multitool & CLI Router for Claude SDK Suba https://github.com/omaralisql/Claude-Zeroclaw-Nexus (GitHub 52 stars)
+- [ ] 2026-10-05 Fable Decides, Opus and Sonnet Do the Work: How I Route Claude Code Subagents https://www.practicalsystems.io/blog/fable-opus-sonnet-claude-code-subagent-routing (HN 1 pts)
+- [ ] 2026-10-05 ethanhq/cc-fleet: 🚢 Run Claude Code's ⚙️ Dynamic Workflows, 👥 Agent Teams & ⚡ Subagents on any thi https://github.com/ethanhq/cc-fleet (GitHub 215 stars)
+- [ ] 2026-10-05 khendzel/skills-janitor: Tinder for your Claude Code skills, subagents and MCP servers. Swipe away what w https://github.com/khendzel/skills-janitor (GitHub 123 stars)
+- [ ] 2026-10-05 humaedihume/kantor-agent: Kantor Agent: kantor 3D tanpa konfigurasi yang menampilkan Claude Code & subagen https://github.com/humaedihume/kantor-agent (GitHub 98 stars)
