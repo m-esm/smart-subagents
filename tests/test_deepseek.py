@@ -183,7 +183,7 @@ class _StreamingUpstream(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.flush()
         if self.plan == "stall":
-            time.sleep(40)
+            time.sleep(20)
             return
         for i in range(18):
             event = ("data: tok%d\n\n" % i).encode()
@@ -203,7 +203,8 @@ curl -sS -N -X POST "http://127.0.0.1:$port/v1/chat/completions" -H 'Content-Typ
 
 class WatchdogTests(unittest.TestCase):
     def setUp(self):
-        self.upstream = http.server.HTTPServer(("127.0.0.1", 0), _StreamingUpstream)
+        self.upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _StreamingUpstream)
+        self.upstream.daemon_threads = True
         threading.Thread(target=self.upstream.serve_forever, daemon=True).start()
         self.tmp = tempfile.TemporaryDirectory(prefix="ssa-watchdog-")
         home = Path(self.tmp.name) / "home"
