@@ -577,6 +577,16 @@ pass "ls and status render a task dir"
 printf 'true\n' >"$ops_dir/verify-cmds.txt"
 printf '0\ttrue\n' >"$ops_dir/baseline-results.txt"
 : >"$ops_dir/baseline.log"
+verify_rc=0
+ssa_ops verify --dir "$ops_dir" >"$TEST_TMP/verify-empty.txt" || verify_rc=$?
+[[ "$verify_rc" == "1" ]] || fail "verify empty diff exit code"
+grep -q '"verdict": "empty-diff"' "$ops_dir/outcome.json" || \
+  fail "verify impl task with no change is empty-diff, not pass"
+grep -q '"outcome": "rejected"' "$ops_state/smart-subagents/outcomes.jsonl" || \
+  fail "verify records an empty diff as rejected"
+pass "verify refuses an empty diff on an impl task"
+
+echo "changed" >>"$ops_wt/README.md"
 ssa_ops verify --dir "$ops_dir" >"$TEST_TMP/verify-pass.txt" || fail "verify pass exit"
 grep -q '"verdict": "pass"' "$ops_dir/outcome.json" || fail "verify pass verdict"
 grep -q '### true (exit 0)' "$ops_dir/verify-final.log" || fail "verify final log"
@@ -604,6 +614,7 @@ printf 'true\n' >"$ops_dir/verify-cmds.txt"
 printf '0\ttrue\n' >"$ops_dir/baseline-results.txt"
 ssa_ops verify --dir "$ops_dir" >/dev/null || fail "verify pass again"
 pass "verify reports pass, fail and inconclusive"
+git -C "$ops_wt" checkout -q -- README.md
 
 echo 0 >"$ops_dir/exit-code.txt"
 ssa_ops record --dir "$ops_dir" --outcome verified-pass --retries 2 \

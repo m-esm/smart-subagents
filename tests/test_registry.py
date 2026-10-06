@@ -668,6 +668,50 @@ class AdapterUnitTests(unittest.TestCase):
             with self.subTest(tail=tail):
                 self.assertEqual(self.adapters.classify_failure(code, tail), expected)
 
+    def test_rejected_permissions_reads_only_the_opencode_auto_reject_notice(self):
+        notice = (
+            "\x1b[93m\x1b[1m! \x1b[0mpermission requested: external_directory "
+            "(/var/folders/xy/T/smart-subagents/wt/1/*); auto-rejecting\n"
+        )
+        rejected_tool = json.dumps({
+            "type": "tool_use",
+            "part": {
+                "type": "tool",
+                "tool": "bash",
+                "state": {
+                    "status": "error",
+                    "input": {"command": "ls"},
+                    "error": "The user rejected permission to use this specific tool call.",
+                },
+            },
+        }) + "\n"
+        completed_tool = json.dumps({
+            "type": "tool_use",
+            "part": {
+                "type": "tool",
+                "tool": "read",
+                "state": {"status": "completed", "output": "rejected permission to use nothing"},
+            },
+        }) + "\n"
+        quoted_in_prose = json.dumps({
+            "type": "text",
+            "part": {"text": "permission requested: external_directory (x); auto-rejecting"},
+        }) + "\n"
+        cases = [
+            ("", []),
+            (notice + rejected_tool, ["external_directory"]),
+            (notice + rejected_tool + notice + rejected_tool,
+             ["external_directory", "external_directory"]),
+            (rejected_tool, ["tool-call"]),
+            (completed_tool, []),
+            (quoted_in_prose, []),
+            ("permission requested: external_directory (x); still asking\n", []),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text[:60]):
+                self.assertEqual(self.adapters.rejected_permissions(text), expected)
+        self.assertEqual(self.adapters.CHANGE_KINDS, ("impl", "debug"))
+
     def test_codex_session_scrape_ignores_a_bare_id(self):
         with temp_env() as te:
             reg = self._reg(te)

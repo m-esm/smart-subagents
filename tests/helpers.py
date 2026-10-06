@@ -133,7 +133,7 @@ class TempEnv:
 
     def __enter__(self) -> "TempEnv":
         self._tmp = tempfile.TemporaryDirectory(prefix="ssa-test-")
-        self.root = Path(self._tmp.name)
+        self.root = Path(self._tmp.name).resolve()
         self.home = self.root / "home"
         self.home.mkdir(parents=True, exist_ok=True)
         xdg_state = self.root / "state"

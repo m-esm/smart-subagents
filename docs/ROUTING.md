@@ -169,7 +169,7 @@ and counted in `fit_ledger_skipped`, never fatal.
 
 ```mermaid
 flowchart TB
-    DISP["Dispatch a task"] --> VERIFY["Verify against the pre-dispatch baseline<br/>pass / fail / rejected / inconclusive"]
+    DISP["Dispatch a task"] --> VERIFY["Verify against the pre-dispatch baseline<br/>pass / fail / empty-diff / env-blocked / inconclusive"]
     VERIFY --> REC["record one thin line<br/>no prompt, no diff, no filenames"]
     REC --> LOG[("outcomes.jsonl")]
     LOG --> DECAY["Age-decay the evidence<br/>30-day half-life"]

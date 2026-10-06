@@ -119,7 +119,7 @@ flowchart TB
     --> picked["picked<br/>primary named, baseline verify can run now"]
     --> running["running<br/>CLI process group in the worktree"]
     --> exited["exited<br/>worker finished, exit code captured"]
-    --> verdict["verdict<br/>verify: pass, fail, or inconclusive"]
+    --> verdict["verdict<br/>verify: pass, fail, empty-diff, env-blocked, or inconclusive"]
     --> reported["reported<br/>ledger line written, only terminal state"]
     picked -->|"no worker yet:<br/>baseline so old failures are not charged to it"| verdict
     running --> stalled["stalled<br/>watchdog: log and tree went quiet"]
@@ -140,7 +140,10 @@ omitted so the line stays readable. The rest that the picture compresses:
   worker.
 - `verdict` is three states (`verified`, `failed`, `inconclusive`). They can
   revisit each other and can go back to `picked`. Verify runs again after a
-  retry, and the second answer is allowed to differ from the first.
+  retry, and the second answer is allowed to differ from the first. The
+  `empty-diff` and `env-blocked` verdicts land in `failed` with that string as
+  the failure class: an `impl` or `debug` worker that changed nothing, or an
+  opencode run that exit 0 after a permission auto-reject, is never `verified`.
 - `reported` is reachable from `exited`, `aborted` and `stalled`. Bookkeeping is
   not work: an env-blocked or stalled dispatch still owes the ledger a line, and
   losing those lines would quietly bias the learned fit.

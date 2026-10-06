@@ -700,6 +700,160 @@ class VerifyTests(unittest.TestCase):
             self.assertEqual(doc["verify"]["verdict"], "fail")
             self.assertEqual(doc["verify"]["changed_files"], 0)
 
+    def test_verify_empty_diff_on_an_impl_task_is_not_pass_even_when_the_baseline_already_failed(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, kind="impl")
+            (task_dir / "exit-code.txt").write_text("0\n")
+            (task_dir / "baseline.log").touch()
+            (task_dir / "verify-cmds.txt").write_text("false\nexit 2\n")
+            (task_dir / "baseline-results.txt").write_text("1\tfalse\n2\texit 2\n")
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 1, err + out)
+            doc = json.loads((task_dir / "outcome.json").read_text())
+            self.assertEqual(doc["verify"]["verdict"], "empty-diff")
+            self.assertEqual(doc["verify"]["new_failures"], 0)
+            self.assertEqual(doc["verify"]["changed_files"], 0)
+            self.assertEqual(doc["verify"]["kind"], "impl")
+            self.assertEqual(doc["failure_class"], "empty-diff")
+            self.assertIn("changed 0 files", out)
+            events = [
+                json.loads(line)
+                for line in (task_dir / "events.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            failed = [e for e in events if e.get("phase") == "failed"]
+            self.assertEqual(len(failed), 1, events)
+            self.assertEqual(failed[0].get("failure_class"), "empty-diff")
+            self.assertEqual((task_dir / "verify-outcome.txt").read_text().strip(), "rejected")
+            record = json.loads(
+                (te.state_dir / "outcomes.jsonl").read_text().strip().splitlines()[-1]
+            )
+            self.assertEqual(record["outcome"], "rejected")
+            self.assertIs(record["verification_passed"], False)
+            self.assertEqual(record["failure_class"], "empty-diff")
+            rc, out, err = run_ssa(
+                "record", "--dir", str(task_dir), "--outcome", "verified-pass", env=te.env
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn("verdict=empty-diff", err)
+            rows = (te.state_dir / "outcomes.jsonl").read_text().strip().splitlines()
+            self.assertEqual(len(rows), 1)
+
+    def test_verify_empty_diff_is_a_verdict_only_for_kinds_that_deliver_a_change(self):
+        cases = (
+            ("impl", "empty-diff", 1),
+            ("debug", "empty-diff", 1),
+            ("review", "pass", 0),
+            ("analysis", "pass", 0),
+            ("default", "pass", 0),
+        )
+        for kind, verdict, want_rc in cases:
+            with self.subTest(kind=kind), temp_env() as te:
+                repo = make_git_repo(te.root / "repo")
+                task_dir = make_task_dir(te.work_dir, repo, kind=kind)
+                (task_dir / "baseline.log").touch()
+                (task_dir / "baseline-results.txt").write_text("0\ttrue\n")
+                rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+                self.assertEqual(rc, want_rc, err + out)
+                doc = json.loads((task_dir / "outcome.json").read_text())
+                self.assertEqual(doc["verify"]["verdict"], verdict)
+
+    def test_verify_impl_task_with_a_real_change_still_passes(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, kind="impl")
+            (task_dir / "baseline.log").touch()
+            (task_dir / "baseline-results.txt").write_text("0\ttrue\n")
+            (repo / "README.md").write_text("fixture\nchanged\n")
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            doc = json.loads((task_dir / "outcome.json").read_text())
+            self.assertEqual(doc["verify"]["verdict"], "pass")
+            self.assertEqual(doc["verify"]["changed_files"], 1)
+            self.assertNotIn("failure_class", doc)
+            record = json.loads(
+                (te.state_dir / "outcomes.jsonl").read_text().strip().splitlines()[-1]
+            )
+            self.assertEqual(record["outcome"], "verified-pass")
+
+    def test_verify_silent_opencode_permission_reject_is_env_blocked(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, kind="impl")
+            (task_dir / "exit-code.txt").write_text("0\n")
+            (task_dir / "baseline.log").touch()
+            (task_dir / "verify-cmds.txt").write_text("false\n")
+            (task_dir / "baseline-results.txt").write_text("1\tfalse\n")
+            (task_dir / "stdout.log").write_text(
+                json.dumps({"type": "step_start", "part": {"type": "step-start"}}) + "\n"
+                + "\x1b[93m\x1b[1m! \x1b[0mpermission requested: external_directory "
+                "(/var/folders/xy/T/smart-subagents/wt/1/*); auto-rejecting\n"
+                + json.dumps({
+                    "type": "tool_use",
+                    "part": {
+                        "type": "tool",
+                        "tool": "bash",
+                        "state": {
+                            "status": "error",
+                            "input": {"command": "cd /var/folders/xy/T/smart-subagents/wt/1 && ls"},
+                            "error": "The user rejected permission to use this specific tool call.",
+                        },
+                    },
+                }) + "\n"
+                + json.dumps({"type": "step_finish", "part": {"type": "step-finish", "reason": "stop"}}) + "\n"
+            )
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 3, err + out)
+            doc = json.loads((task_dir / "outcome.json").read_text())
+            self.assertEqual(doc["verify"]["verdict"], "env-blocked")
+            self.assertEqual(doc["verify"]["rejected_permissions"], ["external_directory"])
+            self.assertEqual(doc["verify"]["worker_exit"], 0)
+            self.assertEqual(doc["verify"]["changed_files"], 0)
+            self.assertEqual(doc["failure_class"], "env-blocked")
+            self.assertIn("auto-rejected: external_directory", out)
+            events = [
+                json.loads(line)
+                for line in (task_dir / "events.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            failed = [e for e in events if e.get("phase") == "failed"]
+            self.assertEqual(len(failed), 1, events)
+            self.assertEqual(failed[0].get("failure_class"), "env-blocked")
+            record = json.loads(
+                (te.state_dir / "outcomes.jsonl").read_text().strip().splitlines()[-1]
+            )
+            self.assertEqual(record["outcome"], "env-blocked")
+            self.assertIs(record["verification_passed"], False)
+            self.assertEqual(record["failure_class"], "env-blocked")
+            rc, out, err = run_ssa(
+                "record", "--dir", str(task_dir), "--outcome", "verified-pass", env=te.env
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn("verdict=env-blocked", err)
+
+    def test_verify_empty_diff_after_a_rate_limit_is_recorded_rate_limited_not_rejected(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, kind="impl")
+            (task_dir / "exit-code.txt").write_text("1\n")
+            (task_dir / "baseline.log").touch()
+            (task_dir / "baseline-results.txt").write_text("0\ttrue\n")
+            (task_dir / "task.json").write_text(json.dumps({
+                "schema_version": 1,
+                "state": "exited",
+                "attempts": [{"failure_class": "rate-limit"}],
+            }) + "\n")
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 1, err + out)
+            doc = json.loads((task_dir / "outcome.json").read_text())
+            self.assertEqual(doc["verify"]["verdict"], "empty-diff")
+            self.assertEqual((task_dir / "verify-outcome.txt").read_text().strip(), "rate-limited")
+            record = json.loads(
+                (te.state_dir / "outcomes.jsonl").read_text().strip().splitlines()[-1]
+            )
+            self.assertEqual(record["outcome"], "rate-limited")
+
     def test_dispatch_missing_verify_cmds_is_inconclusive(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
@@ -715,6 +869,68 @@ class VerifyTests(unittest.TestCase):
             self.assertTrue((task_dir / "outcome.json").is_file())
             doc = json.loads((task_dir / "outcome.json").read_text())
             self.assertEqual(doc["verify"]["verdict"], "inconclusive")
+
+
+class RealpathTests(unittest.TestCase):
+    def test_dispatch_hands_the_worker_the_resolved_worktree_path(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            link = te.root / "wt-link"
+            link.symlink_to(repo)
+            task_dir = make_task_dir(te.work_dir, repo, worker_args=[])
+            (task_dir / "wt.txt").write_text(str(link) + "/\n")
+            env = dict(te.env)
+            env["KIMI_BIN"] = str(BIN_DIR / "fake-kimi")
+            env["SSA_ALLOW_KIMI_WRITE"] = "1"
+
+            rc, out, err = run_ssa("dispatch", "--dir", str(task_dir), "--worker", "kimi", env=env)
+            self.assertEqual(rc, 0, err + out)
+
+            recorder = te.home / ".ssa-test" / "fake-kimi"
+            argv = read_argv_file(recorder / "argv.txt")
+            real_brief = Path(os.path.realpath(repo)) / "BRIEF.md"
+            self.assertEqual(
+                argv[1], f"Read the file {real_brief} and complete the task it describes."
+            )
+            self.assertNotIn(str(link), " ".join(argv))
+            self.assertNotIn("//", " ".join(argv))
+
+    def test_init_records_a_resolved_work_dir_without_a_doubled_slash(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            link = te.root / "work-link"
+            link.symlink_to(te.work_dir)
+            stub = te.root / "usage-stub.py"
+            write_usage_stub(
+                stub,
+                {
+                    "primary_worker": "codex",
+                    "fallback_workers": [],
+                    "local_labor_ok": True,
+                    "task_size": "medium",
+                    "task_kind": "impl",
+                    "difficulty": "routine",
+                    "target_effort": "medium",
+                    "cross_review_required": False,
+                    "worker_args": {"codex": [], "grok": [], "kimi": []},
+                    "ranked": [{"cli": "codex", "score": 80}],
+                    "reasons": [],
+                },
+            )
+            env = dict(te.env)
+            env["SSA_USAGE_PY"] = str(stub)
+            env["SSA_STUB_ARGV"] = str(te.root / "usage-argv.txt")
+            env["SSA_WORK_DIR"] = str(link) + "/"
+
+            rc, out, err = run_ssa("init", "--repo", str(repo), "--kind", "impl", env=env)
+            self.assertEqual(rc, 0, err + out)
+            task_dir = find_only_task_dir(te.work_dir)
+            wt = (task_dir / "wt.txt").read_text().strip()
+            real_work = os.path.realpath(te.work_dir)
+            self.assertTrue(wt.startswith(real_work + "/wt/"), wt)
+            self.assertNotIn("//", wt)
+            self.assertNotIn(str(link), wt)
+            self.assertTrue(Path(wt).is_dir())
 
 
 class WatchdogTests(unittest.TestCase):
@@ -951,6 +1167,41 @@ class RecordTests(unittest.TestCase):
             )
             self.assertEqual(record["outcome"], "partial")
             self.assertIs(record["verification_passed"], False)
+
+    def test_record_verified_pass_refuses_an_impl_task_whose_verify_saw_no_change(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, kind="impl")
+            (task_dir / "exit-code.txt").write_text("0\n")
+            (task_dir / "outcome.json").write_text(json.dumps({
+                "schema_version": 1,
+                "verify": {"verdict": "pass", "changed_files": 0},
+            }) + "\n")
+            rc, out, err = run_ssa(
+                "record", "--dir", str(task_dir), "--outcome", "verified-pass", env=te.env
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn("empty diff", err)
+            self.assertFalse((te.state_dir / "outcomes.jsonl").exists())
+
+            (task_dir / "outcome.json").write_text(json.dumps({
+                "schema_version": 1,
+                "verify": {"verdict": "pass", "changed_files": 2},
+            }) + "\n")
+            rc, out, err = run_ssa(
+                "record", "--dir", str(task_dir), "--outcome", "verified-pass", env=te.env
+            )
+            self.assertEqual(rc, 0, err)
+
+            (task_dir / "kind.txt").write_text("review\n")
+            (task_dir / "outcome.json").write_text(json.dumps({
+                "schema_version": 1,
+                "verify": {"verdict": "pass", "changed_files": 0},
+            }) + "\n")
+            rc, out, err = run_ssa(
+                "record", "--dir", str(task_dir), "--outcome", "verified-pass", env=te.env
+            )
+            self.assertEqual(rc, 0, err)
 
     def test_record_steered_run_is_not_a_retry(self):
         with temp_env() as te:
