@@ -2091,6 +2091,21 @@ class SecretScanTests(unittest.TestCase):
             self.assertEqual(rc, 0, err + out)
             self.assertFalse((task_dir / "verify-secrets.txt").read_text().strip())
 
+    def test_template_relative_url_paths_are_not_high_entropy_secrets(self):
+        # 1789144207-45446: relative paths after ${url} / ${apiUrl}.
+        lines = (
+            "  const missing = await fetch(`${url}/rooms/default/agents/missing-agent`, {\n"
+            "    const missing = await request.patch(`${apiUrl}/rooms/default/agents/missing-agent`, {\n"
+        )
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (repo / "agents.test.ts").write_text(lines)
+
+            rc, out, err = run_ssa("scan-secrets", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertFalse((task_dir / "verify-secrets.txt").read_text().strip())
+
     def test_parent_commit_sha_is_not_a_high_entropy_secret(self):
         # 1789028987-49325: Parent commit: <40-char hex> of an object in wt.
         with temp_env() as te:

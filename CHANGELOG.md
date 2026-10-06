@@ -34,8 +34,8 @@ until 4096 bytes or EOF, so opencode received the stream in 4 KB batches.
   tried first and the value is checked to be an integer.
 - The proxy binds its loopback socket without `socket.getfqdn`, the reverse
   lookup `HTTPServer.server_bind` runs and which left the proxy without a
-  port for 20 s on the macos-latest runner (ProxyTests red on main since
-  0.4.2). The test fakes bind the same way.
+  port for 20 s on the macos-latest runner (ProxyTests red on main in every
+  run since 2026-09-28). The test fakes bind the same way.
 
 ## 0.4.4
 
