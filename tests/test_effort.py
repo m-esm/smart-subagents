@@ -23,13 +23,22 @@ from helpers import (  # noqa: E402
 from test_shell import make_task_dir  # noqa: E402
 
 CLAUDE_DERIVED = ["--effort", "medium", "--model", "fable"]
-CLAUDE_AGENTS = (
-    '{"ssa-worker":{"description":"SSA dispatched worker: Complete the fixture task.",'
-    '"disallowedTools":["Task","Agent"],"model":"fable","prompt":"You are the dispatched '
-    "worker and you are the labor. Complete the task in the brief yourself. Do not run "
-    "smart-subagents.sh, do not spawn another CLI, do not delegate onward. Do not commit, "
-    'do not push, do not reformat the tree."}}'
-)
+def claude_agents_json(effort="medium"):
+    body = {
+        "description": "SSA dispatched worker: Complete the fixture task.",
+        "disallowedTools": ["Task", "Agent"],
+        "effort": effort,
+        "memory": "project",
+        "model": "fable",
+        "permissionMode": "acceptEdits",
+        "prompt": (
+            "You are the dispatched worker and you are the labor. Complete the "
+            "task in the brief yourself. Do not run smart-subagents.sh, do not "
+            "spawn another CLI, do not delegate onward. Do not commit, do not "
+            "push, do not reformat the tree."
+        ),
+    }
+    return json.dumps({"ssa-worker": body}, separators=(",", ":"), sort_keys=True)
 
 
 def claude_implement_argv(launch_brief, effort="medium"):
@@ -45,7 +54,7 @@ def claude_implement_argv(launch_brief, effort="medium"):
         "--model",
         "fable",
         "--agents",
-        CLAUDE_AGENTS,
+        claude_agents_json(effort),
         "--agent",
         "ssa-worker",
     ]

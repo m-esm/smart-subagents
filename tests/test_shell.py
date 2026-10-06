@@ -538,6 +538,31 @@ class VerifyTests(unittest.TestCase):
                 ["other/new.py"],
             )
 
+    def test_reverify_does_not_double_append_ledger(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "worker.txt").write_text("claude\n")
+            (task_dir / "exit-code.txt").write_text("0\n")
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            ledger = te.state_dir / "outcomes.jsonl"
+            self.assertTrue(ledger.is_file(), err + out)
+            first = [ln for ln in ledger.read_text().splitlines() if ln.strip()]
+            self.assertEqual(len(first), 1, ledger.read_text())
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertIn("ledger row already present", err)
+            second = [ln for ln in ledger.read_text().splitlines() if ln.strip()]
+            self.assertEqual(len(second), 1, ledger.read_text())
+            rc, out, err = run_ssa(
+                "record", "--dir", str(task_dir), "--outcome", "verified-pass",
+                "--retries", "1", env=te.env,
+            )
+            self.assertEqual(rc, 0, err + out)
+            third = [ln for ln in ledger.read_text().splitlines() if ln.strip()]
+            self.assertEqual(len(third), 2, ledger.read_text())
+
     def test_verify_untracked_in_scope_passes(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")

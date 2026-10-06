@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.3
+## 0.4.4
 
 Task 1791194983-39473 (deepseek through opencode) wrote two `verified-pass`
 rows for runs that changed nothing. The worker's first file tool touched a
@@ -26,6 +26,13 @@ The router's fit for deepseek impl/hard rose from 0.85 to 1.0 on it.
   macOS, no doubled slash from a `$TMPDIR` that ends in `/`).
 - `ssa.adapters.rejected_permissions` and `CHANGE_KINDS` hold the detection
   and the kinds that owe a diff; `tests/test_registry.py` carries the table.
+## 0.4.3
+
+Claude `--agents` JSON now carries the fields the 2026-10 docs actually
+honor on a session agent (`memory: project`, `permissionMode: acceptEdits`,
+and the launched `effort` rung). `isolation: worktree` stays file-only so
+Claude does not mint a second worktree off the default branch. Verify
+appends one ledger row and will not double-append on re-verify.
 
 ## 0.4.2
 

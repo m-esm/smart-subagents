@@ -630,7 +630,8 @@ if grep -Fq "$ops_dir" "$ledger_file"; then
   fail "record omits the task dir path"
 fi
 ssa_ops ledger --days 7 >"$TEST_TMP/ledger.txt" || fail "ledger runs"
-# verify already appended one row per run; the explicit record still appends.
+# first verify appended one row; later verifies of the same dir do not;
+# the explicit record still appends.
 grep -q 'dispatch(es)' "$TEST_TMP/ledger.txt" || fail "ledger counts the dispatch"
 grep -q '^codex' "$TEST_TMP/ledger.txt" || fail "ledger groups by worker"
 pass "record and ledger keep an outcome trail"
