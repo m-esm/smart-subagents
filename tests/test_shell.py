@@ -1103,6 +1103,48 @@ def write_outcome(task_dir: Path, verdict: str = "pass") -> None:
 
 
 class RecordTests(unittest.TestCase):
+    def test_record_skips_a_row_identical_to_one_already_in_the_ledger(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "exit-code.txt").write_text("0\n")
+            write_outcome(task_dir, "pass")
+            ledger_path = te.state_dir / "outcomes.jsonl"
+            for _ in range(2):
+                rc, out, err = run_ssa(
+                    "record", "--dir", str(task_dir), "--outcome", "verified-pass", env=te.env
+                )
+                self.assertEqual(rc, 0, err)
+            self.assertIn("unchanged since", out)
+            self.assertEqual(len(ledger_path.read_text().strip().splitlines()), 1)
+
+            rc, out, err = run_ssa(
+                "record", "--dir", str(task_dir), "--outcome", "verified-pass",
+                "--notes", "reviewed the diff", env=te.env,
+            )
+            self.assertEqual(rc, 0, err)
+            rows = ledger_path.read_text().strip().splitlines()
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(json.loads(rows[-1])["notes"], "reviewed the diff")
+
+            rc, out, err = run_ssa("ledger", "--days", "7", env=te.env)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("1 task(s)", out)
+            self.assertIn("EMPTY-DIFF", out)
+
+    def test_record_warns_when_the_task_has_no_repo(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "repo.txt").unlink()
+            rc, out, err = run_ssa(
+                "record", "--dir", str(task_dir), "--outcome", "blocked", env=te.env
+            )
+            self.assertEqual(rc, 0, err)
+            self.assertIn("no repo.txt", err)
+            row = json.loads((te.state_dir / "outcomes.jsonl").read_text().strip().splitlines()[-1])
+            self.assertEqual(row["repo_hash"], "")
+
     def test_record_writes_ledger_line_without_absolute_paths(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
@@ -1683,22 +1725,34 @@ cmd_bg_run --dir "$2" --worker codex
             self.assertEqual(rc, 0, err)
             self.assertRegex(out, r"reported")
 
-    def test_gc_keeps_a_planning_panel_until_it_reports_done(self):
+    def test_gc_keeps_a_planning_panel_while_a_planner_is_alive(self):
         with temp_env() as te:
             panel = make_plain_task_dir(
                 te.work_dir, "plan-1700000000-1",
                 {"repo.txt": str(te.root / "repo") + "\n",
-                 "plan-0-pragmatic-codex.md": "# plan\n"},
+                 "plan-0-pragmatic-codex.md": "# plan\n",
+                 "planner-0.pid": "%d\n" % os.getpid()},
             )
-            rc, out, err = run_ssa("gc", "--older-than", "0", env=te.env)
+            rc, out, err = run_ssa("gc", "--older-than", "0", "--verbose", env=te.env)
             self.assertEqual(rc, 0, err)
             self.assertNotIn("safe  panel", out)
-            self.assertIn("kept:", out)
+            self.assertIn("planner pid %d alive" % os.getpid(), out)
 
             (panel / "panel-done.txt").write_text("done\n")
             rc, out, err = run_ssa("gc", "--older-than", "0", env=te.env)
             self.assertEqual(rc, 0, err)
             self.assertIn("safe  panel", out)
+
+    def test_gc_treats_an_aborted_panel_like_any_old_dir(self):
+        with temp_env() as te:
+            make_plain_task_dir(
+                te.work_dir, "plan-1700000000-2",
+                {"repo.txt": str(te.root / "repo") + "\n",
+                 "planner-0.pid": "999999999\n"},
+            )
+            rc, out, err = run_ssa("gc", "--older-than", "0", env=te.env)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("safe  panel plan-1700000000-2", out)
 
 
 class WorktreeBriefTests(unittest.TestCase):
@@ -1858,6 +1912,39 @@ class PlanPanelTests(unittest.TestCase):
 
 
 class WorkDirIsolationTests(unittest.TestCase):
+    def test_init_refuses_a_large_task_unless_allowed(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            stub = te.root / "usage-stub.py"
+            write_usage_stub(
+                stub,
+                {
+                    "primary_worker": "codex",
+                    "fallback_workers": [],
+                    "worker_args": {"codex": []},
+                    "ranked": [{"cli": "codex", "score": 80}],
+                    "reasons": [],
+                },
+            )
+            env = dict(te.env)
+            env["SSA_USAGE_PY"] = str(stub)
+            env["SSA_STUB_ARGV"] = str(te.root / "usage-argv.txt")
+
+            rc, out, err = run_ssa("init", "--repo", str(repo), "--size", "large", env=env)
+            self.assertNotEqual(rc, 0)
+            self.assertIn("--allow-large", err)
+            self.assertIn("medium slices", err)
+            self.assertEqual(
+                [d.name for d in te.work_dir.iterdir() if d.name != "wt"], []
+            )
+
+            rc, out, err = run_ssa(
+                "init", "--repo", str(repo), "--size", "large", "--allow-large", env=env
+            )
+            self.assertEqual(rc, 0, err)
+            task_dir = Path(json.loads(out)["dir"])
+            self.assertEqual((task_dir / "size.txt").read_text().strip(), "large")
+
     def test_init_puts_the_worktree_beside_the_task_dir_not_inside_it(self):
         # A worker whose cwd is $DIR/wt could edit ../verify-cmds.txt and
         # ../scope.txt, then pass its own verification.

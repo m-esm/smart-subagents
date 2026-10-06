@@ -9,6 +9,9 @@ TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/ssa-smoke.XXXXXX")"
 source "$ROOT/tests/teardown.sh"
 trap 'ssa_teardown "$TEST_TMP"' EXIT
 export PYTHONPYCACHEPREFIX="$TEST_TMP/pycache"
+export XDG_STATE_HOME="$TEST_TMP/state"
+export XDG_CACHE_HOME="$TEST_TMP/cache"
+mkdir -p "$XDG_STATE_HOME" "$XDG_CACHE_HOME"
 # Smoke never touches the network: the post-dispatch quota snapshot is off.
 export SSA_NO_QUOTA_SNAPSHOT=1
 export SSA_JEV=0
@@ -631,8 +634,13 @@ if grep -Fq "$ops_dir" "$ledger_file"; then
 fi
 ssa_ops ledger --days 7 >"$TEST_TMP/ledger.txt" || fail "ledger runs"
 # first verify appended one row; later verifies of the same dir do not;
-# the explicit record still appends.
-grep -q 'dispatch(es)' "$TEST_TMP/ledger.txt" || fail "ledger counts the dispatch"
+grep -q '1 task(s)' "$TEST_TMP/ledger.txt" || fail "ledger counts the task once"
+rows_before="$(grep -c "\"task_id\": \"$ops_id\"" "$ledger_file")"
+ssa_ops record --dir "$ops_dir" --outcome verified-pass --retries 2 \
+  >"$TEST_TMP/record-again.txt" || fail "record runs again"
+grep -q 'unchanged since' "$TEST_TMP/record-again.txt" || fail "record names the earlier row"
+[[ "$(grep -c "\"task_id\": \"$ops_id\"" "$ledger_file")" == "$rows_before" ]] || \
+  fail "record skips an unchanged re-record"
 grep -q '^codex' "$TEST_TMP/ledger.txt" || fail "ledger groups by worker"
 pass "record and ledger keep an outcome trail"
 

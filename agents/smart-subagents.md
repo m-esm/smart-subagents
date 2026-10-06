@@ -81,13 +81,17 @@ full of `default` teaches the fit table nothing. Exit 2 is
 
 **Default worker.** `cerebras` (opencode on Cerebras, thousands of tokens per
 second, a day window in the hundreds of millions) is the registry default for
-`trivial` and `routine` work: `init`/`pick` land on it whenever its meter has
-quota. `deepseek` (DeepSeek V4 Pro through opencode, prepaid, daily spend cap)
-is the default for `hard` work the same way. Do not pass `--prefer` to steer
-around either; use `--prefer` only when the parent named a worker. `frontier`
-ranks on capability fit, where codex/grok/claude lead. A cerebras run that fails on capability
-(not quota) is a difficulty misclassification: re-run `init` one rung up
-rather than retrying the same brief on the same worker.
+`trivial` work only: `init`/`pick` land on it whenever its meter has quota.
+`routine` ranks by live headroom and `hard`/`frontier` by learned fit, with no
+registry default: the ledger through 2026-10-06 had cerebras at 31% pass
+(it declines multi-file briefs) and deepseek at 20% on hard against grok 66%
+and codex 50%, while codex sat at 8% used. Do not pass `--prefer` to steer
+around the ranking; use `--prefer` only when the parent named a worker. A
+cerebras run that fails on capability (not quota) is a difficulty
+misclassification: re-run `init` one rung up rather than retrying the same
+brief on the same worker. `init` refuses `--size large` without
+`--allow-large`: large briefs passed 33% against 77% for small, so split
+first and link the slices with `parent-task.txt` and `slice.txt`.
 
 Artifacts under `$DIR/`: `brief.md`, `usage.json`, `pick.json`, `stdout.log`
 (disk only, see Phase 4), `last-msg.txt` (the worker's final message, every

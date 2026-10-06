@@ -525,7 +525,7 @@ print(size, diff, kind)
 
 cmd_init() {
   local repo="" size="medium" preferred="" difficulty="routine" kind="default" brief=""
-  local size_set=0 difficulty_set=0 kind_set=0
+  local size_set=0 difficulty_set=0 kind_set=0 allow_large=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --repo) repo="${2:-}"; shift 2 ;;
@@ -534,6 +534,7 @@ cmd_init() {
       --kind) kind="${2:-}"; kind_set=1; shift 2 ;;
       --brief) brief="${2:-}"; shift 2 ;;
       --prefer) preferred="${2:-}"; shift 2 ;;
+      --allow-large) allow_large=1; shift ;;
       *) die "init: unknown arg $1" ;;
     esac
   done
@@ -569,6 +570,10 @@ cmd_init() {
       printf '%s\n' "$cls" >"$dir/classify.json"
       read -r size difficulty kind <<<"$(printf '%s' "$cls" | _ssa_apply_classify "$size_set" "$difficulty_set" "$kind_set" "$size" "$difficulty" "$kind")"
     fi
+  fi
+  if [[ "$size" == "large" && -z "$allow_large" ]]; then
+    rm -rf "$dir"
+    die "init: size=large refused: large briefs pass a third as often as small ones. Split the brief into medium slices (one init each; parent-task.txt and slice.txt link them) or pass --allow-large."
   fi
   echo "$size" >"$dir/size.txt"
   echo "$difficulty" >"$dir/difficulty.txt"
@@ -1245,7 +1250,7 @@ cmd_dispatch() {
   echo "  last-msg: $dir/last-msg.txt ($(wc -c 2>/dev/null <"$dir/last-msg.txt" | tr -d ' ' || echo 0) bytes)"
   _ssa_log_digest "$dir" "$worker" "$log" 3 400 | sed 's/^/  /'
   # Worker rc stays in exit-code.txt. Foreground process exit follows verify
-  # (0 pass, 1 fail, 2 inconclusive) so the parent is not the one who has to
+  # (0 pass, 1 fail or empty-diff, 2 inconclusive, 3 env-blocked) so the parent is not the one who has to
   # remember a second command.
   rc=0
   cmd_verify --dir "$dir" || rc=$?
@@ -1934,6 +1939,7 @@ PY
       fi
     ) &
     pids+=($!)
+    echo "$!" >"$dir/planner-$i.pid"
   done
 
   local pid
@@ -1977,11 +1983,14 @@ PY
   # they never meant the panel was finished.
   _utc >"$dir/panel-done.txt"
 
-  python3 - "$dir" "$SSA_CLI_PY" "$dirty" "${lenses[@]}" <<'PY'
-import json, sys
+  mkdir -p "$SSA_STATE_DIR" 2>/dev/null || true
+  chmod 700 "$SSA_STATE_DIR" 2>/dev/null || true
+  python3 - "$dir" "$SSA_CLI_PY" "$dirty" "$SSA_LEDGER" "$size" "$difficulty" "${lenses[@]}" <<'PY'
+import hashlib, json, os, sys, time
 from pathlib import Path
 d = Path(sys.argv[1])
 cli_py, dirty = sys.argv[2], sys.argv[3] == "true"
+ledger, size, difficulty = Path(sys.argv[4]), sys.argv[5], sys.argv[6]
 
 
 def event_stream_only(text):
@@ -1999,7 +2008,7 @@ for f in sorted(d.glob("plan-*-*.md")):
     index, lens, worker = parts[1], parts[2], parts[3]
     log = d / ("plan-%s.log" % index)
     entry = {"file": str(f), "lens": lens, "worker": worker, "bytes": len(text),
-             "empty": text.startswith("(planner produced no")}
+             "index": index, "empty": text.startswith("(planner produced no")}
     verdict = d / ("plan-%s.verdict.json" % index)
     if verdict.exists():
         v = json.loads(verdict.read_text())
@@ -2020,7 +2029,7 @@ for f in sorted(d.glob("plan-*-*.md")):
     plans.append(entry)
 wt = (d / "wt.txt").read_text().strip() if (d / "wt.txt").exists() else ""
 doc = {"dir": str(d), "worktree": wt,
-       "goal": str(d / "goal.md"), "planners": sys.argv[4:],
+       "goal": str(d / "goal.md"), "planners": sys.argv[7:],
        "plans": plans,
        "usable_plans": sum(1 for p in plans if not p["empty"]),
        "next": "supervisor: read every plan, reconcile disagreements, "
@@ -2028,6 +2037,49 @@ doc = {"dir": str(d), "worktree": wt,
 if dirty:
     doc["dirty"] = True
     doc["dirty_report"] = str(d / "panel-dirty.txt")
+
+repo = (d / "repo.txt").read_text().strip() if (d / "repo.txt").exists() else ""
+repo_hash = hashlib.sha256(repo.encode("utf-8")).hexdigest()[:12] if repo else ""
+ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+try:
+    wall = int(time.time() - (d / "goal.md").stat().st_mtime)
+except OSError:
+    wall = None
+
+
+def ledger_row(task_id, worker, outcome, notes, extra):
+    row = {"schema_version": 1, "ts": ts, "task_id": task_id, "repo_hash": repo_hash,
+           "worker": worker, "kind": "plan", "size": size, "difficulty": difficulty,
+           "effort": "", "model": "", "worker_args": [], "exit_code": None,
+           "wall_seconds": wall, "files_changed": None, "insertions": None,
+           "deletions": None, "verification_passed": None, "quota_before": None,
+           "quota_after": None, "outcome": outcome, "failure_class": None,
+           "retries": 0, "handoff_to": None, "notes": notes, "route": None}
+    row.update(extra)
+    return row
+
+
+rows = [ledger_row("%s-%s" % (d.name, p["index"]), p["worker"],
+                   "rejected" if p["empty"] else "verified-pass",
+                   p.get("reason"), {"panel": d.name, "lens": p["lens"]})
+        for p in plans]
+total, usable = len(plans), doc["usable_plans"]
+panel_outcome = "verified-pass" if total and usable == total else ("partial" if usable else "rejected")
+rows.append(ledger_row(d.name, "panel", panel_outcome,
+                       "%d/%d plans usable" % (usable, total),
+                       {"planners": [p["worker"] for p in plans],
+                        "plans_usable": usable, "plans_total": total}))
+ledger.parent.mkdir(parents=True, exist_ok=True)
+existed = ledger.exists()
+with open(ledger, "a") as fh:
+    for row in rows:
+        fh.write(json.dumps(row) + "\n")
+if not existed:
+    try:
+        os.chmod(ledger, 0o600)
+    except OSError:
+        pass
+doc["ledger_rows"] = len(rows)
 print(json.dumps(doc, indent=2))
 PY
   trap - EXIT
@@ -2515,6 +2567,19 @@ cmd_cleanup() {
   fi
 }
 
+_panel_alive_reason() {
+  local dir="$1" f pid
+  for f in "$dir"/planner-*.pid; do
+    [[ -f "$f" ]] || continue
+    pid="$(_read1 "$f")"
+    if [[ -n "$pid" ]] && _pid_alive "$pid"; then
+      printf 'panel still running (planner pid %s alive)' "$pid"
+      return 0
+    fi
+  done
+  printf ''
+}
+
 cmd_gc() {
   local days=7 dry=1 verbose=""
   while [[ $# -gt 0 ]]; do
@@ -2552,7 +2617,7 @@ cmd_gc() {
       if [[ -z "$reason" && "$plans" != "0" && -f "$d/panel-done.txt" ]]; then
         age="$cutoff"
       elif [[ -z "$reason" && ! -f "$d/panel-done.txt" ]]; then
-        reason="panel still running (no panel-done.txt)"
+        reason="$(_panel_alive_reason "$d")"
       fi
     fi
     if [[ -z "$reason" ]] && (( age < cutoff )); then
@@ -3355,7 +3420,25 @@ try:
     os.chmod(path.parent, 0o700)
 except OSError:
     pass
+if not repo:
+    sys.stderr.write("record: %s has no repo.txt, row carries an empty repo_hash\n"
+                     % record["task_id"])
+def without_ts(row):
+    return {k: v for k, v in row.items() if k != "ts"}
+
 existed = path.exists()
+if existed:
+    for line in path.read_text(errors="replace").splitlines():
+        try:
+            prev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(prev, dict) or prev.get("task_id") != record["task_id"]:
+            continue
+        if without_ts(prev) == without_ts(record):
+            print("record: %s unchanged since %s, row not appended (%s)"
+                  % (record["task_id"], prev.get("ts"), path))
+            raise SystemExit(0)
 with open(path, "a") as fh:
     fh.write(json.dumps(record) + "\n")
 if not existed:
@@ -3403,8 +3486,12 @@ for line in path.read_text(errors="replace").splitlines():
         ts = calendar.timegm(time.strptime(rec.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
     except Exception:
         ts = cutoff
-    if ts >= cutoff:
-        rows.append(rec)
+    rec["_ts"] = ts
+    rows.append(rec)
+latest = {}
+for index, rec in enumerate(rows):
+    latest[str(rec.get("task_id") or "") or "_row%d" % index] = rec
+rows = [rec for rec in latest.values() if rec["_ts"] >= cutoff]
 
 if not rows:
     print("ledger: nothing in the last %dd (%s)" % (days, path))
@@ -3413,22 +3500,24 @@ if not rows:
 by = {}
 for rec in rows:
     cli = rec.get("worker") or "-"
-    agg = by.setdefault(cli, {"n": 0, "pass": 0, "retries": 0, "quota": 0.0})
+    agg = by.setdefault(cli, {"n": 0, "pass": 0, "nodiff": 0, "retries": 0, "quota": 0.0})
     agg["n"] += 1
     if rec.get("outcome") == "verified-pass":
         agg["pass"] += 1
+    if rec.get("failure_class") == "empty-diff":
+        agg["nodiff"] += 1
     agg["retries"] += int(rec.get("retries") or 0)
     before, after = rec.get("quota_before") or {}, rec.get("quota_after") or {}
     if cli in before and cli in after:
         agg["quota"] += max(0.0, after[cli] - before[cli])
 
-print("ledger: last %dd, %d dispatch(es)" % (days, len(rows)))
-print("%-8s %10s %14s %12s %14s" % ("WORKER", "DISPATCH", "VERIFIED-PASS",
-                                     "MEAN RETRY", "QUOTA USED %"))
+print("ledger: last %dd, %d task(s), last row per task" % (days, len(rows)))
+print("%-8s %7s %14s %10s %11s %13s" % ("WORKER", "TASKS", "VERIFIED-PASS",
+                                       "EMPTY-DIFF", "MEAN RETRY", "QUOTA USED %"))
 for cli in sorted(by):
     agg = by[cli]
-    print("%-8s %10d %13.0f%% %12.2f %13.1f%%" % (
-        cli, agg["n"], 100.0 * agg["pass"] / agg["n"],
+    print("%-8s %7d %13.0f%% %10d %11.2f %12.1f%%" % (
+        cli, agg["n"], 100.0 * agg["pass"] / agg["n"], agg["nodiff"],
         agg["retries"] / agg["n"], agg["quota"]))
 PY
 }
@@ -3439,8 +3528,11 @@ Usage: smart-subagents.sh <command> [options]
 
   init --repo PATH [--size tiny|small|medium|large] [--kind KIND]
        [--difficulty trivial|routine|hard|frontier] [--brief FILE] [--prefer CLI]
+       [--allow-large]
       Mint a private task dir, run usage, create an isolated worktree,
       pick a worker. Prints JSON with task_id, dir, worker, reason.
+      size=large is refused unless --allow-large: split it into medium
+      slices instead (large briefs pass a third as often as small ones).
       --brief runs jev classify first; low-confidence difficulty/size are
       downshifted (hard@0.72 -> routine) unless you passed that flag.
 

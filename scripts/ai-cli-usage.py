@@ -1779,6 +1779,14 @@ def _outcome_reward(rec: dict) -> Optional[float]:
     return None
 
 
+def latest_row_per_task(rows: list) -> list:
+    latest: dict = {}
+    for index, rec in enumerate(rows):
+        key = str(rec.get("task_id") or "") or "_row%d" % index
+        latest[key] = rec
+    return list(latest.values())
+
+
 def read_ledger() -> tuple:
     """(rows, skipped). A corrupt line is skipped and counted, never fatal."""
     path = _ledger_path()
@@ -1806,7 +1814,7 @@ def read_ledger() -> tuple:
             continue
         rec["_ts"] = ts
         rows.append(rec)
-    return rows, skipped
+    return latest_row_per_task(rows), skipped
 
 
 def _decay(age_seconds: float) -> float:

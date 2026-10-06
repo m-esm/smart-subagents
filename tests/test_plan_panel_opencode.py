@@ -80,6 +80,15 @@ class OpencodePlanPanelTests(unittest.TestCase):
             self.assertEqual(rc, 0, err)
             doc = json.loads(out)
             self.assertEqual(doc["usable_plans"], 3, json.dumps(doc, indent=2))
+            self.assertEqual(doc["ledger_rows"], 4)
+            rows = [json.loads(l) for l in
+                    (te.state_dir / "outcomes.jsonl").read_text().splitlines() if l.strip()]
+            self.assertEqual([r["kind"] for r in rows], ["plan"] * 4)
+            self.assertEqual([r["worker"] for r in rows], ["deepseek"] * 3 + ["panel"])
+            self.assertEqual({r["outcome"] for r in rows}, {"verified-pass"})
+            self.assertEqual(rows[-1]["plans_usable"], 3)
+            self.assertEqual(rows[-1]["task_id"], Path(doc["dir"]).name)
+            self.assertNotIn(str(repo), (te.state_dir / "outcomes.jsonl").read_text())
             for plan in doc["plans"]:
                 self.assertFalse(plan["empty"], plan)
                 text = Path(plan["file"]).read_text()
@@ -114,6 +123,11 @@ class OpencodePlanPanelTests(unittest.TestCase):
             self.assertEqual(rc, 0, err)
             doc = json.loads(out)
             self.assertEqual(doc["usable_plans"], 0)
+            rows = [json.loads(l) for l in
+                    (te.state_dir / "outcomes.jsonl").read_text().splitlines() if l.strip()]
+            self.assertEqual([r["outcome"] for r in rows], ["rejected"] * len(rows))
+            self.assertEqual(rows[-1]["worker"], "panel")
+            self.assertEqual(rows[-1]["plans_usable"], 0)
             for plan in doc["plans"]:
                 self.assertTrue(plan["empty"], plan)
                 self.assertIn("first tool call failed (read)", plan["reason"])

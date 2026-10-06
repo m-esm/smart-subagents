@@ -264,8 +264,8 @@ it checks offline whether a dispatch could run at all here.
 | `diff --dir DIR [--path P] [--max-bytes N]` | the whole change as `--stat`, and with `--path` that path's unified diff clipped to N bytes (default 20000) |
 | `scan-secrets --dir DIR` | credential regexes plus Shannon entropy over added lines, newly added env files, and a gitleaks pass when gitleaks is installed |
 | `cooldown --cli CLI [--clear]` | bench a worker across every task, or lift the bench early |
-| `record --dir DIR --outcome ...` | append one line to the outcome ledger (see [Privacy](#privacy) for what is in it) |
-| `ledger [--days N]` | per-CLI dispatch count, verified-pass rate, mean retries, quota consumed |
+| `record --dir DIR --outcome ...` | append one line to the outcome ledger (see [Privacy](#privacy) for what is in it); a row identical to one already there for the task is skipped |
+| `ledger [--days N]` | per-CLI task count (last row per task), verified-pass rate, empty-diff count, mean retries, quota consumed |
 | `cleanup --dir DIR` | remove worktree, `ssa/<id>` branch and task dir, refusing while a worker is alive, the tree is dirty, or the branch holds commits the base does not have |
 | `gc [--older-than DAYS] [--verbose]` | classify every task dir safe or kept; kept dirs are summarized by reason unless `--verbose`; dry run until `--no-dry-run` |
 

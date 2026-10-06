@@ -26,6 +26,32 @@ The router's fit for deepseek impl/hard rose from 0.85 to 1.0 on it.
   macOS, no doubled slash from a `$TMPDIR` that ends in `/`).
 - `ssa.adapters.rejected_permissions` and `CHANGE_KINDS` hold the detection
   and the kinds that owe a diff; `tests/test_registry.py` carries the table.
+
+The same day, a read of the whole ledger (554 rows, 44 days) found more: 95 rows repeated an earlier row for the same task because
+`verify` and the supervisor's `record` both append, 50 rows were `tests/smoke.sh`
+fixtures (`dispatch-task`, `kimi-task`) written into the live file whenever the
+suite ran outside `run.sh`, and a worker that exited 0 over an untouched tree was
+counted as verified-pass (the fix above). On the deduplicated rows both registry defaults were
+the weakest workers on the board (cerebras 31% over 13 tasks, deepseek 20% on
+hard against grok 66% and codex 50%) while codex sat at 8% used, large briefs
+passed 33% against 77% for small, and planning panels had written no ledger row
+since the first day.
+
+- `record` skips a row whose outcome fields match one already in the ledger
+  for the same task, and warns when the task has no `repo.txt`.
+- `ledger` and the fit learner read the last row per task; the report counts
+  tasks, not rows, and shows an EMPTY-DIFF column (rows whose failure class is
+  `empty-diff`).
+- `workers.json`: cerebras is the default for `trivial` only; deepseek has no
+  default. `routine` ranks by headroom, `hard` by fit.
+- `init` refuses `--size large` without `--allow-large`.
+- `plan` writes planner pid files and appends one ledger row per planner
+  (`kind: plan`, `rejected` when empty) plus one `panel` summary row.
+- `gc` deletes an aborted panel (no `panel-done.txt`, no live planner pid)
+  by the normal age rule instead of keeping it forever.
+- `tests/smoke.sh` sets its own `XDG_STATE_HOME`, so a direct run never
+  touches the live ledger.
+
 ## 0.4.3
 
 Claude `--agents` JSON now carries the fields the 2026-10 docs actually

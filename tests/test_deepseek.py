@@ -93,15 +93,16 @@ class DeepseekParserTests(unittest.TestCase):
 
 
 class DeepseekRoutingTests(IsolatedStateTestCase):
-    def test_deepseek_is_primary_for_hard_when_it_has_quota(self):
+    def test_hard_ranks_by_fit_with_no_registry_default(self):
         fleet = self.fleet({"deepseek": 70.0, "cerebras": 100.0, "codex": 90.0, "grok": 85.0})
         rec = self.m.recommend(fleet, task_size="medium", task_kind="impl", difficulty="hard")
-        self.assertEqual(rec["primary_worker"], "deepseek")
-        self.assertEqual(rec["registry_default"], "deepseek")
+        self.assertEqual(rec["primary_worker"], "codex")
+        self.assertIsNone(rec["registry_default"])
+        self.assertNotEqual(rec["primary_worker"], "deepseek")
 
     def test_cheap_work_stays_on_cerebras(self):
         fleet = self.fleet({"deepseek": 100.0, "cerebras": 60.0, "codex": 90.0})
-        rec = self.m.recommend(fleet, task_size="medium", difficulty="routine")
+        rec = self.m.recommend(fleet, task_size="medium", difficulty="trivial")
         self.assertEqual(rec["primary_worker"], "cerebras")
 
     def test_spent_cap_hands_hard_work_back_to_the_ranking(self):
@@ -126,8 +127,8 @@ class DeepseekRegistryTests(unittest.TestCase):
         resolved = Path(spec.resolve_binary(env={"HOME": "/nonexistent", "PATH": ""}))
         self.assertEqual(resolved, ROOT / "scripts" / "opencode-deepseek")
         self.assertEqual(resolved.resolve(), (ROOT / "scripts" / "opencode-worker").resolve())
-        self.assertEqual(spec.default_for, {"difficulty": ["hard"]})
-        self.assertEqual(reg.default_worker("hard", "large"), "deepseek")
+        self.assertIsNone(spec.default_for)
+        self.assertEqual(reg.default_worker("hard", "large"), "")
 
     def test_flash_for_cheap_work_and_v4_pro_for_hard(self):
         m = load_usage_module()
