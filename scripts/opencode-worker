@@ -20,8 +20,13 @@
 #
 # Env: OPENCODE_BIN (override binary), OPENCODE_WORKER_NO_SANDBOX=1,
 #      OPENCODE_WORKER_IDLE_TIMEOUT, OPENCODE_WORKER_MAX_SECONDS,
-#      OPENCODE_WORKER_MAX_REQUESTS (watchdog, see below). The older
-#      OPENCODE_CEREBRAS_* names are still read as fallbacks.
+#      OPENCODE_WORKER_MAX_REQUESTS (watchdog, see below),
+#      OPENCODE_WORKER_TRACE=path (proxy writes one line per forwarded chunk
+#      there, for stall diagnosis), OPENCODE_WORKER_HEARTBEAT (seconds
+#      between proxy progress lines while a response streams, default 15),
+#      OPENCODE_WORKER_UPSTREAM (replace the provider URL; tests point it at
+#      a fake). The older OPENCODE_CEREBRAS_* names are still read as
+#      fallbacks.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,6 +62,7 @@ _env() {  # $1 = suffix, $2 = default: OPENCODE_WORKER_<suffix>, else the legacy
   local new="OPENCODE_WORKER_$1" old="OPENCODE_CEREBRAS_$1"
   echo "${!new:-${!old:-$2}}"
 }
+UPSTREAM="$(_env UPSTREAM "$UPSTREAM")"
 OPENCODE_BIN="${OPENCODE_BIN:-$(command -v opencode || true)}"
 [[ -n "$OPENCODE_BIN" ]] || { echo "$TAG: opencode not found on PATH (OPENCODE_BIN unset)" >&2; exit 127; }
 
@@ -96,6 +102,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+TRACE="$(_env TRACE "")"
+[[ -n "$TRACE" ]] && PROXY_FLAGS+=(--trace "$TRACE")
+HEARTBEAT="$(_env HEARTBEAT "")"
+[[ -n "$HEARTBEAT" ]] && PROXY_FLAGS+=(--heartbeat "$HEARTBEAT")
 python3 "$PROXY" --port-file "$tmp/port" --upstream "$UPSTREAM" --key-file "$KEY_FILE" \
   --key-name "$KEY_NAME" --label "$PROFILE-proxy" ${PROXY_FLAGS[@]+"${PROXY_FLAGS[@]}"} 2>"$tmp/proxy.log" &
 proxy_pid=$!
@@ -130,15 +140,33 @@ EOF
 
 # Watchdog: opencode has been seen to sit idle after its LLM loop without
 # exiting, and the dispatcher has no wall-time cap of its own. Every LLM call
-# passes through the proxy and lands in proxy.log, so "no request for
-# IDLE seconds" (default 300; a tool call has a 120 s cap inside opencode)
-# means a hang, not slow work. MAX_SECONDS (default 1800) bounds the run.
+# passes through the proxy, which writes a proxy.log line when a request is
+# sent, when upstream headers land, every 15 s while bytes stream, and at the
+# end. So "proxy.log untouched for IDLE seconds" (default 300; a tool call
+# has a 120 s cap inside opencode) means no byte moved in either direction:
+# a hang, not a long generation. Before 0.4.5 only the final line existed
+# and a single long response was killed as idle. MAX_SECONDS (default 1800)
+# bounds the run.
 # MAX_REQUESTS (default 120) catches the other failure: a model that keeps
 # calling tools without converging (qwen-3.8-27b was measured at 42 steps
 # and climbing on a two-file task gpt-oss-120b finishes in 5).
 IDLE="$(_env IDLE_TIMEOUT 300)"
 MAX_SECONDS="$(_env MAX_SECONDS 1800)"
 MAX_REQUESTS="$(_env MAX_REQUESTS 120)"
+_mtime() {
+  local out
+  if out="$(stat -c %Y "$1" 2>/dev/null)" && [[ "$out" =~ ^[0-9]+$ ]]; then
+    echo "$out"
+  elif out="$(stat -f %m "$1" 2>/dev/null)" && [[ "$out" =~ ^[0-9]+$ ]]; then
+    echo "$out"
+  else
+    return 1
+  fi
+}
+_proxy_tail() {
+  echo "$TAG: last proxy.log lines:" >&2
+  tail -n 6 "$tmp/proxy.log" 2>/dev/null | sed "s/^/$TAG:   /" >&2 || true
+}
 watchdog() {
   local pid="$1" started
   started="$(date +%s)"
@@ -146,14 +174,15 @@ watchdog() {
     sleep 5
     local now last
     now="$(date +%s)"
-    last="$(stat -f %m "$tmp/proxy.log" 2>/dev/null || stat -c %Y "$tmp/proxy.log" 2>/dev/null || echo "$started")"
+    last="$(_mtime "$tmp/proxy.log" || echo "$started")"
     if (( now - last > IDLE )); then
-      echo "$TAG: no LLM request for ${IDLE}s, killing idle opencode (pid $pid)" >&2
+      echo "$TAG: no LLM traffic for ${IDLE}s, killing idle opencode (pid $pid)" >&2
+      _proxy_tail
       kill "$pid" 2>/dev/null; sleep 2; kill -9 "$pid" 2>/dev/null
       return
     fi
     local n
-    n="$(grep -c "$PROFILE-proxy POST" "$tmp/proxy.log" 2>/dev/null || true)"
+    n="$(grep -c "$PROFILE-proxy POST .* -> " "$tmp/proxy.log" 2>/dev/null || true)"
     n="${n:-0}"
     if (( n > MAX_REQUESTS )); then
       echo "$TAG: ${n} LLM requests exceed the ${MAX_REQUESTS} cap (model not converging), killing opencode (pid $pid)" >&2

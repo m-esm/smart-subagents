@@ -303,8 +303,18 @@ The `deepseek` worker is the same wrapper under the name
 [`scripts/opencode-deepseek`](scripts/opencode-deepseek), with `DEEPSEEK_API_KEY=...` in
 `~/.config/deepseek/env` (mode 600). It is prepaid, so its meter is money: a daily spend cap
 (`DEEPSEEK_DAILY_USD`, default 5) computed from the balance endpoint, and a balance floor
-(`DEEPSEEK_MIN_BALANCE`, default 1). It is the default for `hard` work: V4 Pro, with V4.1
-Flash for anything cheaper when it is picked explicitly.
+(`DEEPSEEK_MIN_BALANCE`, default 1). It carries no `default_for` since 0.4.4: `hard` ranks by
+learned fit, V4 Pro when it wins, V4.1 Flash for anything cheaper.
+
+Both opencode workers run under a wrapper watchdog. Every model call goes through the local
+proxy, which logs a line when a request is sent, when upstream headers land, every 15 s while
+bytes stream, and at the end; the wrapper kills opencode when that log has not moved for
+`OPENCODE_WORKER_IDLE_TIMEOUT` seconds (default 300), after `OPENCODE_WORKER_MAX_SECONDS`
+(default 1800), or past `OPENCODE_WORKER_MAX_REQUESTS` calls (default 120), and prints the last
+proxy lines so `stdout.log` says which. A dispatched worker runs with a scrubbed environment, so
+set those through `$DIR/limits.txt` (`idle_timeout=900`, `max_seconds=3600`, `max_requests=200`)
+before `dispatch`. `OPENCODE_WORKER_TRACE=path` makes the proxy append one line per forwarded
+chunk (time and size, never content) when you run the wrapper by hand to diagnose a slow model.
 
 As a Claude Code plugin:
 

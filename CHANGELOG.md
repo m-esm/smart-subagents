@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.4.5
+
+Task 1791300011-75190 (deepseek through opencode, `hard` impl) was killed as
+idle twice at the same step, zero diff both times, and 1790430824-51540 on
+2026-09-26 died the same way. The step after the worker ran the test suite
+carried about 150k input tokens; replayed through an instrumented proxy, V4
+Pro at `--variant high` streamed reasoning for minutes at a steady 100-130
+tokens/s, never silent for more than 13 s. The wrapper watchdog keyed on the
+proxy log's mtime, and the proxy wrote its only line once a response had
+ended, so one long generation was indistinguishable from a hang. The proxy
+also read upstream with `read(4096)`, which on a chunked SSE body blocks
+until 4096 bytes or EOF, so opencode received the stream in 4 KB batches.
+
+- The proxy forwards every upstream chunk as it arrives (`read1`) and logs
+  `.. sent`, `.. headers`, `.. streaming` (every 15 s, `--heartbeat`) and the
+  final `-> status` line, so "log untouched for N s" means no byte moved.
+- The wrapper's request cap counts only completed `-> ` lines, and a watchdog
+  kill prints the last proxy lines into the worker log.
+- `OPENCODE_WORKER_TRACE=path` appends one line per forwarded chunk (time and
+  size); `OPENCODE_WORKER_HEARTBEAT` and `OPENCODE_WORKER_UPSTREAM` exist for
+  tests and diagnosis.
+- `cerebras` and `deepseek` declare `run.env_pass` for `idle_timeout`,
+  `max_seconds` and `max_requests`, so a supervisor can raise the watchdog
+  through `$DIR/limits.txt` on a scrubbed dispatch.
+- Tests: the proxy delivers a slow stream chunk by chunk and its log moves
+  while streaming; the wrapper survives a stream longer than the idle limit
+  and kills a silent upstream with the proxy tail in stderr; limits.txt
+  watchdog keys resolve for both opencode workers.
+- The wrapper watchdog had never fired on Linux: `stat -f %m` is a
+  filesystem query there, prints a mount point, and the arithmetic that
+  followed killed the watchdog subshell under `set -e`. GNU `stat -c %Y` is
+  tried first and the value is checked to be an integer.
+- The proxy binds its loopback socket without `socket.getfqdn`, the reverse
+  lookup `HTTPServer.server_bind` runs and which left the proxy without a
+  port for 20 s on the macos-latest runner (ProxyTests red on main in every
+  run since 2026-09-28). The test fakes bind the same way.
+
 ## 0.4.4
 
 Task 1791194983-39473 (deepseek through opencode) wrote two `verified-pass`
