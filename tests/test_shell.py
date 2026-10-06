@@ -552,9 +552,12 @@ class VerifyTests(unittest.TestCase):
             self.assertEqual(len(first), 1, ledger.read_text())
             rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
             self.assertEqual(rc, 0, err + out)
-            self.assertIn("ledger row already present", err)
+            self.assertIn("superseding the ledger row", err)
+            self.assertIn("unchanged since", out)
             second = [ln for ln in ledger.read_text().splitlines() if ln.strip()]
             self.assertEqual(len(second), 1, ledger.read_text())
+            self.assertFalse((task_dir / "state-desync.txt").exists())
+            self.assertEqual(json.loads((task_dir / "task.json").read_text())["state"], "reported")
             rc, out, err = run_ssa(
                 "record", "--dir", str(task_dir), "--outcome", "verified-pass",
                 "--retries", "1", env=te.env,
@@ -857,6 +860,63 @@ class VerifyTests(unittest.TestCase):
             self.assertNotEqual(rc, 0)
             self.assertIn("verdict=env-blocked", err)
 
+    def test_verify_nonzero_worker_exit_over_an_untouched_tree_is_worker_exit_not_pass(self):
+        # 1791300011-75190: deepseek exit 143 (idle watchdog), empty diff, every
+        # verify command green, recorded verified-pass twice.
+        for kind in ("impl", "review", "default"):
+            with self.subTest(kind=kind), temp_env() as te:
+                repo = make_git_repo(te.root / "repo")
+                task_dir = make_task_dir(te.work_dir, repo, kind=kind)
+                (task_dir / "worker.txt").write_text("deepseek\n")
+                (task_dir / "exit-code.txt").write_text("143\n")
+                (task_dir / "baseline.log").touch()
+                (task_dir / "verify-cmds.txt").write_text("true\n")
+                (task_dir / "baseline-results.txt").write_text("0\ttrue\n")
+                rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+                self.assertEqual(rc, 1, err + out)
+                doc = json.loads((task_dir / "outcome.json").read_text())
+                self.assertEqual(doc["verify"]["verdict"], "worker-exit")
+                self.assertEqual(doc["verify"]["worker_exit"], 143)
+                self.assertEqual(doc["verify"]["changed_files"], 0)
+                self.assertEqual(doc["failure_class"], "worker-exit")
+                self.assertEqual((task_dir / "task.json").read_text().count('"desync"'), 0)
+                self.assertIn("worker exit 143 with an empty diff", out)
+                events = [
+                    json.loads(line)
+                    for line in (task_dir / "events.jsonl").read_text().splitlines()
+                    if line.strip()
+                ]
+                failed = [e for e in events if e.get("phase") == "failed"]
+                self.assertEqual(len(failed), 1, events)
+                self.assertEqual(failed[0].get("failure_class"), "worker-exit")
+                record = json.loads(
+                    (te.state_dir / "outcomes.jsonl").read_text().strip().splitlines()[-1]
+                )
+                self.assertEqual(record["outcome"], "worker-exit")
+                self.assertEqual(record["failure_class"], "worker-exit")
+                self.assertIs(record["verification_passed"], False)
+                rc, out, err = run_ssa(
+                    "record", "--dir", str(task_dir), "--outcome", "verified-pass", env=te.env
+                )
+                self.assertNotEqual(rc, 0)
+                self.assertIn("verdict=worker-exit", err)
+                rc, out, err = run_ssa("ledger", "--days", "7", env=te.env)
+                self.assertEqual(rc, 0, err)
+                self.assertRegex(out, r"deepseek\s+1\s+0%\s+1\b")
+
+    def test_verify_nonzero_worker_exit_with_a_diff_still_scores_the_commands(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, kind="impl")
+            (task_dir / "exit-code.txt").write_text("1\n")
+            (repo / "src").mkdir()
+            (repo / "src/new.py").write_text("print('new')\n")
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            doc = json.loads((task_dir / "outcome.json").read_text())
+            self.assertEqual(doc["verify"]["verdict"], "pass")
+            self.assertEqual(doc["verify"]["changed_files"], 1)
+
     def test_verify_empty_diff_after_a_rate_limit_is_recorded_rate_limited_not_rejected(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
@@ -872,7 +932,7 @@ class VerifyTests(unittest.TestCase):
             rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
             self.assertEqual(rc, 1, err + out)
             doc = json.loads((task_dir / "outcome.json").read_text())
-            self.assertEqual(doc["verify"]["verdict"], "empty-diff")
+            self.assertEqual(doc["verify"]["verdict"], "worker-exit")
             self.assertEqual((task_dir / "verify-outcome.txt").read_text().strip(), "rate-limited")
             record = json.loads(
                 (te.state_dir / "outcomes.jsonl").read_text().strip().splitlines()[-1]
@@ -1131,6 +1191,30 @@ class RecordTests(unittest.TestCase):
             self.assertEqual(rc, 0, err)
             self.assertIn("1 task(s)", out)
             self.assertIn("EMPTY-DIFF", out)
+
+    def test_record_refuses_verified_pass_when_the_worker_died_over_an_untouched_tree(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, kind="review")
+            (task_dir / "exit-code.txt").write_text("143\n")
+            (task_dir / "outcome.json").write_text(json.dumps({
+                "schema_version": 1,
+                "verify": {"verdict": "pass", "worker_exit": 143, "changed_files": 0},
+            }) + "\n")
+            rc, out, err = run_ssa(
+                "record", "--dir", str(task_dir), "--outcome", "verified-pass", env=te.env
+            )
+            self.assertEqual(rc, 1, out)
+            self.assertIn("worker exit 143 with an empty diff", err)
+            self.assertFalse((te.state_dir / "outcomes.jsonl").exists())
+            rc, out, err = run_ssa(
+                "record", "--dir", str(task_dir), "--outcome", "worker-exit", env=te.env
+            )
+            self.assertEqual(rc, 0, err)
+            record = json.loads(
+                (te.state_dir / "outcomes.jsonl").read_text().strip().splitlines()[-1]
+            )
+            self.assertEqual(record["outcome"], "worker-exit")
 
     def test_record_warns_when_the_task_has_no_repo(self):
         with temp_env() as te:
@@ -1628,10 +1712,97 @@ cmd_bg_run --dir "$2" --worker codex
                 text=True,
                 timeout=30,
             )
-            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            self.assertEqual(proc.returncode, 1, proc.stderr + proc.stdout)
             self.assertEqual((task_dir / "exit-code.txt").read_text(), "19\n")
             doc = json.loads((task_dir / "outcome.json").read_text())
-            self.assertEqual(doc["verify"]["verdict"], "pass")
+            self.assertEqual(doc["verify"]["verdict"], "worker-exit")
+            self.assertEqual(doc["failure_class"], "worker-exit")
+            record = json.loads(
+                (te.state_dir / "outcomes.jsonl").read_text().strip().splitlines()[-1]
+            )
+            self.assertEqual(record["outcome"], "worker-exit")
+            self.assertIs(record["verification_passed"], False)
+
+    def test_bg_run_auto_verify_does_not_preempt_the_supervisors_verify(self):
+        # 1791300011-75190: the detached run verified an exit-143 worker over an
+        # untouched tree as pass and reported it; the supervisor's own verify
+        # then hit "state refused reported -> verified".
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, kind="impl")
+            (task_dir / "worker.txt").write_text("deepseek\n")
+            source = SSA_SH.read_text()
+            library = te.root / "smart-subagents-library.sh"
+            library.write_text(source.rsplit('\nmain "$@"', 1)[0] + "\n")
+            command = r'''
+source "$1"
+_watchdog() { :; }
+cmd_dispatch() {
+  local dir=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dir="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  echo 143 >"$dir/exit-code.txt"
+  return 143
+}
+cmd_bg_run --dir "$2" --worker deepseek
+'''
+            env = dict(te.env)
+            env["SSA_CLI_PY"] = str(SSA_SH.parent / "ssa" / "cli.py")
+            proc = subprocess.run(
+                ["bash", "-c", command, "test-bg-run", str(library), str(task_dir)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 1, proc.stderr + proc.stdout)
+            ledger = te.state_dir / "outcomes.jsonl"
+            rows = [json.loads(ln) for ln in ledger.read_text().splitlines() if ln.strip()]
+            self.assertEqual([r["outcome"] for r in rows], ["worker-exit"])
+            self.assertEqual(json.loads((task_dir / "task.json").read_text())["state"], "reported")
+
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 1, err + out)
+            self.assertNotIn("state refused", err)
+            self.assertFalse((task_dir / "state-desync.txt").exists(), err)
+            task = json.loads((task_dir / "task.json").read_text())
+            self.assertEqual(task["state"], "reported")
+            self.assertFalse(task.get("desync"))
+            rows = [json.loads(ln) for ln in ledger.read_text().splitlines() if ln.strip()]
+            self.assertEqual([r["outcome"] for r in rows], ["worker-exit"])
+            self.assertIs(rows[-1]["verification_passed"], False)
+            rc, out, err = run_ssa(
+                "record", "--dir", str(task_dir), "--outcome", "verified-pass", env=te.env
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn("verdict=worker-exit", err)
+
+    def test_an_explicit_verify_with_a_new_verdict_supersedes_the_earlier_row(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "worker.txt").write_text("codex\n")
+            (task_dir / "exit-code.txt").write_text("0\n")
+            (task_dir / "scope.txt").write_text("src/*\n")
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            (repo / "other").mkdir()
+            (repo / "other/new.py").write_text("print('new')\n")
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 1, err + out)
+            self.assertFalse((task_dir / "state-desync.txt").exists(), err)
+            self.assertEqual(json.loads((task_dir / "task.json").read_text())["state"], "reported")
+            ledger = te.state_dir / "outcomes.jsonl"
+            rows = [json.loads(ln) for ln in ledger.read_text().splitlines() if ln.strip()]
+            self.assertEqual([r["outcome"] for r in rows], ["verified-pass", "rejected"])
+            rc, out, err = run_ssa("ledger", "--days", "7", env=te.env)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("1 task(s)", out)
+            self.assertRegex(out, r"codex\s+1\s+0%")
 
     def test_foreground_dispatch_records_a_live_worker_pid(self):
         with temp_env() as te:
@@ -1700,8 +1871,31 @@ cmd_bg_run --dir "$2" --worker codex
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
             task_dir = make_task_dir(te.work_dir, repo)
-            # The record starts at the state the artifacts imply (preflighted:
-            # a worktree exists, no worker picked yet).
+            (task_dir / "exit-code.txt").write_text("0\n")
+            (task_dir / "task.json").write_text(json.dumps({
+                "schema_version": 1,
+                "state": "minted",
+                "attempts": [],
+            }, indent=2) + "\n")
+
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            marker = task_dir / "state-desync.txt"
+            self.assertTrue(marker.exists(), err)
+            self.assertIn("minted -> verified", marker.read_text())
+            record = json.loads((task_dir / "task.json").read_text())
+            self.assertTrue(record.get("desync"))
+            # The record follows the task instead of freezing at "minted".
+            # Verify appends the ledger row, so the run ends reported.
+            self.assertEqual(record["state"], "reported")
+            rc, out, err = run_ssa("ls", "--all", env=te.env)
+            self.assertEqual(rc, 0, err)
+            self.assertRegex(out, r"reported")
+
+    def test_a_dispatch_after_reported_re_enters_through_picked_without_a_desync(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
             for step in ("picked", "running", "exited", "reported"):
                 rc, out, err = run_ssa_cli(
                     "transition", "--dir", str(task_dir), "--to", step, env=te.env
@@ -1714,16 +1908,11 @@ cmd_bg_run --dir "$2" --worker codex
                 "dispatch", "--dir", str(task_dir), "--worker", "codex", env=env
             )
             self.assertEqual(rc, 0, err)
-            marker = task_dir / "state-desync.txt"
-            self.assertTrue(marker.exists(), err)
-            self.assertIn("reported -> running", marker.read_text())
+            self.assertFalse((task_dir / "state-desync.txt").exists(), err)
             record = json.loads((task_dir / "task.json").read_text())
-            self.assertTrue(record.get("desync"))
-            # The record follows the task instead of freezing at "reported".
-            # Verify now appends the ledger row, so the run ends reported.
-            rc, out, err = run_ssa("ls", "--all", env=te.env)
-            self.assertEqual(rc, 0, err)
-            self.assertRegex(out, r"reported")
+            self.assertFalse(record.get("desync"))
+            self.assertEqual(record["state"], "reported")
+            self.assertEqual(len(record["attempts"]), 2)
 
     def test_gc_keeps_a_planning_panel_while_a_planner_is_alive(self):
         with temp_env() as te:
@@ -2086,6 +2275,20 @@ class SecretScanTests(unittest.TestCase):
             repo = make_git_repo(te.root / "repo")
             task_dir = make_task_dir(te.work_dir, repo)
             (repo / "audit.txt").write_text(line)
+
+            rc, out, err = run_ssa("scan-secrets", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertFalse((task_dir / "verify-secrets.txt").read_text().strip())
+
+    def test_template_relative_url_paths_are_not_high_entropy_secrets(self):
+        lines = (
+            "  const missing = await fetch(`${url}/rooms/default/agents/missing-agent`, {\n"
+            "    const missing = await request.patch(`${apiUrl}/rooms/default/agents/missing-agent`, {\n"
+        )
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (repo / "agents.test.ts").write_text(lines)
 
             rc, out, err = run_ssa("scan-secrets", "--dir", str(task_dir), env=te.env)
             self.assertEqual(rc, 0, err + out)

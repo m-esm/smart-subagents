@@ -119,8 +119,8 @@ flowchart TB
     --> picked["picked<br/>primary named, baseline verify can run now"]
     --> running["running<br/>CLI process group in the worktree"]
     --> exited["exited<br/>worker finished, exit code captured"]
-    --> verdict["verdict<br/>verify: pass, fail, empty-diff, env-blocked, or inconclusive"]
-    --> reported["reported<br/>ledger line written, only terminal state"]
+    --> verdict["verdict<br/>verify: pass, fail, empty-diff, worker-exit, env-blocked, or inconclusive"]
+    --> reported["reported<br/>ledger line written; a later verify or re-dispatch reopens it"]
     picked -->|"no worker yet:<br/>baseline so old failures are not charged to it"| verdict
     running --> stalled["stalled<br/>watchdog: log and tree went quiet"]
     stalled --> reported
@@ -128,6 +128,7 @@ flowchart TB
     picked --> aborted
     aborted --> reported
     verdict -->|"retry still in budget"| picked
+    reported -->|"supervisor verifies again"| verdict
 ```
 
 The chart is the happy path plus the three exits you will actually hit.
@@ -141,12 +142,17 @@ omitted so the line stays readable. The rest that the picture compresses:
 - `verdict` is three states (`verified`, `failed`, `inconclusive`). They can
   revisit each other and can go back to `picked`. Verify runs again after a
   retry, and the second answer is allowed to differ from the first. The
-  `empty-diff` and `env-blocked` verdicts land in `failed` with that string as
-  the failure class: an `impl` or `debug` worker that changed nothing, or an
+  `empty-diff`, `worker-exit` and `env-blocked` verdicts land in `failed` with
+  that string as the failure class: an `impl` or `debug` worker that changed
+  nothing, a worker that exited non-zero over an untouched tree, or an
   opencode run that exit 0 after a permission auto-reject, is never `verified`.
 - `reported` is reachable from `exited`, `aborted` and `stalled`. Bookkeeping is
   not work: an env-blocked or stalled dispatch still owes the ledger a line, and
-  losing those lines would quietly bias the learned fit.
+  losing those lines would quietly bias the learned fit. It is not terminal:
+  the detached run's own verify reports first, and the supervisor's later
+  `verify` moves the task back through a verdict to a superseding row
+  (task 1791300011-75190 logged `reported -> verified` as a desync before
+  that edge existed). `reported -> picked` is the re-dispatch.
 
 - A run that ends can be run again: `exited -> running` is the re-dispatch edge,
   and `stalled` and `aborted` reach `picked` (and `exited`, because a killed

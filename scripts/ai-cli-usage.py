@@ -1774,7 +1774,7 @@ def _outcome_reward(rec: dict) -> Optional[float]:
         return 1.0 if retries <= 1 else 0.5
     if outcome == "partial":
         return 0.5
-    if outcome == "rejected":
+    if outcome in ("rejected", "worker-exit"):
         return 0.0
     return None
 
