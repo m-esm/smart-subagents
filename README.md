@@ -374,6 +374,7 @@ agent runs this loop for you.
 | `SSA_ALLOW_KIMI_WRITE` | unset | Legacy alias for `SSA_ALLOW_UNSANDBOXED_WRITE` |
 | `SSA_PREMIUM_MODELS` | `Fable,Opus` | Claude's usage API reports weekly caps scoped to individual models by display name. These are the ones that flip `local_labor_ok` false near their cap, so the supervisor stops doing labor in-session while cheaper models are still fine. Set it to whatever your plan's premium tier is actually called |
 | `SSA_SHORT_HORIZON_HOURS` | `4` | Reset horizon over which a short window's spent quota stops counting against it |
+| `SSA_SHARED_RESERVE_PCT` | `40` | Remaining-percent floor for a worker whose registry entry sets `shared_account`. A lower value is raised to 40. Personal accounts ignore it |
 | `SSA_FIT_HALFLIFE_DAYS` | `30` | Half-life on ledger evidence feeding the learned fit posterior |
 | `SSA_FIT_MIN_SAMPLES` | `10` | Effective observations before a posterior ranks instead of the prior |
 | `SSA_STALL_SECS` | `600` | Watchdog patience before it kills a silent background worker |

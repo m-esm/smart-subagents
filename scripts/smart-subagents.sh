@@ -3700,6 +3700,7 @@ Env:
   SSA_LEDGER                      outcome ledger path
                                   (default: $XDG_STATE_HOME/smart-subagents/outcomes.jsonl)
   SSA_SHORT_HORIZON_HOURS         reset horizon that makes short-window quota free (default 4)
+  SSA_SHARED_RESERVE_PCT          shared-account remaining floor, never below 40 (default 40)
   SSA_FIT_HALFLIFE_DAYS           decay half-life for learned fit (default 30)
   SSA_FIT_MIN_SAMPLES             effective samples before a posterior is used (default 10)
 EOF

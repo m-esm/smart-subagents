@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.6
+
+- A worker with `shared_account: true` is ineligible for every size and
+  difficulty once remaining on a binding window is under 40%.
+  `SSA_SHARED_RESERVE_PCT` can raise that floor and cannot lower it. The flag
+  defaults off, so a personal account is unchanged, including one at 0%
+  remaining. A worker that stays eligible keeps its `effective_score`,
+  including the short-window discount.
+
 ## 0.4.5
 
 Task 1791300011-75190 (deepseek through opencode, `hard` impl) was killed as
