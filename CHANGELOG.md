@@ -28,6 +28,14 @@ until 4096 bytes or EOF, so opencode received the stream in 4 KB batches.
   while streaming; the wrapper survives a stream longer than the idle limit
   and kills a silent upstream with the proxy tail in stderr; limits.txt
   watchdog keys resolve for both opencode workers.
+- The wrapper watchdog had never fired on Linux: `stat -f %m` is a
+  filesystem query there, prints a mount point, and the arithmetic that
+  followed killed the watchdog subshell under `set -e`. GNU `stat -c %Y` is
+  tried first and the value is checked to be an integer.
+- The proxy binds its loopback socket without `socket.getfqdn`, the reverse
+  lookup `HTTPServer.server_bind` runs and which left the proxy without a
+  port for 20 s on the macos-latest runner (ProxyTests red on main since
+  0.4.2). The test fakes bind the same way.
 
 ## 0.4.4
 
