@@ -112,7 +112,7 @@ class InitBrief(unittest.TestCase):
         for flags, mode, expected, action in (
             ([], "on", ["small", "routine", "debug"], "applied"),
             (["--difficulty", "frontier"], "on", ["small", "frontier", "debug"], "partial-explicit-flags"),
-            (["--difficulty", "hard", "--size", "large", "--kind", "review"], "on",
+            (["--difficulty", "hard", "--size", "large", "--kind", "review", "--allow-large"], "on",
              ["large", "hard", "review"], "skipped-explicit-flags"),
             ([], "off", ["medium", "routine", "default"], None),
             ([], "dead", ["medium", "routine", "default"], None),

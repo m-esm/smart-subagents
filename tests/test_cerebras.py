@@ -114,11 +114,19 @@ class CerebrasParserTests(unittest.TestCase):
 
 
 class RegistryDefaultTests(IsolatedStateTestCase):
-    """workers.json `default_for` makes cerebras primary for cheap work."""
+    """workers.json `default_for` makes cerebras primary for trivial work only."""
 
-    def test_cerebras_is_primary_for_routine_when_it_has_quota(self):
+    def test_routine_ranks_by_headroom_with_no_registry_default(self):
         fleet = self.fleet({"cerebras": 60.0, "codex": 90.0, "grok": 85.0, "kimi": 80.0})
         rec = self.m.recommend(fleet, task_size="medium", difficulty="routine")
+        self.assertEqual(rec["primary_worker"], "codex")
+        self.assertIsNone(rec["registry_default"])
+        self.assertNotIn("registry default", " ".join(rec["reasons"]))
+        self.assertEqual(rec["fallback_workers"][0], "grok")
+
+    def test_cerebras_is_primary_for_trivial_when_it_has_quota(self):
+        fleet = self.fleet({"cerebras": 60.0, "codex": 90.0, "grok": 85.0, "kimi": 80.0})
+        rec = self.m.recommend(fleet, task_size="medium", difficulty="trivial")
         self.assertEqual(rec["primary_worker"], "cerebras")
         self.assertEqual(rec["registry_default"], "cerebras")
         self.assertIn("registry default", " ".join(rec["reasons"]))
@@ -130,8 +138,7 @@ class RegistryDefaultTests(IsolatedStateTestCase):
         self.assertEqual(rec["primary_worker"], "cerebras")
 
     def test_hard_and_frontier_never_land_on_cerebras(self):
-        # hard has its own registry default (deepseek, tests/test_deepseek.py);
-        # frontier has none and ranks normally.
+        # neither hard nor frontier has a registry default; both rank by fit.
         fleet = self.fleet({"cerebras": 100.0, "codex": 90.0, "grok": 85.0, "kimi": 80.0})
         for difficulty in ("hard", "frontier"):
             with self.subTest(difficulty=difficulty):
@@ -145,7 +152,7 @@ class RegistryDefaultTests(IsolatedStateTestCase):
 
     def test_default_yields_when_below_the_floor(self):
         fleet = self.fleet({"cerebras": 5.0, "codex": 90.0, "grok": 85.0})
-        rec = self.m.recommend(fleet, task_size="medium", difficulty="routine")
+        rec = self.m.recommend(fleet, task_size="medium", difficulty="trivial")
         self.assertEqual(rec["primary_worker"], "codex")
         self.assertNotIn("registry default", " ".join(rec["reasons"]))
 
@@ -155,18 +162,18 @@ class RegistryDefaultTests(IsolatedStateTestCase):
             if st.cli == "cerebras":
                 st.eligible = False
                 st.skip_reason = "Cerebras window exhausted: tokens_day"
-        rec = self.m.recommend(fleet, task_size="medium", difficulty="routine")
+        rec = self.m.recommend(fleet, task_size="medium", difficulty="trivial")
         self.assertEqual(rec["primary_worker"], "codex")
 
     def test_default_never_wins_a_relaxed_floor(self):
         thin = self.fleet({"cerebras": 8.0, "codex": 10.0, "grok": 8.0, "kimi": 12.0})
-        rec = self.m.recommend(thin, task_size="medium", difficulty="routine")
+        rec = self.m.recommend(thin, task_size="medium", difficulty="trivial")
         self.assertTrue(rec["floor_relaxed"])
         self.assertEqual(rec["primary_worker"], "kimi")
 
     def test_explicit_prefer_beats_the_registry_default(self):
         fleet = self.fleet({"cerebras": 100.0, "codex": 90.0, "grok": 85.0})
-        rec = self.m.recommend(fleet, task_size="medium", difficulty="routine", prefer="grok")
+        rec = self.m.recommend(fleet, task_size="medium", difficulty="trivial", prefer="grok")
         self.assertEqual(rec["primary_worker"], "grok")
 
 
@@ -185,13 +192,14 @@ class RegistryEntryTests(unittest.TestCase):
     def test_default_for_is_parsed_and_matched(self):
         reg = self.registry.load(cache=False)
         spec = reg.get("cerebras")
-        self.assertEqual(spec.default_for, {"difficulty": ["trivial", "routine"]})
-        self.assertTrue(spec.is_default_for("routine", "large"))
+        self.assertEqual(spec.default_for, {"difficulty": ["trivial"]})
+        self.assertTrue(spec.is_default_for("trivial", "large"))
+        self.assertFalse(spec.is_default_for("routine", "large"))
         self.assertFalse(spec.is_default_for("hard", "tiny"))
         self.assertEqual(reg.default_worker("trivial", "small"), "cerebras")
         self.assertEqual(reg.default_worker("frontier", "small"), "")
         self.assertIsNone(reg.get("codex").default_for)
-        self.assertEqual(spec.to_dict()["default_for"], {"difficulty": ["trivial", "routine"]})
+        self.assertEqual(spec.to_dict()["default_for"], {"difficulty": ["trivial"]})
 
     def test_default_for_rejects_unknown_axis_and_bad_lists(self):
         base = json.loads((ROOT / "scripts" / "workers.json").read_text())["workers"]["cerebras"]
