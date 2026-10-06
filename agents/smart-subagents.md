@@ -409,7 +409,7 @@ in the report.
 Run the gate, then read its verdict. Do not hand-roll this in shell:
 
 ```bash
-bash "$SSA" verify --dir "$DIR"   # exit 0 pass, 1 fail or empty-diff, 2 inconclusive, 3 env-blocked
+bash "$SSA" verify --dir "$DIR"   # exit 0 pass, 1 fail, empty-diff or worker-exit, 2 inconclusive, 3 env-blocked
 bash "$SSA" status --dir "$DIR"   # verdict line, bounded; never cat outcome.json
 ```
 
@@ -431,12 +431,16 @@ exit code against `$DIR/baseline-results.txt`, checks the changed paths against
 | `inconclusive` | a command failed and there is no baseline, or `verify-cmds.txt` is missing | 2 |
 | `empty-diff` | an `impl` or `debug` task changed no file, whatever the commands scored; the ledger row is `rejected` (`rate-limited` when the run was benched by a 429 or an auth failure first) | 1 |
 | `env-blocked` | empty diff after opencode auto-rejected a permission (`external_directory`): the worker used a file tool outside its worktree, or the brief quoted the unresolved `/var/folders` form of the worktree path; the ledger row is `env-blocked` | 3 |
+| `worker-exit` | the worker exited non-zero (idle watchdog 143, crash, budget) and changed no file, whatever the kind and however the commands scored; the ledger row is `worker-exit` (`rate-limited` after a 429 or an auth failure) and it trains fit like `rejected` | 1 |
 
 `inconclusive` is never reportable as success. Either record the baseline and
 re-run, or report `partial` with the reason. `verify` writes the ledger row
 itself from the verdict (`$DIR/verify-outcome.txt` names it), and `record`
-refuses `verified-pass` for any verdict but `pass` and for an `impl` or `debug`
-task whose verify saw no changed file. On `env-blocked`, quote `$DIR/wt.txt`
+refuses `verified-pass` for any verdict but `pass`, for an `impl` or `debug`
+task whose verify saw no changed file, and for a non-zero worker exit over
+zero changed files. Running `verify` again after the detached run's own
+verify is legal: an identical verdict appends nothing, a changed one
+supersedes the earlier row. On `env-blocked`, quote `$DIR/wt.txt`
 verbatim in the brief (it is already the resolved path) and re-dispatch; do not
 count it against the worker.
 
@@ -548,7 +552,7 @@ that failed:**
 
 ```bash
 bash "$SSA" record --dir "$DIR" \
-  --outcome verified-pass|partial|rejected|blocked|env-blocked|rate-limited \
+  --outcome verified-pass|partial|rejected|blocked|env-blocked|rate-limited|worker-exit \
   [--retries N] [--handoff-to CLI] [--notes "one line"]
 ```
 
@@ -562,7 +566,8 @@ it back. A report without a record is an unfinished run.
 The ledger is also the evidence behind `recommendation.fit`, so the outcome you
 write is the one that trains the next pick. Record what happened, not what you
 wish had: `verified-pass` with the honest retry count, `partial` when the diff
-landed short, `rejected` when you threw it away. `blocked`, `env-blocked` and
+landed short, `rejected` when you threw it away, `worker-exit` when the worker
+died over an untouched tree (it counts like `rejected`). `blocked`, `env-blocked` and
 `rate-limited` are excluded from the posterior on purpose, so mislabeling a
 capability failure as `rate-limited` quietly protects a worker that earned a
 lower fit.

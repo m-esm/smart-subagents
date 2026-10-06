@@ -276,6 +276,18 @@ class FitPosteriorTests(IsolatedStateTestCase):
         self.assertGreaterEqual(value, 0.85)
         self.assertLessEqual(value, 1.15)
 
+    def test_worker_exit_rows_count_against_fit_like_rejected(self):
+        self._write_ledger(12, outcome="worker-exit")
+        value, n_eff, used = self.m.fit_posterior("codex", "impl")
+        self.assertTrue(used)
+        self.assertEqual(
+            self.m._outcome_reward({"outcome": "worker-exit"}),
+            self.m._outcome_reward({"outcome": "rejected"}),
+        )
+        self.assertLess(value, self.m.fit_posterior("grok", "impl")[0])
+        for excluded in ("blocked", "env-blocked", "rate-limited"):
+            self.assertIsNone(self.m._outcome_reward({"outcome": excluded}))
+
     def test_corrupt_ledger_line_is_skipped_not_fatal(self):
         ledger = self.m._ledger_path()
         ledger.parent.mkdir(parents=True, exist_ok=True)

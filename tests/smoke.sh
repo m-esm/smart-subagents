@@ -161,10 +161,12 @@ chmod +x "$codex_fail"
 dispatch_rc=0
 CODEX_BIN="$codex_fail" "$SSA" dispatch --dir "$dispatch_task" \
     --worker codex >/dev/null 2>&1 || dispatch_rc=$?
-[[ "$dispatch_rc" == "0" ]] || fail "dispatch exit follows verify"
+[[ "$dispatch_rc" == "1" ]] || fail "dispatch exit follows verify (worker-exit)"
 [[ "$(cat "$dispatch_task/exit-code.txt")" == "7" ]] || \
   fail "dispatch exit-code file"
 [[ -f "$dispatch_task/outcome.json" ]] || fail "dispatch wrote outcome.json"
+grep -q '"verdict": "worker-exit"' "$dispatch_task/outcome.json" || \
+  fail "dispatch over an untouched tree with exit 7 is worker-exit"
 [[ -f "$dispatch_task/resume-unavailable.txt" ]] || \
   fail "dispatch resume marker"
 pass "dispatch captures exit code and unavailable resume"
@@ -498,7 +500,9 @@ chmod +x "$codex_429"
 cool_rc=0
 XDG_STATE_HOME="$cool_dispatch_state" CODEX_BIN="$codex_429" "$SSA" dispatch \
   --dir "$cool_task" --worker codex >"$TEST_TMP/cooldown-dispatch.txt" 2>&1 || cool_rc=$?
-[[ "$cool_rc" == "0" ]] || fail "cooldown dispatch exit status"
+[[ "$cool_rc" == "1" ]] || fail "cooldown dispatch exit status (worker-exit)"
+[[ "$(cat "$cool_task/verify-outcome.txt")" == "rate-limited" ]] || \
+  fail "a 429 exit over an untouched tree is recorded rate-limited"
 grep -q 'cooldown=codex:rate-limit' "$TEST_TMP/cooldown-dispatch.txt" || \
   fail "dispatch reports the cooldown"
 grep -q 'rate-limit' "$cool_dispatch_state/smart-subagents/cooldowns.json" || \

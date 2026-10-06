@@ -2316,6 +2316,8 @@ with open(added_path, "w") as added:
                 or re.search(r"https?://\S*$", lead)
             ):
                 continue
+            if re.fullmatch(r"(/[a-z][a-z-]*)+/?", tok):
+                continue
             # 1789028987-49325: Parent commit: <sha> when sha is in this wt.
             # A random hex40 API token is not an object, so it still trips.
             if git_object(tok):
@@ -2871,6 +2873,9 @@ _doc_auth() {
 }
 
 # --- verify: machine-readable, baseline-aware ---------------------------------
+_outcome_field() {
+  sed -n 's/^ *"'"$2"'": "\([a-z-]*\)".*/\1/p' "$1/outcome.json" 2>/dev/null | head -n1
+}
 
 cmd_verify() {
   local dir=""
@@ -3034,6 +3039,8 @@ if not changed and rejected:
     verdict = "env-blocked"
 elif not changed and brief_denied:
     verdict = "fail"
+elif not changed and exit_code not in (None, 0):
+    verdict = "worker-exit"
 elif not changed and kind in change_kinds:
     verdict = "empty-diff"
 elif new_failures or scope_ok is False or not secrets_ok:
@@ -3066,13 +3073,17 @@ if task_file.exists():
 run_failure_class = failure_class
 if verdict in ("env-blocked", "empty-diff"):
     failure_class = verdict
+elif verdict == "worker-exit" and run_failure_class in (None, "", "unknown"):
+    failure_class = verdict
 
 if verdict == "pass":
     ledger_outcome = "verified-pass"
 elif verdict == "env-blocked":
     ledger_outcome = "env-blocked"
-elif verdict == "empty-diff" and run_failure_class in ("rate-limit", "auth"):
+elif verdict in ("empty-diff", "worker-exit") and run_failure_class in ("rate-limit", "auth"):
     ledger_outcome = "rate-limited"
+elif verdict == "worker-exit":
+    ledger_outcome = "worker-exit"
 elif verdict in ("fail", "empty-diff"):
     ledger_outcome = "rejected"
 else:
@@ -3134,7 +3145,9 @@ if verdict == "env-blocked":
           % (exit_code, ", ".join(rejected[:5])))
 elif verdict == "empty-diff":
     print("verify: %s task changed 0 files; a no-op is not a pass" % kind)
-sys.exit({"pass": 0, "fail": 1, "inconclusive": 2, "env-blocked": 3, "empty-diff": 1}[verdict])
+elif verdict == "worker-exit":
+    print("verify: worker exit %s with an empty diff; nothing was delivered" % exit_code)
+sys.exit({"pass": 0, "fail": 1, "inconclusive": 2, "env-blocked": 3, "empty-diff": 1, "worker-exit": 1}[verdict])
 PY
   rm -f "$dir/verify-changed.z"
   _ssa_jev_review "$dir"
@@ -3145,8 +3158,14 @@ PY
     3) verdict_state="failed"; failure_class="env-blocked" ;;
     *) verdict_state="inconclusive"; failure_class="inconclusive" ;;
   esac
-  if [[ "$rc" == 1 ]] && grep -q '"verdict": "empty-diff"' "$dir/outcome.json" 2>/dev/null; then
-    failure_class="empty-diff"
+  if [[ "$rc" == 1 ]]; then
+    local klass
+    case "$(_outcome_field "$dir" verdict)" in
+      empty-diff|worker-exit)
+        klass="$(_outcome_field "$dir" failure_class)"
+        [[ -z "$klass" ]] || failure_class="$klass"
+        ;;
+    esac
   fi
   _ssa_event "$dir" --phase "$verdict_state" --exit "$rc" \
     ${failure_class:+--failure-class "$failure_class"} \
@@ -3155,11 +3174,12 @@ PY
   # Ledger row is part of verify, not a second supervisor verb. Mapping is
   # pass→verified-pass, fail→rejected, else partial. Verify's own rc is kept
   # even if record fails; worker rc stays in exit-code.txt. A second verify
-  # of the same dir must not double-append; manual `record --dir` still can.
+  # re-records: record skips a row identical to the last one for this task,
+  # and a changed verdict supersedes the row the detached run wrote.
   local rec_outcome
   rec_outcome="$(_read1 "$dir/verify-outcome.txt")"
   case "$rec_outcome" in
-    verified-pass|partial|rejected|blocked|env-blocked|rate-limited) ;;
+    verified-pass|partial|rejected|blocked|env-blocked|rate-limited|worker-exit) ;;
     *)
       rec_outcome=partial
       case "$rc" in
@@ -3170,10 +3190,9 @@ PY
       ;;
   esac
   if [[ -f "$dir/outcome-record.json" ]]; then
-    echo "verify: ledger row already present; not appending" >&2
-  else
-    cmd_record --dir "$dir" --outcome "$rec_outcome" || true
+    echo "verify: superseding the ledger row from the earlier verify" >&2
   fi
+  cmd_record --dir "$dir" --outcome "$rec_outcome" || true
   return "$rc"
 }
 
@@ -3195,8 +3214,8 @@ cmd_record() {
   done
   [[ -n "$dir" && -d "$dir" ]] || die "record: --dir required"
   case "$outcome" in
-    verified-pass|partial|rejected|blocked|env-blocked|rate-limited) ;;
-    *) die "record: --outcome must be one of verified-pass partial rejected blocked env-blocked rate-limited" ;;
+    verified-pass|partial|rejected|blocked|env-blocked|rate-limited|worker-exit) ;;
+    *) die "record: --outcome must be one of verified-pass partial rejected blocked env-blocked rate-limited worker-exit" ;;
   esac
   [[ "$retries" =~ ^[0-9]+$ ]] || die "record: --retries takes a whole number"
   # A mid-run steer is the same dispatch. Counting it as --retries would
@@ -3306,11 +3325,20 @@ except Exception:
     change_kinds = ("impl", "debug")
 kind = read1("kind.txt")
 verify_changed = None
+verify_exit = None
 if oc.exists():
     try:
         verify_changed = (ocdoc.get("verify") or {}).get("changed_files")
+        verify_exit = (ocdoc.get("verify") or {}).get("worker_exit")
     except Exception:
         verify_changed = None
+        verify_exit = None
+if outcome == "verified-pass" and verify_exit not in (None, 0) and verify_changed == 0:
+    sys.stderr.write(
+        "record: --outcome verified-pass refused: worker exit %s with an empty diff "
+        "(verify.changed_files=0)\n" % verify_exit
+    )
+    raise SystemExit(1)
 if outcome == "verified-pass" and kind in change_kinds and (
     verify_changed == 0 or (verify_changed is None and files in (0, None) and stat.exists())
 ):
@@ -3504,7 +3532,7 @@ for rec in rows:
     agg["n"] += 1
     if rec.get("outcome") == "verified-pass":
         agg["pass"] += 1
-    if rec.get("failure_class") == "empty-diff":
+    if rec.get("failure_class") in ("empty-diff", "worker-exit"):
         agg["nodiff"] += 1
     agg["retries"] += int(rec.get("retries") or 0)
     before, after = rec.get("quota_before") or {}, rec.get("quota_after") or {}
@@ -3583,18 +3611,22 @@ Usage: smart-subagents.sh <command> [options]
   verify --dir DIR
       Run DIR/verify-cmds.txt in the worktree, compare against
       DIR/baseline-results.txt, check changed paths against DIR/scope.txt, run
-      the secret scan, and write DIR/outcome.json. Exit 0 pass, 1 fail or
-      empty-diff (an impl or debug task that changed no file), 2 inconclusive,
+      the secret scan, and write DIR/outcome.json. Exit 0 pass, 1 fail,
+      empty-diff (an impl or debug task that changed no file) or worker-exit
+      (a non-zero worker exit over an untouched tree), 2 inconclusive,
       3 env-blocked (empty diff after opencode auto-rejected a permission).
       Baseline results without DIR/baseline.log are treated as an unrun baseline.
       Writes the ledger row itself (DIR/verify-outcome.txt names the outcome).
+      Running it again after the detached run's own verify is legal: a
+      changed verdict appends a superseding row, an identical one appends
+      nothing.
 
   cooldown --cli CLI [--clear] [--reason rate-limit|auth] [--minutes N]
       Bench a worker for every task until the cooldown expires. dispatch sets
       one by itself when a failed run's log shows a rate limit or an auth
       failure (defaults: 15 min rate-limit, 24h auth, never open-ended).
 
-  record --dir DIR --outcome verified-pass|partial|rejected|blocked|env-blocked|rate-limited
+  record --dir DIR --outcome verified-pass|partial|rejected|blocked|env-blocked|rate-limited|worker-exit
          [--retries N] [--handoff-to CLI] [--notes STR]
       Append one outcome line to the ledger and write DIR/outcome-record.json.
       Carries no prompts, diffs, paths, session ids or account identifiers.
@@ -3674,7 +3706,8 @@ Task record:
   Each task dir carries task.json (authoritative: state, class, attempts) and
   events.jsonl (append-only, one line per lifecycle point). The lifecycle is
   minted -> preflighted -> picked -> running -> exited -> verified|failed|
-  inconclusive -> reported, with aborted and stalled terminal from running.
+  inconclusive -> reported, with aborted and stalled from running. reported
+  can be re-verified or re-picked, so a later verify never desyncs.
 
 Env:
   CODEX_BIN, GROK_BIN, KIMI_BIN   override worker binary paths (the variable

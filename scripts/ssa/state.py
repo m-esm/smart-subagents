@@ -51,7 +51,7 @@ TRANSITIONS: Dict[str, List[str]] = {
     "verified": ["reported", "picked", "failed", "inconclusive"],
     "failed": ["reported", "picked", "verified", "inconclusive"],
     "inconclusive": ["reported", "picked", "verified", "failed"],
-    "reported": [],
+    "reported": ["verified", "failed", "inconclusive", "picked"],
     # A killed or stalled run still exits: the watchdog stamps the state, then
     # dispatch writes the exit code and the diff for the same attempt. Both can
     # also be retried, which goes back through "picked" (task 1788291814-77216
@@ -60,7 +60,6 @@ TRANSITIONS: Dict[str, List[str]] = {
     "stalled": ["reported", "picked", "running", "exited"],
 }
 STATES = tuple(TRANSITIONS)
-TERMINAL = tuple(s for s, nxt in TRANSITIONS.items() if not nxt)
 INITIAL = "minted"
 # Failed/aborted/stalled events are how pick() and the ledger tell a 429
 # from a verify fail from a supervisor stop. A null class is a bug in the

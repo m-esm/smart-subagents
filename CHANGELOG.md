@@ -37,6 +37,36 @@ until 4096 bytes or EOF, so opencode received the stream in 4 KB batches.
   port for 20 s on the macos-latest runner (ProxyTests red on main in every
   run since 2026-09-28). The test fakes bind the same way.
 
+The same task also showed what `verify` and the ledger said about those two
+kills, each exit 143 over an untouched worktree. The detached
+run's own verify scored the empty tree against green verify commands as
+`pass`, wrote `verified-pass` to the ledger both times and moved the task to
+`reported`. The supervisor's explicit `verify` then hit `state refused
+reported -> verified`, and the honest `env-blocked` row it recorded by hand
+sat behind two rows that said the opposite. The 0.4.4 `empty-diff` verdict was
+not installed when the task ran; this release closes the rest.
+
+- `verify` returns `worker-exit` (exit 1, ledger row `worker-exit`) when the
+  worker exited non-zero and changed no file, whatever the kind and however
+  the commands scored. A run benched by a rate limit or an auth failure is
+  still recorded `rate-limited`, and `outcome.json` keeps the more specific
+  run class dispatch named (`budget-exhausted`, `rate-limit`, `auth`) over
+  the generic `worker-exit`. `worker-exit` trains the fit posterior like
+  `rejected`, and the `ledger` EMPTY-DIFF column counts it.
+- `record` accepts `worker-exit` and refuses `verified-pass` whenever
+  `outcome.json` shows a non-zero worker exit over zero changed files, even
+  under a stale `pass` verdict.
+- `reported` is no longer terminal: it moves to `verified`, `failed` or
+  `inconclusive` when a later explicit `verify` runs, and to `picked` on a
+  re-dispatch. A second `verify` re-records instead of refusing; `record`
+  skips an identical row, so the ledger stays at one row when nothing
+  changed, and a changed verdict appends a superseding row (`ledger` and the
+  fit learner already read the last row per task).
+- `scan-secrets` no longer flags a relative route path after a template
+  variable (`${url}/rooms/default/agents/missing-agent`, lowercase kebab
+  segments split by `/`) as a high-entropy token; the test for it landed
+  with the proxy change ahead of this fix.
+
 ## 0.4.4
 
 Task 1791194983-39473 (deepseek through opencode) wrote two `verified-pass`
