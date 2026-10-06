@@ -8,6 +8,12 @@
   defaults off, so a personal account is unchanged, including one at 0%
   remaining. A worker that stays eligible keeps its `effective_score`,
   including the short-window discount.
+- `follow-up --dir DIR --brief FILE` attaches a fresh brief, including the
+  current diff, to that task's worktree instead of minting another `ssa/<id>`
+  tree. It re-reads HEAD after the pick and aborts if the checkout moved
+  since mint, and it refuses a missing worktree or a live worker pid. It does
+  not merge, push, or delete the worktree. A normal init still isolates a
+  dirty user checkout. The other CLI's conversation still does not carry over.
 
 ## 0.4.5
 

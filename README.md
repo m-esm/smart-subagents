@@ -257,6 +257,7 @@ it checks offline whether a dispatch could run at all here.
 | `pick --size SIZE [--difficulty L] [--kind K]` | print the primary worker name on stdout, the full recommendation JSON on stderr |
 | `ls [--all] [--state S]` (alias `list`) | one line per task and planning panel: age, repo, worker, size/difficulty/kind, inferred phase, recorded state, diff size. The 20 most recent plus everything still in flight; `--all` prints the rest |
 | `status --dir DIR` | one task in full: base sha, branch, exit code, session or `resume=unavailable`, worker pid state, recorded state and event count, verify verdict, and a bounded log digest (counts, last few events clipped, final message clipped). Never raw log lines |
+| `follow-up --dir DIR --brief FILE [--prefer CLI]` | attach a fresh brief, including the current diff, to that task's worktree. Refuses a missing worktree, a live worker pid, or a HEAD that moved since the task was minted. Does not merge, push, or delete the worktree |
 | `tail --dir DIR [--raw]` | follow the worker's `stdout.log` as one short line per event; `--raw` is the unfiltered NDJSON firehose (100 KB lines), redirect it to a file |
 | `stop --dir DIR` | TERM then KILL the worker's process group, refusing when the pid now belongs to someone else |
 | `verify --dir DIR` | run the verify commands against the baseline, check scope and secrets, write `outcome.json` and the ledger row; exit 0 pass, 1 fail or empty-diff, 2 inconclusive, 3 env-blocked |
@@ -437,7 +438,8 @@ account identifier.
 - **Difficulty picks effort, not models.** It selects a model only where the registry carries a rule.
   Claude always pins `--model fable`. Kimi may switch to a faster alias. Codex/Grok model names are
   account-scoped and this repo will not invent them.
-- **No conversation transfer.** Cross-CLI handoff starts from a fresh brief plus the current diff,
+- **No conversation transfer.** `follow-up` reuses the task worktree, so the files carry over.
+  The new brief is fresh and includes the current diff. The other CLI's conversation still does not,
   because no CLI here can import another's session.
 
 ## License
