@@ -18,7 +18,12 @@
       "write_allowed_default": true,
       "run": {
         "cwd": "worktree",
-        "env_scrub": true
+        "env_scrub": true,
+        "env_pass": {
+          "idle_timeout": "OPENCODE_WORKER_IDLE_TIMEOUT",
+          "max_seconds": "OPENCODE_WORKER_MAX_SECONDS",
+          "max_requests": "OPENCODE_WORKER_MAX_REQUESTS"
+        }
       },
       "default_for": {
         "difficulty": [
@@ -161,7 +166,7 @@
     },
     "deepseek": {
       "display_name": "opencode on DeepSeek",
-      "_note": "opencode driven through scripts/opencode-deepseek (a symlink to opencode-worker): the same local proxy as cerebras injects the key from ~/.config/deepseek/env, but with --no-strip, because DeepSeek wants reasoning_content echoed inside a tool-call turn. Pay-per-token on a prepaid balance, so its meter is money: the probe reads /user/balance and a daily spend cap (DEEPSEEK_DAILY_USD). No default_for: hard ranks by learned fit, where the ledger put V4 Pro at 20% pass on hard against grok 66% and codex 50%, mostly sandbox faults (Seatbelt symlinks, out-of-worktree paths, the 300 s single-generation watchdog). Restore the default once it passes five hard tasks in a row.",
+      "_note": "opencode driven through scripts/opencode-deepseek (a symlink to opencode-worker): the same local proxy as cerebras injects the key from ~/.config/deepseek/env, but with --no-strip, because DeepSeek wants reasoning_content echoed inside a tool-call turn. Pay-per-token on a prepaid balance, so its meter is money: the probe reads /user/balance and a daily spend cap (DEEPSEEK_DAILY_USD). No default_for: hard ranks by learned fit, where the ledger put V4 Pro at 20% pass on hard against grok 66% and codex 50%, mostly sandbox faults (Seatbelt symlinks, out-of-worktree paths) and, until 0.4.5, a wrapper watchdog that killed any single generation longer than 300 s because the proxy logged a request only once it had completed; V4 Pro at high effort on a 150k-token context streams reasoning for minutes, which looked like silence. The proxy now logs sends, headers and a heartbeat while bytes flow, so the idle limit means real silence; `limits.txt` keys idle_timeout, max_seconds and max_requests reach the wrapper through run.env_pass. Restore the default once it passes five hard tasks in a row.",
       "binary": {
         "env": "DEEPSEEK_WORKER_BIN",
         "candidates": [
@@ -175,7 +180,12 @@
       "write_allowed_default": true,
       "run": {
         "cwd": "worktree",
-        "env_scrub": true
+        "env_scrub": true,
+        "env_pass": {
+          "idle_timeout": "OPENCODE_WORKER_IDLE_TIMEOUT",
+          "max_seconds": "OPENCODE_WORKER_MAX_SECONDS",
+          "max_requests": "OPENCODE_WORKER_MAX_REQUESTS"
+        }
       },
       "prompt": {
         "implement": {

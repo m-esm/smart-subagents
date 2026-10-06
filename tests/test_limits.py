@@ -671,3 +671,38 @@ class LimitsDispatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+OPENCODE_ENV_PASS = {
+    "idle_timeout": "OPENCODE_WORKER_IDLE_TIMEOUT",
+    "max_seconds": "OPENCODE_WORKER_MAX_SECONDS",
+    "max_requests": "OPENCODE_WORKER_MAX_REQUESTS",
+}
+
+
+class OpencodeWatchdogLimitsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_ssa("registry").load()
+        cls.adapters = load_ssa("adapters")
+
+    def test_both_opencode_workers_pass_the_watchdog_knobs(self):
+        for name in ("cerebras", "deepseek"):
+            self.assertEqual(self.reg.get(name).env_pass, OPENCODE_ENV_PASS, name)
+
+    def test_limits_reach_the_wrapper_env(self):
+        with temp_env() as te:
+            limits = te.root / "limits.txt"
+            limits.write_text("idle_timeout=900\nmax_seconds=3600\n")
+            resolved = self.adapters.resolve_env_extra(self.reg.get("deepseek"), {"limits": str(limits)})
+        self.assertEqual(
+            resolved,
+            {"OPENCODE_WORKER_IDLE_TIMEOUT": "900", "OPENCODE_WORKER_MAX_SECONDS": "3600"},
+        )
+
+    def test_a_non_integer_limit_is_refused(self):
+        with temp_env() as te:
+            limits = te.root / "limits.txt"
+            limits.write_text("idle_timeout=soon\n")
+            with self.assertRaises(self.adapters.AdapterError):
+                self.adapters.resolve_env_extra(self.reg.get("deepseek"), {"limits": str(limits)})

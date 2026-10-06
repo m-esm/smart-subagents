@@ -9,6 +9,7 @@ with `default_for`, and its log locators are pinned against a trimmed real
 No real network, no real key.
 """
 
+import http.client
 import http.server
 import json
 import os
@@ -386,6 +387,110 @@ class ProxyTests(unittest.TestCase):
         finally:
             if saved is not None:
                 os.environ["CEREBRAS_API_KEY"] = saved
+
+
+class _SlowUpstream(http.server.BaseHTTPRequestHandler):
+    gap = 0.4
+    count = 3
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for i in range(self.count):
+            event = ("data: slow%d\n\n" % i).encode()
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(event), event))
+            self.wfile.flush()
+            time.sleep(self.gap)
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+
+
+class StreamingProxyTests(unittest.TestCase):
+    def setUp(self):
+        self.upstream = http.server.HTTPServer(("127.0.0.1", 0), _SlowUpstream)
+        threading.Thread(target=self.upstream.serve_forever, daemon=True).start()
+        self.tmp = tempfile.TemporaryDirectory(prefix="ssa-proxy-stream-")
+        self.port_file = os.path.join(self.tmp.name, "port")
+        self.trace = os.path.join(self.tmp.name, "trace.log")
+        self.log = open(os.path.join(self.tmp.name, "proxy.log"), "w+")
+        env = dict(os.environ)
+        env["CEREBRAS_API_KEY"] = "test-key-not-real"
+        self.proc = subprocess.Popen(
+            [
+                sys.executable, str(PROXY), "--port-file", self.port_file,
+                "--upstream", "http://127.0.0.1:%d" % self.upstream.server_address[1],
+                "--trace", self.trace, "--heartbeat", "0.1", "--label", "t-proxy",
+            ],
+            env=env,
+            stderr=self.log,
+        )
+        deadline = time.time() + 20
+        while time.time() < deadline and not os.path.exists(self.port_file):
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        if not os.path.exists(self.port_file):
+            self.proc.kill()
+            self.fail("proxy never reported a port (rc=%s)" % self.proc.poll())
+        self.port = int(Path(self.port_file).read_text().strip())
+
+    def tearDown(self):
+        self.proc.terminate()
+        self.proc.wait(timeout=5)
+        self.log.close()
+        self.upstream.shutdown()
+        self.upstream.server_close()
+        self.tmp.cleanup()
+
+    def _stream(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request(
+            "POST", "/v1/chat/completions", body=b'{"stream":true}',
+            headers={"Content-Type": "application/json", "Content-Length": "15"},
+        )
+        resp = conn.getresponse()
+        started = time.time()
+        arrivals = []
+        while True:
+            chunk = resp.read1(65536)
+            if not chunk:
+                break
+            arrivals.append((time.time() - started, chunk))
+        conn.close()
+        return resp.status, arrivals
+
+    def test_each_upstream_chunk_is_forwarded_as_it_arrives(self):
+        status, arrivals = self._stream()
+        self.assertEqual(status, 200)
+        self.assertEqual(b"".join(c for _, c in arrivals),
+                         b"data: slow0\n\ndata: slow1\n\ndata: slow2\n\n")
+        self.assertGreaterEqual(len(arrivals), 3, arrivals)
+        self.assertLess(arrivals[0][0], _SlowUpstream.gap / 2, arrivals)
+        self.assertGreater(arrivals[-1][0], _SlowUpstream.gap * 1.5, arrivals)
+
+    def test_log_and_trace_move_while_the_response_streams(self):
+        self._stream()
+        self.proc.terminate()
+        self.proc.wait(timeout=5)
+        self.log.seek(0)
+        lines = self.log.read().splitlines()
+        self.assertTrue(any(".. sent 15B" in l for l in lines), lines)
+        self.assertTrue(any(".. headers 200" in l for l in lines), lines)
+        self.assertTrue(any(".. streaming" in l for l in lines), lines)
+        done = [l for l in lines if "t-proxy POST /v1/chat/completions -> 200" in l]
+        self.assertEqual(len(done), 1, lines)
+        self.assertEqual(len([l for l in lines if "POST /v1/chat/completions -> " in l]), 1)
+        trace = Path(self.trace).read_text()
+        self.assertEqual(trace.count("chunk "), 3, trace)
+        self.assertIn("done 200", trace)
+        self.assertNotIn("slow0", trace)
+        self.assertNotIn("slow0", "\n".join(lines))
 
 
 if __name__ == "__main__":

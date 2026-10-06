@@ -9,6 +9,9 @@ network, no real key.
 
 import json
 import os
+import http.server
+import threading
+import time
 import subprocess
 import sys
 import tempfile
@@ -164,6 +167,87 @@ class WrapperProfileTests(unittest.TestCase):
         r = self.run_wrapper("opencode-deepseek", "-m", "deepseek/deepseek-flash")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("no DEEPSEEK_API_KEY", r.stderr)
+
+
+class _StreamingUpstream(http.server.BaseHTTPRequestHandler):
+    plan = "stream"
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        self.wfile.flush()
+        if self.plan == "stall":
+            time.sleep(40)
+            return
+        for i in range(18):
+            event = ("data: tok%d\n\n" % i).encode()
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(event), event))
+            self.wfile.flush()
+            time.sleep(0.5)
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+
+
+FAKE_OPENCODE = """#!/usr/bin/env bash
+set -eu
+port="$(python3 -c 'import json,os;print(json.load(open(os.environ["OPENCODE_CONFIG"]))["provider"]["deepseek"]["options"]["baseURL"].rsplit(":",1)[1].split("/")[0])')"
+curl -sS -N -X POST "http://127.0.0.1:$port/v1/chat/completions" -H 'Content-Type: application/json' -d '{"stream":true}'
+"""
+
+
+class WatchdogTests(unittest.TestCase):
+    def setUp(self):
+        self.upstream = http.server.HTTPServer(("127.0.0.1", 0), _StreamingUpstream)
+        threading.Thread(target=self.upstream.serve_forever, daemon=True).start()
+        self.tmp = tempfile.TemporaryDirectory(prefix="ssa-watchdog-")
+        home = Path(self.tmp.name) / "home"
+        (home / ".config" / "deepseek").mkdir(parents=True)
+        (home / ".config" / "deepseek" / "env").write_text("DEEPSEEK_API_KEY=test-key-not-real\n")
+        fake = Path(self.tmp.name) / "opencode"
+        fake.write_text(FAKE_OPENCODE)
+        fake.chmod(0o755)
+        self.work = Path(self.tmp.name) / "wt"
+        self.work.mkdir()
+        self.env = {
+            "PATH": os.environ["PATH"], "HOME": str(home), "TMPDIR": self.tmp.name,
+            "OPENCODE_BIN": str(fake), "OPENCODE_WORKER_NO_SANDBOX": "1",
+            "OPENCODE_WORKER_UPSTREAM": "http://127.0.0.1:%d" % self.upstream.server_address[1],
+            "OPENCODE_WORKER_IDLE_TIMEOUT": "3", "OPENCODE_WORKER_HEARTBEAT": "0.2",
+        }
+
+    def tearDown(self):
+        self.upstream.shutdown()
+        self.upstream.server_close()
+        self.tmp.cleanup()
+
+    def run_wrapper(self):
+        return subprocess.run(
+            [str(ROOT / "scripts" / "opencode-deepseek"), "--dir", str(self.work),
+             "-m", "deepseek/deepseek-v4-pro", "go"],
+            env=self.env, capture_output=True, text=True, timeout=90,
+        )
+
+    def test_a_slow_stream_longer_than_the_idle_limit_is_not_killed(self):
+        _StreamingUpstream.plan = "stream"
+        r = self.run_wrapper()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("data: tok17", r.stdout)
+        self.assertNotIn("killing idle", r.stderr)
+
+    def test_a_silent_upstream_is_killed_with_the_proxy_tail(self):
+        _StreamingUpstream.plan = "stall"
+        r = self.run_wrapper()
+        self.assertEqual(r.returncode, 143, r.stderr)
+        self.assertIn("no LLM traffic for 3s", r.stderr)
+        self.assertIn("last proxy.log lines:", r.stderr)
+        self.assertIn(".. headers 200", r.stderr)
+        self.assertNotIn("-> 200", r.stderr)
 
 
 class ProxyProfileTests(unittest.TestCase):

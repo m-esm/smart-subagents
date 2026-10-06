@@ -53,6 +53,8 @@ _SKIP_REQUEST_HEADERS = {
     "transfer-encoding",
 }
 _SKIP_RESPONSE_HEADERS = {"transfer-encoding", "connection", "content-length"}
+HEARTBEAT_SECONDS = 15.0
+STREAM_READ_SIZE = 65536
 
 
 def rewrite_body(raw: bytes, strip: tuple = STRIP_FIELDS) -> bytes:
@@ -102,7 +104,14 @@ def read_key(key_file: str, key_name: str = KEY_NAME) -> str:
     return ""
 
 
-def make_handler(upstream: str, key: str, strip: tuple = STRIP_FIELDS, label: str = "cerebras-proxy"):
+def make_handler(
+    upstream: str,
+    key: str,
+    strip: tuple = STRIP_FIELDS,
+    label: str = "cerebras-proxy",
+    trace: str = "",
+    heartbeat: float = HEARTBEAT_SECONDS,
+):
     parts = urlsplit(upstream)
     host = parts.hostname or ""
     port = parts.port
@@ -115,6 +124,19 @@ def make_handler(upstream: str, key: str, strip: tuple = STRIP_FIELDS, label: st
 
         def log_message(self, fmt, *args):  # quiet: one line per request below
             pass
+
+        def _note(self, text):
+            sys.stderr.write("%s %s %s %s\n" % (label, self.command, self.path, text))
+            sys.stderr.flush()
+
+        def _trace(self, started, text):
+            if not trace:
+                return
+            try:
+                with open(trace, "a") as fh:
+                    fh.write("+%.3f %s %s\n" % (time.time() - started, self.path, text))
+            except OSError:
+                pass
 
         def _forward(self):
             started = time.time()
@@ -133,27 +155,41 @@ def make_handler(upstream: str, key: str, strip: tuple = STRIP_FIELDS, label: st
             conn_cls = http.client.HTTPSConnection if secure else http.client.HTTPConnection
             conn = conn_cls(host, port, timeout=600)
             status = 502
+            total = 0
+            chunks = 0
             try:
+                self._note(".. sent %dB" % len(body))
+                self._trace(started, "sent %dB" % len(body))
                 conn.request(self.command, prefix + self.path, body=body, headers=headers)
                 resp = conn.getresponse()
                 status = resp.status
+                self._note(".. headers %s %.2fs" % (status, time.time() - started))
+                self._trace(started, "headers %s" % status)
                 self.send_response(resp.status, resp.reason)
                 for k, v in resp.getheaders():
                     if k.lower() in _SKIP_RESPONSE_HEADERS:
                         continue
                     self.send_header(k, v)
-                # Close-delimited body: simplest framing that streams SSE
-                # chunk by chunk without re-chunking it ourselves.
                 self.send_header("Connection", "close")
                 self.end_headers()
+                self.wfile.flush()
+                last_note = time.time()
                 while True:
-                    chunk = resp.read(4096)
+                    chunk = resp.read1(STREAM_READ_SIZE)
                     if not chunk:
                         break
                     self.wfile.write(chunk)
                     self.wfile.flush()
+                    total += len(chunk)
+                    chunks += 1
+                    now = time.time()
+                    self._trace(started, "chunk %dB" % len(chunk))
+                    if now - last_note >= heartbeat:
+                        self._note(".. streaming %dB in %d chunks %.1fs" % (total, chunks, now - started))
+                        last_note = now
                 self.close_connection = True
-            except Exception as exc:  # upstream unreachable, reset, timeout
+            except Exception as exc:
+                self._trace(started, "error %s" % type(exc).__name__)
                 try:
                     self.send_response(502)
                     self.send_header("Content-Type", "application/json")
@@ -167,10 +203,12 @@ def make_handler(upstream: str, key: str, strip: tuple = STRIP_FIELDS, label: st
                 self.close_connection = True
             finally:
                 conn.close()
+            self._trace(started, "done %s %dB %d chunks" % (status, total, chunks))
             sys.stderr.write(
-                "%s %s %s -> %s %.2fs\n"
-                % (label, self.command, self.path, status, time.time() - started)
+                "%s %s %s -> %s %.2fs %dB\n"
+                % (label, self.command, self.path, status, time.time() - started, total)
             )
+            sys.stderr.flush()
 
         def do_GET(self):
             if self.path == "/health":
@@ -198,12 +236,15 @@ def serve(
     key_name: str = KEY_NAME,
     strip: tuple = STRIP_FIELDS,
     label: str = "cerebras-proxy",
+    trace: str = "",
+    heartbeat: float = HEARTBEAT_SECONDS,
 ) -> int:
     key = read_key(key_file, key_name)
     if not key:
         sys.stderr.write("%s: no %s in the environment or %s\n" % (label, key_name, key_file))
         return 2
-    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(upstream, key, strip, label))
+    handler = make_handler(upstream, key, strip, label, trace, heartbeat)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     server.daemon_threads = True
     bound = server.server_address[1]
     tmp = port_file + ".tmp"
@@ -235,9 +276,19 @@ def main(argv=None) -> int:
         "--no-strip", action="store_true", help="forward echoed reasoning fields untouched"
     )
     ap.add_argument("--label", default="cerebras-proxy", help="prefix of the per-request log line")
+    ap.add_argument("--trace", default="", help="append one line per forwarded chunk to this file")
+    ap.add_argument(
+        "--heartbeat",
+        type=float,
+        default=HEARTBEAT_SECONDS,
+        help="seconds between progress lines while a response streams",
+    )
     args = ap.parse_args(argv)
     strip = () if args.no_strip else STRIP_FIELDS
-    return serve(args.port_file, args.upstream, args.key_file, args.key_name, strip, args.label)
+    return serve(
+        args.port_file, args.upstream, args.key_file, args.key_name, strip, args.label,
+        args.trace, args.heartbeat,
+    )
 
 
 if __name__ == "__main__":
