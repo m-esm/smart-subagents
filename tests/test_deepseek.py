@@ -12,6 +12,7 @@ import os
 import http.server
 import threading
 import time
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -169,6 +170,15 @@ class WrapperProfileTests(unittest.TestCase):
         self.assertIn("no DEEPSEEK_API_KEY", r.stderr)
 
 
+class _LoopbackServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = self.server_address[0]
+        self.server_port = self.server_address[1]
+
+
 class _StreamingUpstream(http.server.BaseHTTPRequestHandler):
     plan = "stream"
 
@@ -203,8 +213,7 @@ curl -sS -N -X POST "http://127.0.0.1:$port/v1/chat/completions" -H 'Content-Typ
 
 class WatchdogTests(unittest.TestCase):
     def setUp(self):
-        self.upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _StreamingUpstream)
-        self.upstream.daemon_threads = True
+        self.upstream = _LoopbackServer(("127.0.0.1", 0), _StreamingUpstream)
         threading.Thread(target=self.upstream.serve_forever, daemon=True).start()
         self.tmp = tempfile.TemporaryDirectory(prefix="ssa-watchdog-")
         home = Path(self.tmp.name) / "home"

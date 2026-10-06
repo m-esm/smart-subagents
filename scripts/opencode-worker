@@ -153,6 +153,16 @@ EOF
 IDLE="$(_env IDLE_TIMEOUT 300)"
 MAX_SECONDS="$(_env MAX_SECONDS 1800)"
 MAX_REQUESTS="$(_env MAX_REQUESTS 120)"
+_mtime() {
+  local out
+  if out="$(stat -c %Y "$1" 2>/dev/null)" && [[ "$out" =~ ^[0-9]+$ ]]; then
+    echo "$out"
+  elif out="$(stat -f %m "$1" 2>/dev/null)" && [[ "$out" =~ ^[0-9]+$ ]]; then
+    echo "$out"
+  else
+    return 1
+  fi
+}
 _proxy_tail() {
   echo "$TAG: last proxy.log lines:" >&2
   tail -n 6 "$tmp/proxy.log" 2>/dev/null | sed "s/^/$TAG:   /" >&2 || true
@@ -164,7 +174,7 @@ watchdog() {
     sleep 5
     local now last
     now="$(date +%s)"
-    last="$(stat -f %m "$tmp/proxy.log" 2>/dev/null || stat -c %Y "$tmp/proxy.log" 2>/dev/null || echo "$started")"
+    last="$(_mtime "$tmp/proxy.log" || echo "$started")"
     if (( now - last > IDLE )); then
       echo "$TAG: no LLM traffic for ${IDLE}s, killing idle opencode (pid $pid)" >&2
       _proxy_tail

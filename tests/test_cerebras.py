@@ -13,6 +13,7 @@ import http.client
 import http.server
 import json
 import os
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -259,6 +260,15 @@ class LocatorTests(unittest.TestCase):
         self.assertNotIn(adapters.classify_log(1, log), ("rate-limit", "auth"))
 
 
+class _LoopbackServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = self.server_address[0]
+        self.server_port = self.server_address[1]
+
+
 class _FakeUpstream(http.server.BaseHTTPRequestHandler):
     seen = []
 
@@ -289,7 +299,7 @@ class ProxyTests(unittest.TestCase):
 
         self.proxy_mod = cerebras_proxy
         _FakeUpstream.seen = []
-        self.upstream = http.server.HTTPServer(("127.0.0.1", 0), _FakeUpstream)
+        self.upstream = _LoopbackServer(("127.0.0.1", 0), _FakeUpstream)
         threading.Thread(target=self.upstream.serve_forever, daemon=True).start()
         self.tmp = tempfile.TemporaryDirectory(prefix="ssa-proxy-")
         self.port_file = os.path.join(self.tmp.name, "port")
@@ -413,7 +423,7 @@ class _SlowUpstream(http.server.BaseHTTPRequestHandler):
 
 class StreamingProxyTests(unittest.TestCase):
     def setUp(self):
-        self.upstream = http.server.HTTPServer(("127.0.0.1", 0), _SlowUpstream)
+        self.upstream = _LoopbackServer(("127.0.0.1", 0), _SlowUpstream)
         threading.Thread(target=self.upstream.serve_forever, daemon=True).start()
         self.tmp = tempfile.TemporaryDirectory(prefix="ssa-proxy-stream-")
         self.port_file = os.path.join(self.tmp.name, "port")

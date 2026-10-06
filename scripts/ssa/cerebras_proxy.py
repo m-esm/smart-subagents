@@ -32,6 +32,7 @@ import os
 import signal
 import sys
 import time
+import socketserver
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -86,6 +87,15 @@ def rewrite_body(raw: bytes, strip: tuple = STRIP_FIELDS) -> bytes:
     if not changed:
         return raw
     return json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+class LoopbackServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = self.server_address[0]
+        self.server_port = self.server_address[1]
 
 
 def read_key(key_file: str, key_name: str = KEY_NAME) -> str:
@@ -244,8 +254,7 @@ def serve(
         sys.stderr.write("%s: no %s in the environment or %s\n" % (label, key_name, key_file))
         return 2
     handler = make_handler(upstream, key, strip, label, trace, heartbeat)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    server.daemon_threads = True
+    server = LoopbackServer(("127.0.0.1", 0), handler)
     bound = server.server_address[1]
     tmp = port_file + ".tmp"
     with open(tmp, "w") as fh:
