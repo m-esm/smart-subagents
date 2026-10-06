@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.4
+
+Task 1791194983-39473 (deepseek through opencode) wrote two `verified-pass`
+rows for runs that changed nothing. The worker's first file tool touched a
+path outside its worktree, opencode auto-rejected the `external_directory`
+permission and ended the run with exit 0 and an empty diff; every verify
+command already failed on the baseline, so "no new failures" scored as pass.
+The router's fit for deepseek impl/hard rose from 0.85 to 1.0 on it.
+
+- `verify` returns `empty-diff` (exit 1, ledger row `rejected`) when an
+  `impl` or `debug` task changed no file, whatever the commands scored. A
+  run the worker left empty after a rate limit or an auth failure is
+  recorded `rate-limited` instead, so the fit posterior does not charge it.
+- `verify` returns `env-blocked` (exit 3, ledger row `env-blocked`) when the
+  diff is empty and the log carries an opencode `permission requested: ...;
+  auto-rejecting` notice or a tool call rejected for permission.
+  `outcome.json` lists the rejected permissions, the task kind and the
+  worker's exit code.
+- `record` refuses `verified-pass` for an `impl` or `debug` task whose
+  `outcome.json` reports zero changed files, even when its verdict says pass.
+- `init` and `dispatch` resolve the work dir and the worktree with `pwd -P`,
+  so `wt.txt`, the staged brief path and the worker's cwd agree with the
+  path opencode compares tool calls against (`/private/var/folders/...` on
+  macOS, no doubled slash from a `$TMPDIR` that ends in `/`).
+- `ssa.adapters.rejected_permissions` and `CHANGE_KINDS` hold the detection
+  and the kinds that owe a diff; `tests/test_registry.py` carries the table.
 ## 0.4.3
 
 Claude `--agents` JSON now carries the fields the 2026-10 docs actually

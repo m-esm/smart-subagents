@@ -46,6 +46,11 @@ _ssa_ensure_work_dir() {
   mkdir -p "$SSA_WORK_DIR" 2>/dev/null || die "cannot create $SSA_WORK_DIR"
   [[ -O "$SSA_WORK_DIR" ]] || die "$SSA_WORK_DIR is not owned by this user; refusing to write briefs and worktrees into it (set SSA_WORK_DIR to a path you own)"
   chmod 700 "$SSA_WORK_DIR" 2>/dev/null || true
+  SSA_WORK_DIR="$(cd "$SSA_WORK_DIR" && pwd -P)" || die "cannot resolve $SSA_WORK_DIR"
+}
+
+_ssa_realpath_dir() {
+  (cd "$1" 2>/dev/null && pwd -P)
 }
 
 # Worktrees are siblings of the task dirs, never children of one: a worker with
@@ -1076,6 +1081,7 @@ cmd_dispatch() {
   local wt
   wt="$(cat "$dir/wt.txt" 2>/dev/null || true)"
   [[ -n "$wt" && -d "$wt" ]] || die "dispatch: missing worktree ($dir/wt.txt)"
+  wt="$(_ssa_realpath_dir "$wt")" || die "dispatch: cannot resolve worktree $wt"
   _ssa_bind_worker_args "$dir" "$worker" || die "dispatch: worker-args do not match $worker"
   [[ -n "$resume" ]] || _ssa_jev_lint "$dir" "$brief"
 
@@ -2931,8 +2937,40 @@ for line in log_text.splitlines():
 
 missing_cmds = not (d / "verify-cmds.txt").exists()
 
-if not changed and brief_denied:
+if scripts_dir:
+    sys.path.insert(0, scripts_dir)
+try:
+    from ssa import adapters as _ssa_adapters
+except Exception:
+    _ssa_adapters = None
+
+kind = ""
+kind_file = d / "kind.txt"
+if kind_file.exists():
+    for raw in kind_file.read_text(errors="replace").splitlines():
+        if raw.strip() and not raw.strip().startswith("#"):
+            kind = raw.strip()
+            break
+change_kinds = getattr(_ssa_adapters, "CHANGE_KINDS", ("impl", "debug"))
+
+rejected = []
+if _ssa_adapters is not None and log_text:
+    rejected = _ssa_adapters.rejected_permissions(log_text)
+
+exit_code = None
+exit_file = d / "exit-code.txt"
+if exit_file.exists():
+    try:
+        exit_code = int(exit_file.read_text().strip().splitlines()[0])
+    except (ValueError, IndexError):
+        exit_code = None
+
+if not changed and rejected:
+    verdict = "env-blocked"
+elif not changed and brief_denied:
     verdict = "fail"
+elif not changed and kind in change_kinds:
+    verdict = "empty-diff"
 elif new_failures or scope_ok is False or not secrets_ok:
     verdict = "fail"
 elif missing_cmds:
@@ -2960,14 +2998,27 @@ if task_file.exists():
                 failure_class = klass.strip()
     except Exception:
         failure_class = None
+run_failure_class = failure_class
+if verdict in ("env-blocked", "empty-diff"):
+    failure_class = verdict
+
+if verdict == "pass":
+    ledger_outcome = "verified-pass"
+elif verdict == "env-blocked":
+    ledger_outcome = "env-blocked"
+elif verdict == "empty-diff" and run_failure_class in ("rate-limit", "auth"):
+    ledger_outcome = "rate-limited"
+elif verdict in ("fail", "empty-diff"):
+    ledger_outcome = "rejected"
+else:
+    ledger_outcome = "partial"
+(d / "verify-outcome.txt").write_text(ledger_outcome + "\n")
 
 effort = ""
 model = ""
 model_downgraded = False
-if scripts_dir:
-    sys.path.insert(0, scripts_dir)
+if _ssa_adapters is not None:
     try:
-        from ssa import adapters as _ssa_adapters
         effort = _ssa_adapters.launched_effort_for_dir(str(d))
         model = _ssa_adapters.launched_model_for_dir(str(d))
         model_downgraded = (d / "model-downgraded.txt").is_file()
@@ -2996,6 +3047,9 @@ doc = {
         # "absent" is not "clean": gitleaks was never run on this machine.
         "gitleaks": gitleaks,
         "changed_files": len(changed),
+        "kind": kind,
+        "worker_exit": exit_code,
+        "rejected_permissions": rejected[:10],
         "verdict": verdict,
     },
 }
@@ -3010,7 +3064,12 @@ if out_of_scope:
     print("verify: out of scope: %d path(s): %s%s"
           % (len(out_of_scope), ", ".join(out_of_scope[:10]),
              " ..." if len(out_of_scope) > 10 else ""))
-sys.exit({"pass": 0, "fail": 1, "inconclusive": 2}[verdict])
+if verdict == "env-blocked":
+    print("verify: worker exit %s with an empty diff after opencode auto-rejected: %s"
+          % (exit_code, ", ".join(rejected[:5])))
+elif verdict == "empty-diff":
+    print("verify: %s task changed 0 files; a no-op is not a pass" % kind)
+sys.exit({"pass": 0, "fail": 1, "inconclusive": 2, "env-blocked": 3, "empty-diff": 1}[verdict])
 PY
   rm -f "$dir/verify-changed.z"
   _ssa_jev_review "$dir"
@@ -3018,8 +3077,12 @@ PY
   case "$rc" in
     0) verdict_state="verified" ;;
     1) verdict_state="failed"; failure_class="verify-fail" ;;
+    3) verdict_state="failed"; failure_class="env-blocked" ;;
     *) verdict_state="inconclusive"; failure_class="inconclusive" ;;
   esac
+  if [[ "$rc" == 1 ]] && grep -q '"verdict": "empty-diff"' "$dir/outcome.json" 2>/dev/null; then
+    failure_class="empty-diff"
+  fi
   _ssa_event "$dir" --phase "$verdict_state" --exit "$rc" \
     ${failure_class:+--failure-class "$failure_class"} \
     --artifact "$dir/outcome.json"
@@ -3028,10 +3091,18 @@ PY
   # pass→verified-pass, fail→rejected, else partial. Verify's own rc is kept
   # even if record fails; worker rc stays in exit-code.txt. A second verify
   # of the same dir must not double-append; manual `record --dir` still can.
-  local rec_outcome=partial
-  case "$rc" in
-    0) rec_outcome=verified-pass ;;
-    1) rec_outcome=rejected ;;
+  local rec_outcome
+  rec_outcome="$(_read1 "$dir/verify-outcome.txt")"
+  case "$rec_outcome" in
+    verified-pass|partial|rejected|blocked|env-blocked|rate-limited) ;;
+    *)
+      rec_outcome=partial
+      case "$rc" in
+        0) rec_outcome=verified-pass ;;
+        1) rec_outcome=rejected ;;
+        3) rec_outcome=env-blocked ;;
+      esac
+      ;;
   esac
   if [[ -f "$dir/outcome-record.json" ]]; then
     echo "verify: ledger row already present; not appending" >&2
@@ -3157,6 +3228,30 @@ if outcome == "verified-pass" and verified is not True:
     sys.stderr.write(
         "record: --outcome verified-pass requires outcome.json "
         "verify.verdict=pass (got %s)\n" % got
+    )
+    raise SystemExit(1)
+
+if scripts_dir:
+    sys.path.insert(0, scripts_dir)
+try:
+    from ssa import adapters as _ssa_adapters
+    change_kinds = _ssa_adapters.CHANGE_KINDS
+except Exception:
+    _ssa_adapters = None
+    change_kinds = ("impl", "debug")
+kind = read1("kind.txt")
+verify_changed = None
+if oc.exists():
+    try:
+        verify_changed = (ocdoc.get("verify") or {}).get("changed_files")
+    except Exception:
+        verify_changed = None
+if outcome == "verified-pass" and kind in change_kinds and (
+    verify_changed == 0 or (verify_changed is None and files in (0, None) and stat.exists())
+):
+    sys.stderr.write(
+        "record: --outcome verified-pass refused for a %s task with an empty diff "
+        "(verify.changed_files=%s, diff-stat files=%s)\n" % (kind, verify_changed, files)
     )
     raise SystemExit(1)
 
@@ -3396,9 +3491,11 @@ Usage: smart-subagents.sh <command> [options]
   verify --dir DIR
       Run DIR/verify-cmds.txt in the worktree, compare against
       DIR/baseline-results.txt, check changed paths against DIR/scope.txt, run
-      the secret scan, and write DIR/outcome.json. Exit 0 pass, 1 fail,
-      2 inconclusive.
+      the secret scan, and write DIR/outcome.json. Exit 0 pass, 1 fail or
+      empty-diff (an impl or debug task that changed no file), 2 inconclusive,
+      3 env-blocked (empty diff after opencode auto-rejected a permission).
       Baseline results without DIR/baseline.log are treated as an unrun baseline.
+      Writes the ledger row itself (DIR/verify-outcome.txt names the outcome).
 
   cooldown --cli CLI [--clear] [--reason rate-limit|auth] [--minutes N]
       Bench a worker for every task until the cooldown expires. dispatch sets

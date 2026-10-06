@@ -405,7 +405,7 @@ in the report.
 Run the gate, then read its verdict. Do not hand-roll this in shell:
 
 ```bash
-bash "$SSA" verify --dir "$DIR"   # exit 0 pass, 1 fail, 2 inconclusive
+bash "$SSA" verify --dir "$DIR"   # exit 0 pass, 1 fail or empty-diff, 2 inconclusive, 3 env-blocked
 bash "$SSA" status --dir "$DIR"   # verdict line, bounded; never cat outcome.json
 ```
 
@@ -425,9 +425,16 @@ exit code against `$DIR/baseline-results.txt`, checks the changed paths against
 | `pass` | no new failure, scope clean, no secrets | 0 |
 | `fail` | a command regressed, or scope/secret gate tripped | 1 |
 | `inconclusive` | a command failed and there is no baseline, or `verify-cmds.txt` is missing | 2 |
+| `empty-diff` | an `impl` or `debug` task changed no file, whatever the commands scored; the ledger row is `rejected` (`rate-limited` when the run was benched by a 429 or an auth failure first) | 1 |
+| `env-blocked` | empty diff after opencode auto-rejected a permission (`external_directory`): the worker used a file tool outside its worktree, or the brief quoted the unresolved `/var/folders` form of the worktree path; the ledger row is `env-blocked` | 3 |
 
 `inconclusive` is never reportable as success. Either record the baseline and
-re-run, or report `partial` with the reason.
+re-run, or report `partial` with the reason. `verify` writes the ledger row
+itself from the verdict (`$DIR/verify-outcome.txt` names it), and `record`
+refuses `verified-pass` for any verdict but `pass` and for an `impl` or `debug`
+task whose verify saw no changed file. On `env-blocked`, quote `$DIR/wt.txt`
+verbatim in the brief (it is already the resolved path) and re-dispatch; do not
+count it against the worker.
 
 Then read the diff yourself. The gate is mechanical, judgment is not:
 

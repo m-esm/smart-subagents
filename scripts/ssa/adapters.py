@@ -58,6 +58,13 @@ FAILURE_CLASSES = (
     "unknown",
 )
 
+PERMISSION_REJECT_RE = re.compile(
+    r"permission requested: (?P<perm>[a-z_]+) \((?P<path>[^)]*)\); auto-rejecting"
+)
+TOOL_REJECT_RE = re.compile(r"rejected permission to use")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+CHANGE_KINDS = ("impl", "debug")
+
 # Where a worker puts the text of a terminal error. Only these strings are
 # classified: a tool_result full of a repo's own source is not evidence about
 # the CLI's account.
@@ -1024,6 +1031,34 @@ def _error_text(obj: dict) -> str:
 def error_strings(text: str) -> List[str]:
     """Every terminal error message in a log, in order."""
     return [msg for obj in _iter_json_lines(text) if (msg := _error_text(obj))]
+
+
+def _tool_rejected(obj: dict) -> bool:
+    part = obj.get("part") if isinstance(obj.get("part"), dict) else obj
+    state = part.get("state") if isinstance(part.get("state"), dict) else {}
+    if str(state.get("status") or "") != "error":
+        return False
+    return bool(TOOL_REJECT_RE.search(str(state.get("error") or "")))
+
+
+def rejected_permissions(text: str) -> List[str]:
+    notices = [
+        _ANSI_RE.sub("", line) for line in (text or "").splitlines() if not _is_json_line(line)
+    ]
+    found = [
+        m.group("perm") for line in notices for m in PERMISSION_REJECT_RE.finditer(line)
+    ]
+    tool_hits = sum(1 for obj in _iter_json_lines(text or "") if _tool_rejected(obj))
+    found.extend(["tool-call"] * max(0, tool_hits - len(found)))
+    return found
+
+
+def rejected_permissions_in(log_path: str) -> List[str]:
+    try:
+        with open(log_path, "r", errors="replace") as fh:
+            return rejected_permissions(fh.read())
+    except OSError:
+        return []
 
 
 def _is_json_line(line: str) -> bool:

@@ -232,7 +232,9 @@ Minting is transactional, and retiring is conservative (`cleanup` in
 
 **Verification, not trust.** Nothing the worker claims is taken on faith: `verify` scores its own
 commands against a pre-dispatch baseline, so old failures are never charged to it, and writes a
-`pass`/`fail`/`inconclusive` verdict. The supervisor still reads the diff itself.
+`pass`/`fail`/`empty-diff`/`env-blocked`/`inconclusive` verdict. An `impl` or `debug` worker that
+changed no file is `empty-diff`, never a pass, however the baseline scored; an empty diff after
+opencode auto-rejected a permission is `env-blocked`. The supervisor still reads the diff itself.
 
 **Budgets by failure class**, not a flat retry count:
 
@@ -257,7 +259,7 @@ it checks offline whether a dispatch could run at all here.
 | `status --dir DIR` | one task in full: base sha, branch, exit code, session or `resume=unavailable`, worker pid state, recorded state and event count, verify verdict, and a bounded log digest (counts, last few events clipped, final message clipped). Never raw log lines |
 | `tail --dir DIR [--raw]` | follow the worker's `stdout.log` as one short line per event; `--raw` is the unfiltered NDJSON firehose (100 KB lines), redirect it to a file |
 | `stop --dir DIR` | TERM then KILL the worker's process group, refusing when the pid now belongs to someone else |
-| `verify --dir DIR` | run the verify commands against the baseline, check scope and secrets, write `outcome.json`; exit 0 pass, 1 fail, 2 inconclusive |
+| `verify --dir DIR` | run the verify commands against the baseline, check scope and secrets, write `outcome.json` and the ledger row; exit 0 pass, 1 fail or empty-diff, 2 inconclusive, 3 env-blocked |
 | `verify-summary --dir DIR` (alias `summary`) | branch, status, commits since base, diff stat, name-status, then the secret scan. Every section is clipped to 200 lines with the full text in `verify-summary-full.txt`; exit 1 when the scan finds something |
 | `diff --dir DIR [--path P] [--max-bytes N]` | the whole change as `--stat`, and with `--path` that path's unified diff clipped to N bytes (default 20000) |
 | `scan-secrets --dir DIR` | credential regexes plus Shannon entropy over added lines, newly added env files, and a gitleaks pass when gitleaks is installed |
