@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.6
+
+Three dispatches on 2026-10-06 (1791301186-34551, 1791304558-67106,
+1791308284-7215, Go work in second-brain) had `verify` verdict=fail from
+`high-entropy-token` alone while gitleaks was clean: Go module import paths
+(`github.com/m-esm/second-brain/voice/internal/session/claude` measures above
+3.5 once `.` splits the token), every `h1:` hash in `go.sum`, and Go test
+names (`func TestSummaryWhoseSegmentsWereAllTakenDeliversNoTurn`). `record
+--outcome verified-pass` then refused, and the `rejected` row verify had
+already written could not be corrected.
+
+- The entropy rule skips lines in `go.sum` and `go.work.sum` (the named
+  credential patterns still run there), a token whose surrounding word is a
+  Go module path (`host.tld/path`), the name after `func Test` and
+  identifier-shaped runs (`[A-Za-z_][A-Za-z0-9_]{24,}` built from camel or
+  snake words, at most 10% digits, at least 60% lowercase). Hex, base64 with
+  padding, mixed-case minted tokens and `sk-` keys still trip; a hex token on
+  the same line as a Go test name still trips.
+- `record --outcome verified-pass` accepts a verdict=fail whose only finding
+  is `high-entropy-token` while gitleaks ran clean, writes the row with
+  `verify_override: "entropy-only"` and `verification_passed: true`, and
+  replaces the `rejected` row verify wrote for the same task id instead of
+  appending beside it. A gitleaks finding, a gitleaks that never ran, a scope
+  failure or a new test failure still refuse it.
+- Tests: the three strings above scan clean; a hex40 beside a Go test name
+  and an `sk-` key inside `go.sum` still fail; the override replaces the
+  rejected row and leaves other tasks' rows alone; it is refused when
+  gitleaks failed or never ran.
+
 ## 0.4.5
 
 Task 1791300011-75190 (deepseek through opencode, `hard` impl) was killed as
