@@ -523,6 +523,96 @@ print(size, diff, kind)
 ' "$@"
 }
 
+_ssa_pick_into_dir() {
+  local dir="$1" preferred="${2:-}"
+  python3 - "$dir" "$preferred" <<'PY'
+import json, sys
+from pathlib import Path
+d = Path(sys.argv[1])
+preferred = (sys.argv[2] or "").strip().lower()
+usage = json.loads((d / "usage.json").read_text())
+rec = usage.get("recommendation") or {}
+ranked = rec.get("ranked") or []
+eligible = {r["cli"] for r in ranked}
+primary = rec.get("primary_worker")
+fallbacks = rec.get("fallback_workers") or []
+order = ([primary] if primary else []) + [f for f in fallbacks if f != primary]
+if preferred and preferred in eligible:
+    pick = preferred
+    reason = f"parent preferred {preferred} (eligible)"
+elif primary:
+    pick = primary
+    reason = f"primary={primary} score={next((r['score'] for r in ranked if r['cli']==primary), '?')}"
+else:
+    pick = ""
+    reason = "no eligible worker"
+pick_doc = {
+    "worker": pick,
+    "reason": reason,
+    "fallbacks": [c for c in order if c != pick],
+    "local_labor_ok": rec.get("local_labor_ok"),
+    "task_size": rec.get("task_size"),
+    "difficulty": rec.get("difficulty"),
+    "target_effort": rec.get("target_effort"),
+    "cross_review_required": rec.get("cross_review_required"),
+    "worker_args": (rec.get("worker_args") or {}).get(pick) or [],
+    "all_worker_args": rec.get("worker_args") or {},
+    "ranked": ranked,
+    "reasons": rec.get("reasons") or [],
+}
+(d / "worker-args.txt").write_text(
+    "\n".join(pick_doc["worker_args"]) + ("\n" if pick_doc["worker_args"] else "")
+)
+for cli, args in (pick_doc.get("all_worker_args") or {}).items():
+    args = args or []
+    (d / ("worker-args-%s.txt" % cli)).write_text(
+        "\n".join(args) + ("\n" if args else "")
+    )
+(d / "pick.json").write_text(json.dumps(pick_doc, indent=2))
+(d / "worker.txt").write_text(pick + ("\n" if pick else ""))
+print(json.dumps({"task_id": d.name, "dir": str(d), **pick_doc}, indent=2))
+PY
+}
+
+_ssa_write_followup_brief() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import subprocess
+import sys
+from pathlib import Path
+
+task_dir, wt, brief_path = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+text = brief_path.read_text()
+if text and not text.endswith("\n"):
+    text += "\n"
+diff = subprocess.run(
+    ["git", "-C", wt, "diff", "HEAD"],
+    capture_output=True,
+    text=True,
+)
+if diff.returncode != 0:
+    sys.stderr.write("follow-up: git diff failed\n")
+    sys.exit(1)
+untracked = subprocess.run(
+    ["git", "-C", wt, "ls-files", "--others", "--exclude-standard"],
+    capture_output=True,
+    text=True,
+)
+if untracked.returncode != 0:
+    sys.stderr.write("follow-up: git ls-files failed\n")
+    sys.exit(1)
+limit = 200000
+raw = diff.stdout.encode("utf-8")
+clipped = len(raw) > limit
+body = raw[:limit].decode("utf-8", errors="ignore") if clipped else diff.stdout
+if not body:
+    body = "(no tracked changes)\n"
+note = ("\n[diff clipped at %d bytes]\n" % limit) if clipped else ""
+names = [line for line in untracked.stdout.splitlines() if line.strip()]
+extra = ("\nUntracked files:\n" + "\n".join(names) + "\n") if names else ""
+(task_dir / "brief.md").write_text(text + "\n## Current diff\n\n" + body + note + extra)
+PY
+}
+
 cmd_init() {
   local repo="" size="medium" preferred="" difficulty="routine" kind="default" brief=""
   local size_set=0 difficulty_set=0 kind_set=0 allow_large=""
@@ -616,56 +706,7 @@ cmd_init() {
   _ssa_event "$dir" --phase preflighted --artifact "$dir/usage.json"
 
   # Pick worker (stdout = single JSON object only)
-  python3 - "$dir" "$preferred" <<'PY'
-import json, sys
-from pathlib import Path
-d = Path(sys.argv[1])
-preferred = (sys.argv[2] or "").strip().lower()
-usage = json.loads((d / "usage.json").read_text())
-rec = usage.get("recommendation") or {}
-ranked = rec.get("ranked") or []
-eligible = {r["cli"] for r in ranked}
-primary = rec.get("primary_worker")
-fallbacks = rec.get("fallback_workers") or []
-order = ([primary] if primary else []) + [f for f in fallbacks if f != primary]
-# honor preferred if eligible
-if preferred and preferred in eligible:
-    pick = preferred
-    reason = f"parent preferred {preferred} (eligible)"
-elif primary:
-    pick = primary
-    reason = f"primary={primary} score={next((r['score'] for r in ranked if r['cli']==primary), '?')}"
-else:
-    pick = ""
-    reason = "no eligible worker"
-pick_doc = {
-    "worker": pick,
-    "reason": reason,
-    "fallbacks": [c for c in order if c != pick],
-    "local_labor_ok": rec.get("local_labor_ok"),
-    "task_size": rec.get("task_size"),
-    "difficulty": rec.get("difficulty"),
-    "target_effort": rec.get("target_effort"),
-    "cross_review_required": rec.get("cross_review_required"),
-    "worker_args": (rec.get("worker_args") or {}).get(pick) or [],
-    "all_worker_args": rec.get("worker_args") or {},
-    "ranked": ranked,
-    "reasons": rec.get("reasons") or [],
-}
-(d / "worker-args.txt").write_text(
-    "\n".join(pick_doc["worker_args"]) + ("\n" if pick_doc["worker_args"] else "")
-)
-# Per-CLI copies so a later --worker override (or worker.txt edit) can rebind
-# without keeping the originally picked CLI's flags (see 1787682071-8525).
-for cli, args in (pick_doc.get("all_worker_args") or {}).items():
-    args = args or []
-    (d / ("worker-args-%s.txt" % cli)).write_text(
-        "\n".join(args) + ("\n" if args else "")
-    )
-(d / "pick.json").write_text(json.dumps(pick_doc, indent=2))
-(d / "worker.txt").write_text(pick + ("\n" if pick else ""))
-print(json.dumps({"task_id": d.name, "dir": str(d), **pick_doc}, indent=2))
-PY
+  _ssa_pick_into_dir "$dir" "$preferred"
 
   _ssa_state "$dir" picked
   _ssa_event "$dir" --phase picked --artifact "$dir/pick.json"
@@ -679,6 +720,60 @@ PY
   # Success: disarm the rollback.
   trap - EXIT
   _INIT_WT=""; _INIT_DIR=""; _INIT_REPO=""; _INIT_ID=""
+}
+
+cmd_follow_up() {
+  local dir="" brief="" preferred=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dir="${2:-}"; shift 2 ;;
+      --brief) brief="${2:-}"; shift 2 ;;
+      --prefer) preferred="${2:-}"; shift 2 ;;
+      *) die "follow-up: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$dir" ]] || die "follow-up: --dir required"
+  [[ -d "$dir" ]] || die "follow-up: dir not found: $dir"
+  [[ -n "$brief" ]] || die "follow-up: --brief required"
+  [[ -f "$brief" ]] || die "follow-up: --brief not a file: $brief"
+  need git
+  need python3
+
+  local wt pid base head size difficulty kind cur
+  wt="$(_read1 "$dir/wt.txt")"
+  if [[ -z "$wt" || "$wt" == "NOT_GIT" || ! -d "$wt" ]] \
+      || ! git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    die "follow-up: missing worktree"
+  fi
+  pid="$(_read1 "$dir/worker.pid")"
+  if _pid_alive "$pid"; then
+    die "follow-up: worker pid is alive ($pid)"
+  fi
+
+  size="$(_read1 "$dir/size.txt" medium)"
+  difficulty="$(_read1 "$dir/difficulty.txt" routine)"
+  kind="$(_read1 "$dir/kind.txt" default)"
+  python3 "$USAGE_PY" --json --task-size "$size" --difficulty "$difficulty" \
+    --task-kind "$kind" \
+    >"$dir/usage.json" || true
+  [[ -s "$dir/usage.json" ]] || die "follow-up: usage preflight produced nothing"
+  _ssa_pick_into_dir "$dir" "$preferred"
+
+  base=""
+  if [[ -f "$dir/base-sha.txt" ]]; then
+    base="$(tr -d '[:space:]' <"$dir/base-sha.txt")"
+  fi
+  head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)"
+  head="$(printf '%s' "$head" | tr -d '[:space:]')"
+  if [[ -z "$base" || -z "$head" || "$base" != "$head" ]]; then
+    die "follow-up: HEAD moved since the task was minted (${base:-missing} -> ${head:-missing})"
+  fi
+  _ssa_write_followup_brief "$dir" "$wt" "$brief"
+  cur="$(_task_state "$dir")"
+  if [[ "$cur" != "picked" ]]; then
+    _ssa_state "$dir" picked
+  fi
+  _ssa_event "$dir" --phase picked --artifact "$dir/pick.json"
 }
 
 cmd_pick() {
@@ -3584,6 +3679,14 @@ Usage: smart-subagents.sh <command> [options]
       from DIR/session-id.txt and refuses when there is none. Overriding
       --worker rebinds DIR/worker-args.txt to that CLI's flags.
 
+  follow-up --dir DIR --brief FILE [--prefer CLI]
+      Attach a fresh brief to DIR's existing worktree. The brief file replaces
+      DIR/brief.md and a current-diff section is appended (tracked changes
+      against HEAD, plus untracked paths). Re-runs the worker pick, then
+      re-reads the worktree HEAD and aborts if it differs from DIR/base-sha.txt.
+      Refuses when the worktree is missing or DIR/worker.pid is alive. Does not
+      merge, push, delete the worktree, or import another CLI's session.
+
   ls [--all] [--state STATE]        (alias: list)
       One line per task and planning panel under SSA_WORK_DIR: age, repo,
       worker, size/difficulty/kind, inferred phase, recorded state, whether a
@@ -3733,6 +3836,7 @@ Env:
   SSA_LEDGER                      outcome ledger path
                                   (default: $XDG_STATE_HOME/smart-subagents/outcomes.jsonl)
   SSA_SHORT_HORIZON_HOURS         reset horizon that makes short-window quota free (default 4)
+  SSA_SHARED_RESERVE_PCT          shared-account remaining floor, never below 40 (default 40)
   SSA_FIT_HALFLIFE_DAYS           decay half-life for learned fit (default 30)
   SSA_FIT_MIN_SAMPLES             effective samples before a posterior is used (default 10)
 EOF
@@ -3757,10 +3861,11 @@ main() {
   local cmd="${1:-help}"
   shift || true
   case "$cmd" in
-    init|dispatch|plan|doctor) _ssa_warn_if_behind_superproject ;;
+    init|dispatch|plan|doctor|follow-up) _ssa_warn_if_behind_superproject ;;
   esac
   case "$cmd" in
     init) cmd_init "$@" ;;
+    follow-up) cmd_follow_up "$@" ;;
     pick) cmd_pick "$@" ;;
     dispatch) cmd_dispatch "$@" ;;
     bg-run) cmd_bg_run "$@" ;;

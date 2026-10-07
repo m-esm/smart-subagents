@@ -331,6 +331,29 @@ class RegistryValidationTests(unittest.TestCase):
                     self.assertEqual(rc, 1, out)
                     self.assertIn("fakecli", err)
 
+    def test_shared_account_must_be_a_bool(self):
+        with temp_env() as te:
+            for bad in ("false", "yes", 1, 0, None):
+                with self.subTest(bad=bad):
+                    rc, out, err = self._validate(
+                        te,
+                        lambda doc, value=bad: doc["workers"]["fakecli"].__setitem__(
+                            "shared_account", value
+                        ),
+                    )
+                    self.assertEqual(rc, 1, err)
+                    self.assertIn("shared_account is not a bool", err)
+
+    def test_shared_account_true_loads(self):
+        with temp_env() as te:
+            rc, out, err = self._validate(
+                te,
+                lambda doc: doc["workers"]["fakecli"].__setitem__(
+                    "shared_account", True
+                ),
+            )
+            self.assertEqual(rc, 0, err)
+
     def test_missing_required_field_is_rejected(self):
         with temp_env() as te:
             rc, out, err = self._validate(

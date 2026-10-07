@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.6
+
+- A worker with `shared_account: true` is ineligible for every size and
+  difficulty once remaining on a binding window is under 40%.
+  `SSA_SHARED_RESERVE_PCT` can raise that floor and cannot lower it. The flag
+  defaults off, so a personal account is unchanged, including one at 0%
+  remaining. A worker that stays eligible keeps its `effective_score`,
+  including the short-window discount.
+- `follow-up --dir DIR --brief FILE` attaches a fresh brief, including the
+  current diff, to that task's worktree instead of minting another `ssa/<id>`
+  tree. It re-reads HEAD after the pick and aborts if the checkout moved
+  since mint, and it refuses a missing worktree or a live worker pid. It does
+  not merge, push, or delete the worktree. A normal init still isolates a
+  dirty user checkout. The other CLI's conversation still does not carry over.
+
 ## 0.4.5
 
 Task 1791300011-75190 (deepseek through opencode, `hard` impl) was killed as

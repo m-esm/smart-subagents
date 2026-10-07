@@ -2732,5 +2732,277 @@ class VersionTests(unittest.TestCase):
         self.assertTrue(headings, "CHANGELOG.md has no version heading")
         self.assertEqual(version, headings[0])
 
+
+_FOLLOW_USAGE = {
+    "primary_worker": "codex",
+    "fallback_workers": ["grok"],
+    "local_labor_ok": True,
+    "task_size": "small",
+    "task_kind": "impl",
+    "difficulty": "routine",
+    "target_effort": "medium",
+    "cross_review_required": False,
+    "worker_args": {
+        "codex": ["-c", "model_reasoning_effort=medium"],
+        "grok": ["--reasoning-effort", "medium"],
+    },
+    "ranked": [{"cli": "codex", "score": 80}, {"cli": "grok", "score": 60}],
+    "reasons": [],
+}
+
+
+class FollowUpTests(unittest.TestCase):
+    def _stop(self, proc):
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    def _env(self, te):
+        stub = te.root / "usage-stub.py"
+        argv_file = te.root / "usage-argv.txt"
+        write_usage_stub(stub, _FOLLOW_USAGE)
+        env = dict(te.env)
+        env["SSA_USAGE_PY"] = str(stub)
+        env["SSA_STUB_ARGV"] = str(argv_file)
+        return env
+
+    def _init(self, te, repo):
+        env = self._env(te)
+        rc, out, err = run_ssa(
+            "init",
+            "--repo",
+            str(repo),
+            "--size",
+            "small",
+            "--difficulty",
+            "routine",
+            "--kind",
+            "impl",
+            env=env,
+        )
+        self.assertEqual(rc, 0, err)
+        return env, find_only_task_dir(te.work_dir)
+
+    def _brief_file(self, te, text):
+        path = te.root / "follow-brief.md"
+        path.write_text(text)
+        return path
+
+    def _wt(self, task_dir):
+        return Path((task_dir / "wt.txt").read_text().strip())
+
+    def test_follow_up_reuses_the_worktree_and_writes_a_fresh_brief_with_the_diff(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            env, task_dir = self._init(te, repo)
+            wt = self._wt(task_dir)
+            base = (task_dir / "base-sha.txt").read_text().strip()
+            user_head = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+            ).strip()
+            (task_dir / "brief.md").write_text("old brief that must be replaced\n")
+            (wt / "README.md").write_text("fixture\nfollow-up edit\n")
+            (wt / "notes.txt").write_text("untracked note\n")
+            (task_dir / "worker.pid").write_text("999999\n")
+            brief = self._brief_file(
+                te,
+                "Do the follow-up.\n\n## Structural discovery\n"
+                "CGC-SKIP: fixture; route=none; evidence=follow-up\n",
+            )
+            rc, out, err = run_ssa(
+                "follow-up", "--dir", str(task_dir), "--brief", str(brief), env=env
+            )
+            self.assertEqual(rc, 0, err)
+            doc = json.loads(out)
+            self.assertEqual(doc["dir"], str(task_dir))
+            self.assertEqual(doc["worker"], "codex")
+            self.assertEqual(find_only_task_dir(te.work_dir), task_dir)
+            self.assertEqual(self._wt(task_dir), wt)
+            self.assertTrue(wt.is_dir())
+            branch = subprocess.check_output(
+                ["git", "-C", str(wt), "rev-parse", "--abbrev-ref", "HEAD"], text=True
+            ).strip()
+            task_id = (task_dir / "task-id.txt").read_text().strip()
+            self.assertEqual(branch, f"ssa/{task_id}")
+            head = subprocess.check_output(
+                ["git", "-C", str(wt), "rev-parse", "HEAD"], text=True
+            ).strip()
+            self.assertEqual(head, base)
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+                ).strip(),
+                user_head,
+            )
+            written = (task_dir / "brief.md").read_text()
+            self.assertIn("Do the follow-up.", written)
+            self.assertNotIn("old brief that must be replaced", written)
+            self.assertIn("follow-up edit", written)
+            self.assertIn("diff --git a/README.md", written)
+            self.assertIn("notes.txt", written)
+            self.assertIn("Untracked files:", written)
+            self.assertIn(
+                "follow-up edit", (wt / "README.md").read_text()
+            )
+            self.assertFalse((repo / "notes.txt").exists())
+
+    def test_follow_up_aborts_when_head_moved_and_leaves_the_worktree(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            env, task_dir = self._init(te, repo)
+            wt = self._wt(task_dir)
+            user_head = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+            ).strip()
+            (task_dir / "brief.md").write_text("previous brief stays\n")
+            (wt / "README.md").write_text("committed in the worktree\n")
+            subprocess.run(["git", "-C", str(wt), "add", "README.md"], check=True)
+            subprocess.run(
+                ["git", "-C", str(wt), "commit", "-qm", "worker edit"], check=True
+            )
+            moved = subprocess.check_output(
+                ["git", "-C", str(wt), "rev-parse", "HEAD"], text=True
+            ).strip()
+            brief = self._brief_file(te, "this brief must not land\n")
+            rc, out, err = run_ssa(
+                "follow-up", "--dir", str(task_dir), "--brief", str(brief), env=env
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn("HEAD moved since the task was minted", err)
+            self.assertEqual((task_dir / "brief.md").read_text(), "previous brief stays\n")
+            self.assertTrue(wt.is_dir())
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(wt), "rev-parse", "HEAD"], text=True
+                ).strip(),
+                moved,
+            )
+            task_id = (task_dir / "task-id.txt").read_text().strip()
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(wt), "rev-parse", "--abbrev-ref", "HEAD"],
+                    text=True,
+                ).strip(),
+                f"ssa/{task_id}",
+            )
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+                ).strip(),
+                user_head,
+            )
+            listed = subprocess.check_output(
+                ["git", "-C", str(repo), "worktree", "list"], text=True
+            )
+            self.assertIn(str(wt), listed)
+
+    def test_follow_up_refuses_a_missing_worktree(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            env, task_dir = self._init(te, repo)
+            real = self._wt(task_dir)
+            (task_dir / "brief.md").write_text("keep this brief\n")
+            (task_dir / "wt.txt").write_text(str(te.root / "gone-wt") + "\n")
+            brief = self._brief_file(te, "should not replace\n")
+            before = list(te.work_dir.iterdir())
+            rc, out, err = run_ssa(
+                "follow-up", "--dir", str(task_dir), "--brief", str(brief), env=env
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn("follow-up: missing worktree", err)
+            self.assertEqual((task_dir / "brief.md").read_text(), "keep this brief\n")
+            self.assertTrue(real.is_dir())
+            self.assertEqual(list(te.work_dir.iterdir()), before)
+            listed = subprocess.check_output(
+                ["git", "-C", str(repo), "worktree", "list"], text=True
+            )
+            self.assertIn(str(real), listed)
+
+    def test_follow_up_refuses_a_live_worker_pid_and_accepts_a_dead_one(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            env, task_dir = self._init(te, repo)
+            wt = self._wt(task_dir)
+            (task_dir / "brief.md").write_text("keep while the pid is alive\n")
+            proc = subprocess.Popen(["sleep", "120"])
+            self.addCleanup(lambda: self._stop(proc))
+            (task_dir / "worker.pid").write_text(f"{proc.pid}\n")
+            brief = self._brief_file(te, "must not land while the worker is alive\n")
+            rc, out, err = run_ssa(
+                "follow-up", "--dir", str(task_dir), "--brief", str(brief), env=env
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn(f"worker pid is alive ({proc.pid})", err)
+            self.assertIsNone(proc.poll())
+            self.assertEqual(
+                (task_dir / "brief.md").read_text(), "keep while the pid is alive\n"
+            )
+            self.assertTrue(wt.is_dir())
+            proc.kill()
+            proc.wait(timeout=5)
+            (wt / "README.md").write_text("fixture\nafter the pid died\n")
+            brief = self._brief_file(te, "the dead pid may be followed up\n")
+            rc, out, err = run_ssa(
+                "follow-up", "--dir", str(task_dir), "--brief", str(brief), env=env
+            )
+            self.assertEqual(rc, 0, err)
+            written = (task_dir / "brief.md").read_text()
+            self.assertIn("the dead pid may be followed up", written)
+            self.assertIn("after the pid died", written)
+            self.assertEqual(self._wt(task_dir), wt)
+
+    def test_follow_up_fails_closed_when_the_mint_sha_is_empty(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            env, task_dir = self._init(te, repo)
+            (task_dir / "brief.md").write_text("untouched\n")
+            (task_dir / "base-sha.txt").write_text("\n")
+            brief = self._brief_file(te, "no\n")
+            rc, out, err = run_ssa(
+                "follow-up", "--dir", str(task_dir), "--brief", str(brief), env=env
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn("HEAD moved since the task was minted", err)
+            self.assertIn("missing", err)
+            self.assertEqual((task_dir / "brief.md").read_text(), "untouched\n")
+
+    def test_prefer_rebinds_the_worker_on_the_same_worktree(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            env, task_dir = self._init(te, repo)
+            wt = self._wt(task_dir)
+            brief = self._brief_file(te, "prefer grok for this pass\n")
+            rc, out, err = run_ssa(
+                "follow-up",
+                "--dir",
+                str(task_dir),
+                "--brief",
+                str(brief),
+                "--prefer",
+                "grok",
+                env=env,
+            )
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(json.loads(out)["worker"], "grok")
+            self.assertEqual((task_dir / "worker.txt").read_text().strip(), "grok")
+            self.assertEqual(self._wt(task_dir), wt)
+
+    def test_init_still_isolates_a_dirty_user_checkout(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            (repo / "local-only.txt").write_text("not for the worker\n")
+            env, task_dir = self._init(te, repo)
+            wt = self._wt(task_dir)
+            self.assertFalse((wt / "local-only.txt").exists())
+            self.assertEqual((repo / "local-only.txt").read_text(), "not for the worker\n")
+            user_branch = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
+                text=True,
+            ).strip()
+            task_id = (task_dir / "task-id.txt").read_text().strip()
+            self.assertNotEqual(user_branch, f"ssa/{task_id}")
+            self.assertIn("local-only.txt", (task_dir / "repo-status.txt").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
