@@ -520,6 +520,33 @@ class PlanTests(unittest.TestCase):
 
 
 class VerifyTests(unittest.TestCase):
+    def test_verify_directory_prefix_scope_matches_descendants(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (task_dir / "scope.txt").write_text("src/projects/litter/\n")
+            nested = repo / "src" / "projects" / "litter" / "cover.py"
+            nested.parent.mkdir(parents=True)
+            nested.write_text("x\n")
+            subprocess.run(["git", "add", "src/projects/litter/cover.py"], cwd=repo, check=True)
+            (task_dir / "verify-cmds.txt").write_text("true\n")
+            (task_dir / "baseline-results.txt").write_text("0\ttrue\n")
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err)
+            doc = json.loads((task_dir / "outcome.json").read_text())
+            self.assertIs(doc["verify"]["scope_ok"], True)
+            self.assertEqual(doc["verify"]["verdict"], "pass")
+
+            outside = repo / "src" / "projects" / "other" / "yaw.py"
+            outside.parent.mkdir(parents=True)
+            outside.write_text("y\n")
+            subprocess.run(["git", "add", "src/projects/other/yaw.py"], cwd=repo, check=True)
+            rc, out, err = run_ssa("verify", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 1, err)
+            doc = json.loads((task_dir / "outcome.json").read_text())
+            self.assertIs(doc["verify"]["scope_ok"], False)
+            self.assertEqual(doc["verify"]["verdict"], "fail")
+
     def test_verify_untracked_out_of_scope_fails(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
