@@ -29,6 +29,11 @@ already written could not be corrected.
   rejected row and leaves other tasks' rows alone; it is refused when
   gitleaks failed or never ran.
 
+- A `scope.txt` entry with a trailing slash is a directory prefix: every
+  descendant of that directory is in scope. `fnmatch` alone treated
+  `src/projects/litter/` as a literal and reported `src/projects/litter/cover.py`
+  out of scope. Ported from `ssa/bind-worker-args-on-dispatch`, the one change
+  on that branch main did not already carry.
 - A worker with `shared_account: true` is ineligible for every size and
   difficulty once remaining on a binding window is under 40%.
   `SSA_SHARED_RESERVE_PCT` can raise that floor and cannot lower it. The flag

@@ -3103,11 +3103,16 @@ changed = []
 if changed_path.exists():
     blob = changed_path.read_bytes().decode("utf-8", "replace")
     changed = [p for p in blob.split("\0") if p]
+def scope_matches(path, pattern):
+    if pattern.endswith("/"):
+        return path == pattern.rstrip("/") or path.startswith(pattern)
+    return fnmatch.fnmatch(path, pattern)
+
 if scope_file.exists():
     globs = [g.strip() for g in scope_file.read_text().splitlines() if g.strip()]
     scope_ok = True
     for path in changed:
-        if not any(fnmatch.fnmatch(path, g) for g in globs):
+        if not any(scope_matches(path, g) for g in globs):
             scope_ok = False
             out_of_scope.append(path)
 if out_of_scope:
