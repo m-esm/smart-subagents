@@ -1319,6 +1319,95 @@ class RecordTests(unittest.TestCase):
             self.assertEqual(record["outcome"], "partial")
             self.assertIs(record["verification_passed"], False)
 
+    def write_entropy_only_failure(self, task_dir, gitleaks="ran", extra_finding=None):
+        (task_dir / "exit-code.txt").write_text("0\n")
+        (task_dir / "outcome.json").write_text(json.dumps({
+            "schema_version": 1,
+            "verify": {
+                "verdict": "fail",
+                "new_failures": 0,
+                "scope_ok": True,
+                "secrets_ok": False,
+                "gitleaks": gitleaks,
+                "changed_files": 2,
+                "worker_exit": 0,
+            },
+        }) + "\n")
+        findings = "high-entropy-token: import \"github.com/m-es********\"\n"
+        if extra_finding:
+            findings += extra_finding + "\n"
+        (task_dir / "verify-secrets.txt").write_text(findings)
+
+    def test_record_verified_pass_overrides_an_entropy_only_failure_and_replaces_the_rejected_row(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo, kind="impl")
+            self.write_entropy_only_failure(task_dir)
+            ledger_path = te.state_dir / "outcomes.jsonl"
+            rc, out, err = run_ssa(
+                "record", "--dir", str(task_dir), "--outcome", "rejected", env=te.env
+            )
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(len(ledger_path.read_text().strip().splitlines()), 1)
+
+            rc, out, err = run_ssa(
+                "record", "--dir", str(task_dir), "--outcome", "verified-pass", env=te.env
+            )
+            self.assertEqual(rc, 0, err + out)
+            self.assertIn("overridden", err)
+            self.assertIn("replaced 1 rejected row", out)
+            rows = [json.loads(l) for l in ledger_path.read_text().strip().splitlines()]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["outcome"], "verified-pass")
+            self.assertIs(rows[0]["verification_passed"], True)
+            self.assertEqual(rows[0]["verify_override"], "entropy-only")
+            self.assertEqual(oct(ledger_path.stat().st_mode & 0o777), oct(0o600))
+
+    def test_record_override_leaves_other_tasks_rows_alone(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            other = make_task_dir(te.work_dir, repo)
+            (other / "exit-code.txt").write_text("1\n")
+            write_outcome(other, "fail")
+            rc, out, err = run_ssa("record", "--dir", str(other), "--outcome", "rejected", env=te.env)
+            self.assertEqual(rc, 0, err)
+            task_dir = make_task_dir(te.work_dir, repo)
+            self.write_entropy_only_failure(task_dir)
+            rc, out, err = run_ssa("record", "--dir", str(task_dir), "--outcome", "rejected", env=te.env)
+            self.assertEqual(rc, 0, err)
+            rc, out, err = run_ssa(
+                "record", "--dir", str(task_dir), "--outcome", "verified-pass", env=te.env
+            )
+            self.assertEqual(rc, 0, err + out)
+            rows = [json.loads(l) for l in (te.state_dir / "outcomes.jsonl").read_text().strip().splitlines()]
+            self.assertEqual([r["outcome"] for r in rows], ["rejected", "verified-pass"])
+            self.assertEqual(rows[0]["task_id"], other.name)
+
+    def test_record_verified_pass_still_refused_when_gitleaks_failed(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            self.write_entropy_only_failure(
+                task_dir, extra_finding="gitleaks-generic-api-key: AKIA************"
+            )
+            rc, out, err = run_ssa(
+                "record", "--dir", str(task_dir), "--outcome", "verified-pass", env=te.env
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn("verdict=fail", err)
+            self.assertFalse((te.state_dir / "outcomes.jsonl").exists())
+
+    def test_record_verified_pass_still_refused_when_gitleaks_never_ran(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            self.write_entropy_only_failure(task_dir, gitleaks="absent")
+            rc, out, err = run_ssa(
+                "record", "--dir", str(task_dir), "--outcome", "verified-pass", env=te.env
+            )
+            self.assertNotEqual(rc, 0)
+            self.assertIn("verdict=fail", err)
+
     def test_record_verified_pass_refuses_an_impl_task_whose_verify_saw_no_change(self):
         with temp_env() as te:
             repo = make_git_repo(te.root / "repo")
@@ -2337,6 +2426,63 @@ class SecretScanTests(unittest.TestCase):
             findings = (task_dir / "verify-secrets.txt").read_text()
             self.assertIn("high-entropy-token", findings)
             self.assertNotIn(token, findings)
+
+    GO_IMPORT = "github.com/m-esm/second-brain/voice/internal/session/claude"
+    GO_TEST_FUNC = "func TestSummaryWhoseSegmentsWereAllTakenDeliversNoTurn(t *testing.T) {\n"
+    GO_SUM_LINE = (
+        "github.com/m-esm/second-brain v0.3.1 "
+        "h1:Zb0f1pY3Cm8Hq3u0b2hBqlc5jY7w1e8tP2v0ZQ4rH3s=\n"
+    )
+
+    def assert_scans_clean(self, files):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            for name, body in files.items():
+                (repo / name).parent.mkdir(parents=True, exist_ok=True)
+                (repo / name).write_text(body)
+            rc, out, err = run_ssa("scan-secrets", "--dir", str(task_dir), env=te.env)
+            self.assertEqual(rc, 0, err + out)
+            self.assertFalse((task_dir / "verify-secrets.txt").read_text().strip())
+
+    def test_go_module_import_path_is_not_a_high_entropy_secret(self):
+        self.assert_scans_clean({
+            "voice/main.go": 'import "%s"\n' % self.GO_IMPORT,
+            "voice/go.mod": "require %s v0.0.1\n" % self.GO_IMPORT,
+        })
+
+    def test_go_sum_hashes_are_not_high_entropy_secrets(self):
+        self.assert_scans_clean({"voice/go.sum": self.GO_SUM_LINE})
+
+    def test_go_test_identifier_is_not_a_high_entropy_secret(self):
+        self.assert_scans_clean({
+            "voice/session_test.go": self.GO_TEST_FUNC,
+            "voice/session.go": "var SummaryWhoseSegmentsWereAllTakenDeliversNoTurn = 1\n",
+        })
+
+    def test_hex_token_beside_a_go_test_name_still_trips_entropy(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (repo / "leak_test.go").write_text(
+                'func TestLeak(t *testing.T) { k := "%s" }\n' % self.HEX40
+            )
+            rc, out, err = run_ssa("scan-secrets", "--dir", str(task_dir), env=te.env)
+            self.assertNotEqual(rc, 0, "hex token after a Go test name passed the scan")
+            findings = (task_dir / "verify-secrets.txt").read_text()
+            self.assertIn("high-entropy-token", findings)
+            self.assertNotIn(self.HEX40, findings)
+
+    def test_openai_key_inside_go_sum_still_trips(self):
+        with temp_env() as te:
+            repo = make_git_repo(te.root / "repo")
+            task_dir = make_task_dir(te.work_dir, repo)
+            (repo / "go.sum").write_text(
+                "github.com/x/y v1.0.0 h1:sk-proj-Ab3dEf9GhIjK1mNoPqRsTuVwXyZ01234\n"
+            )
+            rc, out, err = run_ssa("scan-secrets", "--dir", str(task_dir), env=te.env)
+            self.assertNotEqual(rc, 0)
+            self.assertIn("openai-key", (task_dir / "verify-secrets.txt").read_text())
 
     def test_verify_records_whether_gitleaks_ran(self):
         with temp_env() as te:
