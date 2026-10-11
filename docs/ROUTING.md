@@ -85,6 +85,16 @@ what happens next: `trivial` and `routine` relax the floor and keep the best
 eligible worker anyway (`floor_relaxed: true` in the recommendation), while
 `hard` and `frontier` return no primary worker and refuse to dispatch on fumes.
 
+A worker whose registry entry sets `shared_account` to true has one more
+filter, and that filter is not relaxed. Raw remaining on any binding window
+under `max(40, SSA_SHARED_RESERVE_PCT)` makes the worker ineligible at every
+size and difficulty. The check reads remaining percent, not `effective_score`,
+so a short window that resets in minutes still counts as low when the percent
+left is under the floor. A worker that stays eligible keeps its
+`effective_score`, including that short-window discount. The flag defaults
+off. A personal account is unchanged, and a personal account at 0% remaining
+stays ineligible. `SSA_SHARED_RESERVE_PCT` can only raise the floor.
+
 Ranking is a separate step, and what it sorts by depends on difficulty:
 
 | Difficulty | `rank_basis` | Sorts by | Tie-break | Reason |

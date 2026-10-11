@@ -258,6 +258,7 @@ it checks offline whether a dispatch could run at all here.
 | `pick --size SIZE [--difficulty L] [--kind K]` | print the primary worker name on stdout, the full recommendation JSON on stderr |
 | `ls [--all] [--state S]` (alias `list`) | one line per task and planning panel: age, repo, worker, size/difficulty/kind, inferred phase, recorded state, diff size. The 20 most recent plus everything still in flight; `--all` prints the rest |
 | `status --dir DIR` | one task in full: base sha, branch, exit code, session or `resume=unavailable`, worker pid state, recorded state and event count, verify verdict, and a bounded log digest (counts, last few events clipped, final message clipped). Never raw log lines |
+| `follow-up --dir DIR --brief FILE [--prefer CLI]` | attach a fresh brief, including the current diff, to that task's worktree. Refuses a missing worktree, a live worker pid, or a HEAD that moved since the task was minted. Does not merge, push, or delete the worktree |
 | `tail --dir DIR [--raw]` | follow the worker's `stdout.log` as one short line per event; `--raw` is the unfiltered NDJSON firehose (100 KB lines), redirect it to a file |
 | `stop --dir DIR` | TERM then KILL the worker's process group, refusing when the pid now belongs to someone else |
 | `verify --dir DIR` | run the verify commands against the baseline, check scope and secrets, write `outcome.json` and the ledger row; exit 0 pass, 1 fail, empty-diff or worker-exit, 2 inconclusive, 3 env-blocked. Running it again after the detached run's own verify supersedes that row |
@@ -375,6 +376,7 @@ agent runs this loop for you.
 | `SSA_ALLOW_KIMI_WRITE` | unset | Legacy alias for `SSA_ALLOW_UNSANDBOXED_WRITE` |
 | `SSA_PREMIUM_MODELS` | `Fable,Opus` | Claude's usage API reports weekly caps scoped to individual models by display name. These are the ones that flip `local_labor_ok` false near their cap, so the supervisor stops doing labor in-session while cheaper models are still fine. Set it to whatever your plan's premium tier is actually called |
 | `SSA_SHORT_HORIZON_HOURS` | `4` | Reset horizon over which a short window's spent quota stops counting against it |
+| `SSA_SHARED_RESERVE_PCT` | `40` | Remaining-percent floor for a worker whose registry entry sets `shared_account`. A lower value is raised to 40. Personal accounts ignore it |
 | `SSA_FIT_HALFLIFE_DAYS` | `30` | Half-life on ledger evidence feeding the learned fit posterior |
 | `SSA_FIT_MIN_SAMPLES` | `10` | Effective observations before a posterior ranks instead of the prior |
 | `SSA_STALL_SECS` | `600` | Watchdog patience before it kills a silent background worker |
@@ -408,6 +410,18 @@ and stdlib-only: no network, no credentials, no worker CLI runs. `tests/fixtures
 provider payloads for each probe's pure `parse_*_usage` half, plus fake worker binaries whose argv
 `test_shell.py` asserts exactly. That assertion is the adapter contract: update it on purpose.
 
+The supervisor prompt in `agents/smart-subagents.md` is loaded on every turn of every supervisor
+run, so it carries only what every run needs; rarely needed material (verdict tables, capability
+rules, the planning lenses, iteration budgets) lives in
+[docs/SUPERVISOR-REFERENCE.md](docs/SUPERVISOR-REFERENCE.md), and the prompt names the one
+section to `sed` out when a situation calls for it. The supervisor runs on `sonnet`: its job is
+reading JSON, writing the brief from the spec the parent passed, waiting and verifying.
+`python3 scripts/ssa-token-audit.py --days 30` measures what that costs from the Claude Code
+transcripts under `~/.claude/projects`: per-type subagent totals, the supervisor runs' first-turn
+prefix, the instruction files injected per turn, poll turns, and the bytes each `smart-subagents.sh`
+subcommand returned. A 2026-10 audit found 78 turns per run at a median 80k-token prefix, with
+subcommand output at about 1 KB per call, which is what the `run` and `wait` commands exist to cut.
+
 ## Privacy
 
 Credentials are read locally to call each provider's usage endpoint. No token is ever printed,
@@ -437,7 +451,8 @@ account identifier.
 - **Difficulty picks effort, not models.** It selects a model only where the registry carries a rule.
   Claude always pins `--model fable`. Kimi may switch to a faster alias. Codex/Grok model names are
   account-scoped and this repo will not invent them.
-- **No conversation transfer.** Cross-CLI handoff starts from a fresh brief plus the current diff,
+- **No conversation transfer.** `follow-up` reuses the task worktree, so the files carry over.
+  The new brief is fresh and includes the current diff. The other CLI's conversation still does not,
   because no CLI here can import another's session.
 
 ## License

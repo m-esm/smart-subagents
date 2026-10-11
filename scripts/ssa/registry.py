@@ -351,6 +351,11 @@ class WorkerSpec:
 
         self.default_for = self._default_for(where, block)
 
+        raw_shared = block.get("shared_account", False)
+        if not isinstance(raw_shared, bool):
+            raise _fail(where, "shared_account is not a bool")
+        self.shared_account = raw_shared
+
         fit = block.get("fit") or {}
         if not isinstance(fit, dict):
             raise _fail(where, "fit is not an object")
@@ -564,6 +569,7 @@ class WorkerSpec:
             "effort_ladder": list(self.effort_ladder),
             "fit": dict(self.fit),
             "default_for": dict(self.default_for) if self.default_for else None,
+            "shared_account": self.shared_account,
         }
 
 

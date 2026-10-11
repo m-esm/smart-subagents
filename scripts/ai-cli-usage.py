@@ -233,6 +233,7 @@ def _env_int(name: str, default: int) -> int:
 # ---------------------------------------------------------------------------
 
 SHORT_WINDOW_MAX_SECONDS = 6 * 3600
+SHARED_RESERVE_MIN_PCT = 40.0
 
 
 def _pace_pct(w: Window) -> Optional[float]:
@@ -317,6 +318,47 @@ def eff_of(st: CliStatus) -> float:
 def adm_of(st: CliStatus) -> float:
     """Admissible capacity, falling back to raw score when nothing was computed."""
     return float(st.admission_score if st.admission_score is not None else st.score)
+
+
+def shared_reserve_pct() -> float:
+    raw = os.environ.get("SSA_SHARED_RESERVE_PCT")
+    if raw is None or not str(raw).strip():
+        return SHARED_RESERVE_MIN_PCT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return SHARED_RESERVE_MIN_PCT
+    if value != value or value in (float("inf"), float("-inf")):
+        return SHARED_RESERVE_MIN_PCT
+    if value < SHARED_RESERVE_MIN_PCT:
+        return SHARED_RESERVE_MIN_PCT
+    return value
+
+
+def window_remaining_pct(w: Window) -> Optional[float]:
+    if w.remaining_pct is not None:
+        return float(w.remaining_pct)
+    if w.used_pct is not None:
+        return 100.0 - float(w.used_pct)
+    return None
+
+
+def apply_shared_reserve(st: CliStatus, shared_account: bool) -> bool:
+    if not shared_account:
+        return False
+    floor = shared_reserve_pct()
+    for w in binding_windows(st):
+        remaining = window_remaining_pct(w)
+        if remaining is None or remaining >= floor:
+            continue
+        st.eligible = False
+        if not st.skip_reason:
+            st.skip_reason = (
+                "shared account reserve (%.4g%% remaining on %s, floor %.4g%%)"
+                % (remaining, w.name, floor)
+            )
+        return True
+    return False
 
 
 def _http_json(
@@ -2094,6 +2136,13 @@ def recommend(
             entry["reason"],
             entry["minutes_left"],
         )
+
+    for name in WORKER_CLIS:
+        s = by.get(name)
+        if s is None:
+            continue
+        spec = REGISTRY.workers.get(name)
+        apply_shared_reserve(s, spec.shared_account if spec is not None else False)
 
     # Learned fit is computed for every worker, whether or not it gets promoted.
     ledger_rows, ledger_skipped = read_ledger()
