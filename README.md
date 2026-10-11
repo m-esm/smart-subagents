@@ -410,6 +410,18 @@ and stdlib-only: no network, no credentials, no worker CLI runs. `tests/fixtures
 provider payloads for each probe's pure `parse_*_usage` half, plus fake worker binaries whose argv
 `test_shell.py` asserts exactly. That assertion is the adapter contract: update it on purpose.
 
+The supervisor prompt in `agents/smart-subagents.md` is loaded on every turn of every supervisor
+run, so it carries only what every run needs; rarely needed material (verdict tables, capability
+rules, the planning lenses, iteration budgets) lives in
+[docs/SUPERVISOR-REFERENCE.md](docs/SUPERVISOR-REFERENCE.md), and the prompt names the one
+section to `sed` out when a situation calls for it. The supervisor runs on `sonnet`: its job is
+reading JSON, writing the brief from the spec the parent passed, waiting and verifying.
+`python3 scripts/ssa-token-audit.py --days 30` measures what that costs from the Claude Code
+transcripts under `~/.claude/projects`: per-type subagent totals, the supervisor runs' first-turn
+prefix, the instruction files injected per turn, poll turns, and the bytes each `smart-subagents.sh`
+subcommand returned. A 2026-10 audit found 78 turns per run at a median 80k-token prefix, with
+subcommand output at about 1 KB per call, which is what the `run` and `wait` commands exist to cut.
+
 ## Privacy
 
 Credentials are read locally to call each provider's usage endpoint. No token is ever printed,
