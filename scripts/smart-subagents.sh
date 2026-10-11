@@ -1846,6 +1846,217 @@ PY
   fi
 }
 
+cmd_baseline() {
+  local dir=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dir="${2:-}"; shift 2 ;;
+      *) die "baseline: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$dir" && -d "$dir" ]] || die "baseline: --dir required"
+  [[ -f "$dir/verify-cmds.txt" ]] || die "baseline: missing $dir/verify-cmds.txt"
+  local wt
+  wt="$(_read1 "$dir/wt.txt")"
+  [[ -n "$wt" && -d "$wt" ]] || die "baseline: missing worktree ($dir/wt.txt)"
+  local log="$dir/baseline.log" results="$dir/baseline-results.txt" cmd rc=0
+  : >"$log"
+  : >"$results"
+  while IFS= read -r cmd || [[ -n "$cmd" ]]; do
+    [[ -n "$cmd" ]] || continue
+    case "$cmd" in \#*) continue ;; esac
+    rc=0
+    ( cd "$wt" && eval "$cmd" ) >>"$log" 2>&1 || rc=$?
+    printf '%s\t%s\n' "$rc" "$cmd" >>"$results"
+    printf 'baseline: exit=%s  %s\n' "$rc" "$cmd"
+  done <"$dir/verify-cmds.txt"
+  return 0
+}
+
+_wait_reached() {
+  local target="$1" state="$2"
+  case "$target" in
+    exited) case "$state" in exited|verified|failed|inconclusive|reported) return 0 ;; esac ;;
+    verified) case "$state" in verified|failed|inconclusive|reported) return 0 ;; esac ;;
+    recorded) case "$state" in reported) return 0 ;; esac ;;
+  esac
+  return 1
+}
+
+cmd_wait() {
+  local dir="" target="verified" timeout=590 interval=5
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir) dir="${2:-}"; shift 2 ;;
+      --for) target="${2:-}"; shift 2 ;;
+      --timeout) timeout="${2:-}"; shift 2 ;;
+      --interval) interval="${2:-}"; shift 2 ;;
+      *) die "wait: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$dir" && -d "$dir" ]] || die "wait: --dir required"
+  case "$target" in
+    exited|verified|recorded) ;;
+    *) die "wait: --for must be exited, verified or recorded" ;;
+  esac
+  [[ "$timeout" =~ ^[0-9]+$ ]] || die "wait: --timeout takes a whole number of seconds"
+  [[ "$interval" =~ ^[0-9]+$ ]] || die "wait: --interval takes a whole number of seconds"
+  (( interval > 0 )) || interval=1
+  [[ -f "$dir/task.json" ]] || die "wait: no task.json in $dir (nothing to wait on)"
+  local start now state wstate rc=0
+  start="$(_now)"
+  while :; do
+    state="$(_task_state "$dir")"
+    wstate="$(_worker_state "$dir")"
+    case "$state" in
+      aborted|stalled) rc=1; break ;;
+    esac
+    case "$wstate" in
+      stopped|stalled) rc=1; break ;;
+    esac
+    if _wait_reached "$target" "$state"; then rc=0; break; fi
+    now="$(_now)"
+    if (( now - start >= timeout )); then rc=124; break; fi
+    sleep "$interval"
+  done
+  printf 'wait: state=%s phase=%s after=%s\n' "$state" "$(_task_phase "$dir")" \
+    "$(_age_human $(( $(_now) - $(_mtime "$dir") )) )"
+  if [[ "$rc" == 124 ]]; then
+    printf 'wait: timeout after %ss; resume: bash "%s" wait --dir "%s" --for %s --timeout %s --interval %s\n' \
+      "$timeout" "$SSA_SELF" "$dir" "$target" "$timeout" "$interval"
+  fi
+  cmd_status --dir "$dir" || true
+  return "$rc"
+}
+
+cmd_run() {
+  local repo="" brief="" size="" difficulty="" kind="" preferred=""
+  local timeout=590 no_wait="" allow_large=""
+  local size_set=0 difficulty_set=0 kind_set=0
+  local verify_cmds=() scope_globs=() verify_cmds_file="" scope_file="" line=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --repo) repo="${2:-}"; shift 2 ;;
+      --brief) brief="${2:-}"; shift 2 ;;
+      --size) size="${2:-}"; size_set=1; shift 2 ;;
+      --difficulty) difficulty="${2:-}"; difficulty_set=1; shift 2 ;;
+      --kind) kind="${2:-}"; kind_set=1; shift 2 ;;
+      --prefer) preferred="${2:-}"; shift 2 ;;
+      --verify-cmd) verify_cmds+=("${2:-}"); shift 2 ;;
+      --verify-cmds-file) verify_cmds_file="${2:-}"; shift 2 ;;
+      --scope) scope_globs+=("${2:-}"); shift 2 ;;
+      --scope-file) scope_file="${2:-}"; shift 2 ;;
+      --timeout) timeout="${2:-}"; shift 2 ;;
+      --no-wait) no_wait=1; shift ;;
+      --allow-large) allow_large=1; shift ;;
+      *) die "run: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$repo" ]] || die "run: --repo required"
+  [[ -d "$repo" ]] || die "run: repo not a directory: $repo"
+  [[ -n "$brief" ]] || die "run: --brief required"
+  [[ -f "$brief" ]] || die "run: --brief not a file: $brief"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || die "run: --timeout takes a whole number of seconds"
+  if [[ -n "$verify_cmds_file" ]]; then
+    [[ -f "$verify_cmds_file" ]] || die "run: --verify-cmds-file not a file: $verify_cmds_file"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      verify_cmds+=("$line")
+    done <"$verify_cmds_file"
+  fi
+  if [[ -n "$scope_file" ]]; then
+    [[ -f "$scope_file" ]] || die "run: --scope-file not a file: $scope_file"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      scope_globs+=("$line")
+    done <"$scope_file"
+  fi
+  local c n_cmds=0
+  for c in ${verify_cmds[@]+"${verify_cmds[@]}"}; do
+    [[ -n "$c" ]] || continue
+    case "$c" in \#*) continue ;; esac
+    n_cmds=$(( n_cmds + 1 ))
+  done
+  (( n_cmds > 0 )) || die "run: at least one --verify-cmd or --verify-cmds-file line is required"
+
+  local init_args=(--repo "$repo" --brief "$brief") init_out dir worker wt
+  (( size_set == 1 )) && init_args+=(--size "$size")
+  (( difficulty_set == 1 )) && init_args+=(--difficulty "$difficulty")
+  (( kind_set == 1 )) && init_args+=(--kind "$kind")
+  [[ -n "$preferred" ]] && init_args+=(--prefer "$preferred")
+  [[ -n "$allow_large" ]] && init_args+=(--allow-large)
+  init_out="$(cmd_init "${init_args[@]}")"
+  dir="$(printf '%s' "$init_out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("dir", ""))')" \
+    || die "run: cannot read the task dir from init output"
+  [[ -n "$dir" && -d "$dir" ]] || die "run: init produced no task dir"
+  worker="$(_read1 "$dir/worker.txt")"
+  [[ -n "$worker" ]] || die "run: init picked no worker for $dir"
+  wt="$(_read1 "$dir/wt.txt")"
+  printf 'run: init dir=%s worker=%s\n' "$dir" "$worker"
+
+  python3 - "$brief" "$dir/brief.md" "$wt" <<'PY'
+import sys
+from pathlib import Path
+src, dst, wt = sys.argv[1], sys.argv[2], sys.argv[3]
+Path(dst).write_text(Path(src).read_text(errors="replace").replace("{WT}", wt))
+PY
+  printf 'run: brief -> %s/brief.md (wt=%s)\n' "$dir" "$wt"
+
+  : >"$dir/verify-cmds.txt"
+  for c in ${verify_cmds[@]+"${verify_cmds[@]}"}; do
+    printf '%s\n' "$c" >>"$dir/verify-cmds.txt"
+  done
+  if (( ${#scope_globs[@]} > 0 )); then
+    : >"$dir/scope.txt"
+    local g
+    for g in ${scope_globs[@]+"${scope_globs[@]}"}; do
+      printf '%s\n' "$g" >>"$dir/scope.txt"
+    done
+  fi
+  printf 'run: verify-cmds=%s scope=%s\n' "$n_cmds" "${#scope_globs[@]}"
+
+  cmd_baseline --dir "$dir"
+
+  local drc=0
+  cmd_dispatch --dir "$dir" --worker "$worker" --background || drc=$?
+  if [[ "$drc" != 0 ]]; then
+    printf 'run: dispatch failed rc=%s dir=%s\n' "$drc" "$dir"
+    return "$drc"
+  fi
+
+  local waited=0 rstate=""
+  while (( waited < 100 )); do
+    rstate="$(_task_state "$dir")"
+    case "$rstate" in
+      running|exited|verified|failed|inconclusive|reported|aborted|stalled) break ;;
+    esac
+    sleep 0.1
+    waited=$(( waited + 1 ))
+  done
+
+  if [[ -n "$no_wait" ]]; then
+    printf 'run: dir=%s\n' "$dir"
+    return 0
+  fi
+
+  local wrc=0
+  cmd_wait --dir "$dir" --for verified --timeout "$timeout" || wrc=$?
+  if [[ "$wrc" == 124 ]]; then
+    printf 'run: dir=%s\n' "$dir"
+    return 124
+  fi
+
+  local verdict="" rc=1
+  verdict="$(_outcome_field "$dir" verdict)"
+  case "$verdict" in
+    pass) rc=0 ;;
+    fail|empty-diff|worker-exit) rc=1 ;;
+    inconclusive) rc=2 ;;
+    env-blocked) rc=3 ;;
+    *) rc=1 ;;
+  esac
+  printf 'run: verdict=%s dir=%s\n' "${verdict:-none}" "$dir"
+  return "$rc"
+}
+
 # --- plan: parallel planning panel -------------------------------------------
 # Fans a goal out to N planners with deliberately different lenses, spread
 # across whichever CLIs have quota, and collects their plans for a supervisor
@@ -3817,6 +4028,38 @@ Usage: smart-subagents.sh <command> [options]
       changed verdict appends a superseding row, an identical one appends
       nothing.
 
+  baseline --dir DIR
+      Run every command in DIR/verify-cmds.txt in the worktree named by
+      DIR/wt.txt, appending each command's output to DIR/baseline.log and
+      writing exit<TAB>command to DIR/baseline-results.txt. Prints one line per
+      command: baseline: exit=N  <command>. Exit 0 when it ran, whatever the
+      commands returned; dies when either the command list or the worktree is
+      missing.
+
+  wait --dir DIR [--for exited|verified|recorded] [--timeout SECS]
+       [--interval SECS]
+      Block until the recorded state reaches the target or a terminal bad
+      state. --for verified (the default) stops at verified, failed,
+      inconclusive or reported; --for exited also stops at exited; --for
+      recorded stops only at reported. aborted, stalled, or a worker state of
+      stopped or stalled ends the wait with exit 1. --timeout defaults to 590
+      (exit 124, printing the wait command to resume) and --interval to 5. On
+      return it prints wait: state=... phase=... after=... then the status
+      block; the exit code says why it returned.
+
+  run --repo PATH --brief FILE [--size S] [--difficulty D] [--kind K]
+      [--prefer CLI] [--verify-cmd CMD]... [--verify-cmds-file FILE]
+      [--scope GLOB]... [--scope-file FILE] [--timeout SECS] [--no-wait]
+      [--allow-large]
+      One task in one call: init, copy the brief into DIR/brief.md substituting
+      {WT} with the resolved worktree path, write DIR/verify-cmds.txt and
+      DIR/scope.txt, run baseline, dispatch the picked worker in the
+      background, then wait for verified. At least one verify command is
+      required. Exits with the verify rc (0 pass, 1 fail, empty-diff or
+      worker-exit, 2 inconclusive, 3 env-blocked), or 124 when the wait timed
+      out. The last line names DIR. It never calls record: the outcome label is
+      the supervisor's judgment.
+
   cooldown --cli CLI [--clear] [--reason rate-limit|auth] [--minutes N]
       Bench a worker for every task until the cooldown expires. dispatch sets
       one by itself when a failed run's log shows a rate limit or an auth
@@ -3958,11 +4201,14 @@ main() {
   local cmd="${1:-help}"
   shift || true
   case "$cmd" in
-    init|dispatch|plan|doctor|follow-up) _ssa_warn_if_behind_superproject ;;
+    init|dispatch|plan|doctor|follow-up|run) _ssa_warn_if_behind_superproject ;;
   esac
   case "$cmd" in
     init) cmd_init "$@" ;;
     follow-up) cmd_follow_up "$@" ;;
+    baseline) cmd_baseline "$@" ;;
+    wait) cmd_wait "$@" ;;
+    run) cmd_run "$@" ;;
     pick) cmd_pick "$@" ;;
     dispatch) cmd_dispatch "$@" ;;
     bg-run) cmd_bg_run "$@" ;;

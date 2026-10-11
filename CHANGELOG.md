@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.7
+
+- `baseline --dir DIR` runs every line of `DIR/verify-cmds.txt` in the
+  worktree named by `DIR/wt.txt`, appends each command's output to
+  `DIR/baseline.log` and writes `exit<TAB>command` to
+  `DIR/baseline-results.txt`. It prints `baseline: exit=N  <command>` per
+  command and exits 0 when it ran, whatever the commands returned. This is the
+  loop supervisors were hand-rolling, one call instead of one per command.
+- `wait --dir DIR [--for exited|verified|recorded] [--timeout SECS]
+  [--interval SECS]` blocks until the recorded state reaches the target
+  (`--for verified` by default) or a terminal bad state: 0 reached, 1 on
+  `aborted`, `stalled`, or a stopped or stalled worker, 124 on timeout, which
+  also prints the `wait` command to resume. It replaces the ad-hoc `sleep`
+  polling loop and prints the `status` block so a poll is one call.
+- `run --repo PATH --brief FILE` chains init, the brief copy (substituting
+  `{WT}` with the resolved worktree path), `verify-cmds.txt` and `scope.txt`,
+  `baseline`, a background dispatch and a wait in a single call, printing one
+  line per step. It exits with the verify rc (0 pass, 1 fail, empty-diff or
+  worker-exit, 2 inconclusive, 3 env-blocked) or 124 when the wait timed out,
+  and never calls `record`.
+
 ## 0.4.6
 
 Three dispatches on 2026-10-06 (1791301186-34551, 1791304558-67106,
