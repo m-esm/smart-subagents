@@ -151,6 +151,20 @@ The background watchdog samples the log size and a worktree fingerprint every
 (`SSA_STALL_SECS`), writing `$DIR/stalled.txt`. `SSA_DEADLINE_SECS` adds a
 hard ceiling, off by default.
 
+## Baseline
+
+Record how each verify command behaves on the untouched worktree before the
+worker runs, so a pre-existing failure is never charged to the worker. `run`
+and `baseline --dir DIR` do this; by hand it is:
+
+```bash
+: >"$DIR/baseline-results.txt"
+while IFS= read -r cmd; do
+  ( cd "$WT" && eval "$cmd" ) >>"$DIR/baseline.log" 2>&1 && rc=0 || rc=$?
+  printf '%s\t%s\n' "$rc" "$cmd" >>"$DIR/baseline-results.txt"
+done <"$DIR/verify-cmds.txt"
+```
+
 ## Verify verdicts
 
 `verify` runs every line of `$DIR/verify-cmds.txt` in the worktree, compares

@@ -125,7 +125,10 @@ Pass `--prefer CLI` only when the parent named one. Give the Bash call a
 again rather than polling. Use the hand-chained form (`init`, write
 `verify-cmds.txt` and `scope.txt`, `baseline`, `dispatch --background`, `wait`,
 `verify`) only when a step needs an edit in between, such as a `limits.txt` or
-`budget.txt` (see `## Task artifacts` in `$REF`).
+`budget.txt` (see `## Task artifacts` in `$REF`). When `bash "$SSA" help` does
+not list `run`, chain by hand: the baseline loop is `## Baseline` in `$REF`,
+and the wait is one blocking shell loop per Bash call that sleeps until
+`$DIR/outcome.json` exists or 590 s pass, never a `sleep` per tool call.
 
 Polling that costs a tool call each time is the failure mode. `bash "$SSA"
 wait --dir "$DIR" --timeout 590` blocks until the state changes. `status` is
