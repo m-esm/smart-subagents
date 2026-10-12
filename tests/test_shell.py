@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import unittest
 import uuid
@@ -105,6 +106,17 @@ def write_control(home: Path, exit_code: int = 0, session_id=None) -> None:
     if session_id is not None:
         payload["session_id"] = session_id
     (home / ".ssa-test-control.json").write_text(json.dumps(payload))
+
+
+def wait_for_bg_run_exit(task_dir: Path, seconds: int = 30) -> bool:
+    pattern = f"bg-run --dir {task_dir}"
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        found = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True)
+        if found.returncode != 0:
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def wait_for_background_dispatch(task_dir: Path, seconds: int = 60) -> str:
@@ -1103,7 +1115,10 @@ class WatchdogTests(unittest.TestCase):
                 time.sleep(0.1)
             else:
                 self.fail("background worker never wrote exit-code.txt\n" + err + out)
-            time.sleep(3.5)
+            self.assertTrue(
+                wait_for_bg_run_exit(task_dir),
+                "bg-run wrapper still alive after 30s",
+            )
             bg = ""
             if (task_dir / "bg.log").exists():
                 bg = (task_dir / "bg.log").read_text()
@@ -1112,6 +1127,61 @@ class WatchdogTests(unittest.TestCase):
                 "watchdog stalled a finished dispatch:\n" + bg,
             )
             self.assertNotIn("illegal transition", bg)
+
+    def _run_watchdog_against(self, te, worker_pid, leader_secs, stall_secs="1"):
+        repo = make_git_repo(te.root / "repo")
+        task_dir = make_task_dir(te.work_dir, repo)
+        (task_dir / "stdout.log").write_text("static\n")
+        (task_dir / "worker.pid").write_text(f"{worker_pid}\n")
+        (task_dir / "started-at.txt").write_text("now\n")
+        library = te.root / "smart-subagents-library.sh"
+        library.write_text(SSA_SH.read_text().rsplit('\nmain "$@"', 1)[0] + "\n")
+        command = r'''
+source "$1"
+sleep "$3" &
+leader=$!
+_watchdog "$2" "$leader"
+kill "$leader" 2>/dev/null || true
+wait "$leader" 2>/dev/null || true
+'''
+        env = dict(te.env)
+        env["SSA_STALL_SECS"] = stall_secs
+        env["SSA_WATCHDOG_INTERVAL_SECS"] = "1"
+        proc = subprocess.run(
+            ["bash", "-c", command, "test-watchdog", str(library), str(task_dir), str(leader_secs)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        return task_dir, proc
+
+    def test_watchdog_does_not_stall_a_quiet_log_once_the_worker_is_gone(self):
+        with temp_env() as te:
+            gone = subprocess.Popen(["sleep", "0"])
+            gone.wait()
+            task_dir, proc = self._run_watchdog_against(te, gone.pid, leader_secs=5)
+            self.assertFalse(
+                (task_dir / "stalled.txt").exists(),
+                "watchdog stalled with a dead worker:\n" + proc.stderr + proc.stdout,
+            )
+
+    def test_watchdog_still_stalls_a_quiet_log_while_the_worker_lives(self):
+        with temp_env() as te:
+            worker = subprocess.Popen(["sleep", "60"], start_new_session=True)
+            reaper = threading.Thread(target=worker.wait, daemon=True)
+            reaper.start()
+            try:
+                task_dir, proc = self._run_watchdog_against(te, worker.pid, leader_secs=30)
+                self.assertTrue(
+                    (task_dir / "stalled.txt").exists(),
+                    "watchdog never stalled a silent live worker:\n" + proc.stderr + proc.stdout,
+                )
+                self.assertIn("stalled after", (task_dir / "stalled.txt").read_text())
+                self.assertIsNotNone(worker.wait(timeout=20))
+            finally:
+                if worker.poll() is None:
+                    worker.kill()
 
 
 class LogDigestTests(unittest.TestCase):
