@@ -1463,6 +1463,10 @@ _watchdog_should_exit() {
   (( ec >= started ))
 }
 
+_watchdog_worker_alive() {
+  [[ "$(_worker_state "$1")" == "running" ]]
+}
+
 _watchdog() {
   # Stall detection is two signals, not one: a worker that is thinking still
   # writes to the log, and a worker that is editing still moves the tree.
@@ -1487,7 +1491,7 @@ _watchdog() {
     if [[ -n "$wt" && -d "$wt" ]]; then
       fp="$(git -C "$wt" status --porcelain 2>/dev/null | cksum || true)"
     fi
-    if [[ "$sz" == "$last_sz" && "$fp" == "$last_fp" ]]; then
+    if [[ "$sz" == "$last_sz" && "$fp" == "$last_fp" ]] && _watchdog_worker_alive "$dir"; then
       idle=$(( idle + interval ))
     else
       idle=0

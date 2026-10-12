@@ -2,6 +2,15 @@
 
 ## 0.4.7
 
+- The background watchdog counts idle time only while the worker process is
+  alive. Its stall signal was a static `stdout.log` plus an unchanged tree,
+  which also describes the supervisor's own bookkeeping between the worker's
+  exit and `exit-code.txt` (session scrape, failure class, effort-used,
+  model-used, four python starts). Under load that window outlasted a short
+  `SSA_STALL_SECS` and the watchdog stamped a finished run as stalled.
+  `tests.test_shell.WatchdogTests` now waits for the bg-run wrapper to exit
+  instead of sleeping a fixed 3.5 s, and two direct `_watchdog` tests pin the
+  rule: a dead worker pid never stalls, a silent live one still does.
 - `baseline --dir DIR` runs every line of `DIR/verify-cmds.txt` in the
   worktree named by `DIR/wt.txt`, appends each command's output to
   `DIR/baseline.log` and writes `exit<TAB>command` to
