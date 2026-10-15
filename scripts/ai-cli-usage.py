@@ -493,6 +493,26 @@ def _claude_header_usage(access: str) -> tuple[int, dict]:
 # ---------------------------------------------------------------------------
 
 
+def _refresh_claude_creds() -> Optional[dict]:
+    if os.environ.get("AI_CLI_USAGE_REFRESHING"):
+        return None
+    binary = shutil.which("claude") or str(Path.home() / ".local/bin/claude")
+    if not Path(binary).exists():
+        return None
+    try:
+        subprocess.run(
+            [binary, "-p", "ping", "--model", "haiku"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=90,
+            env={**os.environ, "AI_CLI_USAGE_REFRESHING": "1"},
+        )
+    except Exception:
+        return None
+    return _keychain_claude_creds() or _file_claude_creds()
+
+
 def check_claude() -> CliStatus:
     st = CliStatus(cli="claude", available=False)
     creds = _keychain_claude_creds() or _file_claude_creds() or _env_claude_creds()
@@ -521,8 +541,14 @@ def check_claude() -> CliStatus:
     st.extras["rate_limit_tier"] = oauth.get("rateLimitTier")
     exp = oauth.get("expiresAt")
     if exp and exp < int(_now() * 1000):
-        st.error = "access token expired; re-login with `claude auth login`"
-        return st
+        creds = _refresh_claude_creds()
+        oauth = (creds or {}).get("claudeAiOauth") or oauth
+        access = oauth.get("accessToken") or ""
+        exp = oauth.get("expiresAt")
+        if exp and exp < int(_now() * 1000):
+            st.error = "access token expired and `claude` did not refresh it; re-login with `claude auth login`"
+            st.skip_reason = "claude access token expired"
+            return st
 
     code, data = _http_json(
         "https://api.anthropic.com/api/oauth/usage",
