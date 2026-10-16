@@ -248,13 +248,15 @@ def serve(
     label: str = "cerebras-proxy",
     trace: str = "",
     heartbeat: float = HEARTBEAT_SECONDS,
+    port: int = 0,
+    bind_host: str = "127.0.0.1",
 ) -> int:
     key = read_key(key_file, key_name)
     if not key:
         sys.stderr.write("%s: no %s in the environment or %s\n" % (label, key_name, key_file))
         return 2
     handler = make_handler(upstream, key, strip, label, trace, heartbeat)
-    server = LoopbackServer(("127.0.0.1", 0), handler)
+    server = LoopbackServer((bind_host, port), handler)
     bound = server.server_address[1]
     tmp = port_file + ".tmp"
     with open(tmp, "w") as fh:
@@ -284,6 +286,8 @@ def main(argv=None) -> int:
     ap.add_argument(
         "--no-strip", action="store_true", help="forward echoed reasoning fields untouched"
     )
+    ap.add_argument("--port", type=int, default=0, help="fixed port instead of an ephemeral one (sidecar use)")
+    ap.add_argument("--bind-host", default="127.0.0.1", help="interface to bind; stays loopback unless told otherwise")
     ap.add_argument("--label", default="cerebras-proxy", help="prefix of the per-request log line")
     ap.add_argument("--trace", default="", help="append one line per forwarded chunk to this file")
     ap.add_argument(
@@ -296,7 +300,7 @@ def main(argv=None) -> int:
     strip = () if args.no_strip else STRIP_FIELDS
     return serve(
         args.port_file, args.upstream, args.key_file, args.key_name, strip, args.label,
-        args.trace, args.heartbeat,
+        args.trace, args.heartbeat, args.port, args.bind_host,
     )
 
 
