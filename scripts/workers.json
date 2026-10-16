@@ -4,7 +4,7 @@
   "workers": {
     "cerebras": {
       "display_name": "opencode on Cerebras",
-      "_note": "opencode driven through scripts/opencode-cerebras: a local proxy (ssa/cerebras_proxy.py) strips the reasoning echo Cerebras rejects and injects the key from ~/.config/cerebras/env, and on macOS sandbox-exec confines writes to the worktree (hence sandbox: workspace). Two models on the current key: gpt-oss-120b (default) and qwen-3.8-27b. default_for makes it the primary for trivial work whenever its day window has quota; routine ranks by headroom since it declined every multi-file brief in the ledger (31% pass over 13 tasks); --prefer still wins.",
+      "_note": "opencode driven through scripts/opencode-cerebras: a local proxy (ssa/cerebras_proxy.py) strips the reasoning echo Cerebras rejects and injects the key from ~/.config/cerebras/env, and on macOS sandbox-exec confines writes to the worktree (hence sandbox: workspace). Two models on the current key: gpt-oss-120b (default) and qwen-3.8-27b. default_for makes it the primary for trivial and routine work whenever its day window has quota (operator decision 2026-10-17: the account is paid, the key serves gpt-oss-120b at 500k tokens/min and the models are fast and cheap, so routine goes here first and the learned fit demotes it again only on evidence). It declined every multi-file brief in the 2026-10-06 ledger (31% pass over 13 tasks), so watch the next ten routine outcomes. --prefer still wins.",
       "binary": {
         "env": "CEREBRAS_WORKER_BIN",
         "candidates": [
@@ -27,7 +27,8 @@
       },
       "default_for": {
         "difficulty": [
-          "trivial"
+          "trivial",
+          "routine"
         ]
       },
       "prompt": {
